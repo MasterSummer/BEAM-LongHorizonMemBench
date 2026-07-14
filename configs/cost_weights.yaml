@@ -1,0 +1,83 @@
+# =============================================================================
+# cost_weights.yaml — declared cost conversion sheet + scalarization weights
+# =============================================================================
+#
+# Consumed by `lhmsb.cost.load_cost_config()` and passed to
+# `lhmsb.cost.scalarize(cost_vector, weights, conversion)`.
+#
+# The benchmark records a FULL CostVector per (episode x condition) and ALWAYS
+# retains it (see spec/02-metrics.md §1.3). It is collapsed to a single
+# **tokens-equivalent** scalar ONLY inside `scalarize()`, using this sheet, to
+# form the denominator of the headline Memory ROI metric.
+#
+# Every scorecard MUST print the weights + conversion factors in force, because
+# the scalar cost (and therefore ROI) is only meaningful relative to this
+# declared sheet. Changing these numbers changes ROI; pin them per run.
+#
+# -----------------------------------------------------------------------------
+# What is COUNTED in the CostVector (and thus scalarized here):
+#   - agent_input_tokens / agent_output_tokens   (agent-loop LLM)
+#   - mem_internal_in_tokens / mem_internal_out_tokens
+#         (memory system's INTERNAL LLM: Mem0 extraction, Cognee cognify,
+#          Graphiti entity extraction, Letta block self-edits, etc.)
+#   - embedding_tokens / embedding_calls          (vector-store embeddings)
+#   - reflection_tokens                           (reflect()/consolidation)
+#   - storage_bytes                               (backend storage)
+#   - retrieval_latency_ms / write_latency_ms / update_latency_ms
+#   - num_retrieval_calls
+#
+# What is EXCLUDED (NEVER part of system cost; see spec/05-systems.md §4.3):
+#   - one-time dataset-generation tokens
+#   - LLM-judge tokens
+#   - surface-rendering tokens (frozen render cache)
+#   - LangGraph/harness framework overhead
+#   These run under `CostMeter.excluded_scope(...)` and are tracked separately
+#   for auditing, but they do not enter the CostVector or the ROI.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# weights: per-field multipliers on the TOKEN components of the CostVector.
+# Default 1.0 everywhere => a pure token sum (1 token = 1 token-equivalent).
+# Raise agent_output_tokens / mem_internal_out_tokens above input weights to
+# model the real-world price asymmetry (generated tokens cost more than prompt
+# tokens). Kept at 1.0 in v1 for an unbiased, easily-auditable baseline.
+# -----------------------------------------------------------------------------
+weights:
+  agent_input_tokens: 1.0
+  agent_output_tokens: 1.0
+  mem_internal_in_tokens: 1.0
+  mem_internal_out_tokens: 1.0
+  embedding_tokens: 1.0
+  reflection_tokens: 1.0
+
+# -----------------------------------------------------------------------------
+# conversion: turn non-token cost units into token-equivalents.
+#
+#   ms_to_token_equiv : token-equivalents per 1 ms of latency
+#                       (retrieval_latency_ms + write_latency_ms + update_latency_ms).
+#                       1 ms = 0.1 token-equiv  (=> 10 ms ~ 1 token).
+#
+#   kb_to_token_equiv : token-equivalents per 1 KiB of storage
+#                       (storage_bytes / 1024).
+#                       1 KB = 0.01 token-equiv (=> 100 KB ~ 1 token).
+#
+#   per_embedding_call_token_equiv : flat surcharge per embedding API call.
+#                       Default 0.0 — embedding *tokens* already carry the cost;
+#                       set > 0 only to penalize call-count (rate-limit) overhead.
+#
+#   per_retrieval_call_token_equiv : flat surcharge per search() call.
+#                       Default 0.0 — retrieval cost is captured by latency +
+#                       any internal LLM/embedding tokens.
+#
+# Worked example (matches tests/test_cost.py::TestScalarize):
+#   tokens   = 1000+500+300+200+400+100                = 2500
+#   latency  = 0.1  * (50 + 30 + 20) ms                =   10.0
+#   storage  = 0.01 * (2048 / 1024) KB                 =    0.02
+#   calls    = 0.0  * 10  +  0.0 * 5                    =    0.0
+#   total tokens-equivalent                            = 2510.02
+# -----------------------------------------------------------------------------
+conversion:
+  ms_to_token_equiv: 0.1
+  kb_to_token_equiv: 0.01
+  per_embedding_call_token_equiv: 0.0
+  per_retrieval_call_token_equiv: 0.0
