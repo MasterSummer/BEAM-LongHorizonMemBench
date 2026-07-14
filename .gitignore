@@ -1,0 +1,49 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Package build artifacts
+*.egg-info/
+*.egg
+build/
+dist/
+*.whl
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local pilot/run outputs and downloaded data
+runs/
+longds_full_conversion/
+*.parquet
+*.parquet.*
+*.sqlite
+*.sqlite-*
+*.partial
+*.incomplete
+
+# Local assistant/editor state
+.codegraph
+.codex/
+configs/.omo/
+.obsidian/

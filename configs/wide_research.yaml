@@ -1,0 +1,26 @@
+# First external-data slice: AutoResearchBench Wide Research.
+# Pass the decrypted JSONL with --wide-input; the pilot freezes it under the run.
+agent_model: StateDiffRWKV-2.9B/profile-3784df77c1543293
+agent_provider: statediffrwkv
+agent_base_url: http://127.0.0.1:7860
+agent_api_key_env: ""
+agent_result_root: /Users/yiding/code/DiffRWKV-2.9B/StateDiffRWKV-Parallel
+agent_max_new_tokens: 96
+agent_temperature: 0.0
+agent_timeout_seconds: 900
+agent_poll_interval_seconds: 0.25
+agent_steps: 2
+agent_seed: 42
+agent_precision: bf16
+agent_memory_limit_gb: 12
+judge_model: lordx64/Qwable-v1
+judge_revision: "0000000000000000000000000000000000000000"
+rubric_path: configs/judge_rubric.md
+cost_weights_path: configs/cost_weights.yaml
+seeds: [7]
+n_episodes: 1
+context_budget: 2048
+max_workers: 1
+track: native
+families: [research_wide]
+conditions: [no_mem, mem, wrong_mem]

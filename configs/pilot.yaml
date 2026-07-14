@@ -1,0 +1,57 @@
+# =============================================================================
+# pilot.yaml — pinned, reproducible pilot-run configuration
+# =============================================================================
+#
+# Consumed by `python -m lhmsb.pilot --config configs/pilot.yaml --out <dir>`.
+# Everything that affects a run's numbers is pinned HERE (never hard-coded in
+# src/lhmsb/pilot.py): the agent + judge model identifiers, the judge revision,
+# the rubric, the cost conversion sheet, the seeds, scale, track, families, and
+# the leaderboard conditions. The pilot records all of these (plus git SHA,
+# config hash, dataset checksums, and an environment snapshot) into a
+# `run_manifest.json` next to the outputs so any run is fully reconstructible.
+#
+# Outputs are written under `<out>/<track>/` so the native and controlled tracks
+# NEVER share a directory (spec/03-protocol.md §3). Run native first (the
+# default), then re-run with `--track controlled` for the controlled sub-study.
+# =============================================================================
+
+# --- Pinned models -----------------------------------------------------------
+# agent_model: the pinned agent identifier. Smoke mode explicitly injects the
+# deterministic stub. Full runs must also configure agent_provider and its endpoint.
+agent_model: stub/deterministic
+agent_provider: unconfigured
+
+# judge_model / judge_revision: the sparse boundary judge, pinned by a
+# revision/commit hash for reproducibility. The 40-hex placeholder below MUST be
+# replaced with the real pinned commit SHA before any live run
+# (LHMSB_LIVE_JUDGE=1); the placeholder keeps the offline pilot + tests runnable.
+# The pin guard refuses to run if judge_revision is empty/missing.
+judge_model: lordx64/Qwable-v1
+judge_revision: "0000000000000000000000000000000000000000"
+
+# rubric_path: the fixed, versioned judge rubric (also carries the model-pin
+# metadata comments). cost_weights_path: the declared cost conversion sheet used
+# to scalarize the CostVector into the Memory ROI denominator.
+rubric_path: configs/judge_rubric.md
+cost_weights_path: configs/cost_weights.yaml
+
+# --- Experiment scale (fully parameterized; same code scales up later) -------
+# seeds: counterfactual replay seeds. n_episodes: episodes per seed per family.
+# Pilot default ~20 episodes/family across >=3 seeds (predeclared for stats).
+# --smoke overrides these to a single seed + 1 episode/family for a fast,
+# offline, deterministic CI run.
+seeds: [7, 13, 23]
+n_episodes: 20
+context_budget: 2048
+max_workers: 4
+
+# --- Track + families + conditions -------------------------------------------
+# track: "native" (primary leaderboard) by default; re-run with
+# `--track controlled` for the controlled sub-study (separate output dir).
+track: native
+families: [research, software]
+
+# conditions: the six leaderboard conditions for a full run. --smoke ignores this
+# and uses only the four offline conditions (no_memory, chroma, fake_perfect,
+# fake_bad) so it needs no live backend or paid API.
+conditions: [no_memory, chroma, mem0, letta, graphiti, cognee]
