@@ -1,0 +1,6 @@
+schema_version: 1
+experiment_id: software-vertical-offline-pilot
+conditions:
+  workspace_only: [null]
+  oracle_current_state: [null]
+  fake_native: [null, P2, C1, U1]
