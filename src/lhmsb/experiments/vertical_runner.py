@@ -296,6 +296,27 @@ def aggregate_vertical_run(run_dir: Path) -> VerticalAggregate:
     return aggregate
 
 
+def run_vertical_matrix(
+    dataset: Path,
+    config_path: Path,
+    run_dir: Path,
+    *,
+    allow_dirty: bool = False,
+    force: bool = False,
+) -> VerticalAggregate:
+    """Plan, execute every atomic task sequentially, and aggregate the run."""
+    manifest = plan_vertical_run(
+        dataset,
+        config_path,
+        run_dir,
+        allow_dirty=allow_dirty,
+        force=force,
+    )
+    for task_index in range(manifest.task_count):
+        run_vertical_task(run_dir, task_index)
+    return aggregate_vertical_run(run_dir)
+
+
 def _prepare_run_directory(
     run_dir: Path,
     *,
@@ -859,5 +880,6 @@ __all__ = [
     "current_git_snapshot",
     "plan_vertical_run",
     "read_vertical_tasks",
+    "run_vertical_matrix",
     "run_vertical_task",
 ]

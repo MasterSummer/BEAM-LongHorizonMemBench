@@ -17,6 +17,7 @@ from lhmsb.experiments.vertical_runner import (
     current_git_snapshot,
     plan_vertical_run,
     read_vertical_tasks,
+    run_vertical_matrix,
     run_vertical_task,
 )
 
@@ -35,5 +36,6 @@ __all__ = [
     "load_vertical_offline_config",
     "plan_vertical_run",
     "read_vertical_tasks",
+    "run_vertical_matrix",
     "run_vertical_task",
 ]
