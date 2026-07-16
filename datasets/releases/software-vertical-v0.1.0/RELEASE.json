@@ -1,0 +1,19 @@
+{
+  "release": "software-vertical-v0.1.0",
+  "created_at_utc": "2026-07-16T06:38:07Z",
+  "code_branch": "feat/software-vertical",
+  "code_commit": "6b4edbf108336dba945dbff7825c59fea447ec60",
+  "dataset_directory": "software_v1",
+  "dataset_archive": "software_v1-6b4edbf.tar.gz",
+  "dataset_archive_sha256": "c1b35c1a554c2ad8d1e1f895a563a6bc5a67979b54b8857ce287468c2efe8130",
+  "dataset_manifest_sha256": "4cb19e723679cb624307e9ef4861cbec8d0d091b82761f78f1f3904d9d2ae3d5",
+  "schema_version": 1,
+  "generator_version": "software-project-vertical-0.1",
+  "semantic_seeds": [42],
+  "trajectory_seeds": [42],
+  "n_episodes": 1,
+  "n_sessions": 16,
+  "plan_hash": "a6875eded47d95c259be6b37ec4e965f1a4a5d3faf300d7051afb46a547a18f5",
+  "surface_hash": "c814570a27f95757c0996c1c4fcd7f1333784248a2360602cd9efb4f3b7798de",
+  "workspace_hash": "fabb0e8a1321acf1e2021833cd5a60a795821fcdf48fd3e6a946c7f2c9fab951"
+}

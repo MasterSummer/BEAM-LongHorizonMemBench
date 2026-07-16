@@ -50,7 +50,19 @@ chroma = [
 # Mem0 hybrid-memory adapter (lhmsb.adapters.mem0_adapter): imported lazily, so not
 # required for mocked tests; live test (LHMSB_LIVE_MEM0=1) needs mem0ai + API keys.
 mem0 = [
-    "mem0ai",
+    "mem0ai==2.0.12",
+]
+# Server qualification runtime. Provider and service clients remain lazily imported,
+# so the default development environment stays lightweight.
+qualification = [
+    "anthropic>=0.64,<1",
+    "duckdb>=1.3,<2",
+    "httpx>=0.27,<1",
+    "mem0ai==2.0.12",
+    "openai>=1.100,<3",
+    "pandas>=2.2,<3",
+    "pyarrow>=19,<22",
+    "qdrant-client>=1.15,<2",
 ]
 # Graphiti/Zep temporal-KG adapter (lhmsb.adapters.graphiti_adapter): imported lazily,
 # so not required for mocked tests; live test (LHMSB_LIVE_GRAPHITI=1) needs a graph DB.
