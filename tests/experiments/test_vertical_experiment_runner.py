@@ -1,3 +1,5 @@
+"""Tests for immutable vertical experiment planning, execution, and aggregation."""
+
 from __future__ import annotations
 
 import json
