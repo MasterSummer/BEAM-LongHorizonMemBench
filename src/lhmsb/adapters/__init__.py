@@ -23,6 +23,10 @@ from lhmsb.adapters.fakes import (
     GroundTruthFact,
     WrongMemoryAdapter,
 )
+from lhmsb.adapters.mem0_qualification import (
+    Mem0QualificationAdapter,
+    Mem0QualificationError,
+)
 from lhmsb.adapters.no_memory import NoMemoryAdapter
 from lhmsb.adapters.vertical_stub import StubTraceEvent, VerticalStubAdapter
 
@@ -34,6 +38,8 @@ __all__ = [
     "GroundTruthFact",
     "WrongMemoryAdapter",
     "MemorySystemAdapter",
+    "Mem0QualificationAdapter",
+    "Mem0QualificationError",
     "NoMemoryAdapter",
     "ReflectionCapability",
     "SessionCapability",
