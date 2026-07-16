@@ -97,7 +97,7 @@ services:
       - backend
 
   worker:
-    image: "${LHMSB_WORKER_IMAGE:-lhmsb-mem0-worker}@${LHMSB_WORKER_IMAGE_DIGEST:?set LHMSB_WORKER_IMAGE_DIGEST}"
+    image: "${LHMSB_WORKER_IMAGE_DIGEST:?set LHMSB_WORKER_IMAGE_DIGEST}"
     init: true
     depends_on:
       qdrant:

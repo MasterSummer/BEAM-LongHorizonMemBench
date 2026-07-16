@@ -34,6 +34,7 @@ Thumbs.db
 
 # Local pilot/run outputs and downloaded data
 runs/
+.env
 longds_full_conversion/
 *.parquet
 *.parquet.*
