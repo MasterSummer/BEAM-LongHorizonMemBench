@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -35,6 +35,7 @@ from lhmsb.qualification.runner import (
     TaskIsolation,
     hash_text,
     policy_request_hash,
+    qualification_task_result_from_dict,
     run_qualification_matrix,
     run_qualification_task,
 )
@@ -491,6 +492,28 @@ def test_completed_cells_resume_without_external_calls(tmp_path: Path) -> None:
         factory.memory_search_calls,
         len(factory.rerank_calls),
     )
+
+
+def test_task_result_has_a_portable_lossless_json_round_trip(
+    tmp_path: Path,
+) -> None:
+    spec, tasks = _fixture()
+    task = next(task for task in tasks if task.condition == "mem0_controlled")
+    factory = FakeFactory(spec)
+    storage = QualificationStorage(tmp_path / "run", run_identity="run-identity")
+    result = run_qualification_task(
+        task,
+        spec,
+        components=factory(
+            task,
+            TaskIsolation.for_task(task, storage.task_directory(task)),
+        ),
+        storage=storage,
+    )
+
+    restored = qualification_task_result_from_dict(asdict(result))
+
+    assert restored == result
 
 
 def test_reranker_failure_does_not_invalidate_native_readout(

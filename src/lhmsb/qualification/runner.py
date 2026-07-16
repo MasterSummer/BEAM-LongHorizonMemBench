@@ -22,6 +22,7 @@ from lhmsb.adapters.mem0_qualification import (
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.families.software.vertical_checker import BehaviorResult
 from lhmsb.longhorizon.attribution import (
+    AttributionMethod,
     FactSignature,
     MemoryAttribution,
     attribute_memory,
@@ -32,8 +33,11 @@ from lhmsb.longhorizon.drift import (
     classify_long_horizon_drift,
 )
 from lhmsb.longhorizon.interventions import (
+    CausalUseLabel,
     CausalUseResult,
     ContinuationOutcome,
+    EffectDirection,
+    InterventionKind,
     MemoryRole,
     classify_causal_use,
 )
@@ -260,6 +264,37 @@ class QualificationTaskResult:
 class QualificationMatrixResult:
     run_identity: str
     task_results: tuple[QualificationTaskResult, ...]
+
+
+def qualification_task_result_from_dict(
+    data: Mapping[str, object],
+) -> QualificationTaskResult:
+    """Restore one portable task result written with ``dataclasses.asdict``."""
+    return QualificationTaskResult(
+        task_id=str(data["task_id"]),
+        episode_id=str(data["episode_id"]),
+        policy_profile_id=str(data["policy_profile_id"]),
+        condition=str(data["condition"]),
+        status=cast(RunStatus, str(data["status"])),
+        condition_results=tuple(
+            _condition_run_result_from_dict(item)
+            for item in _mapping_sequence(data.get("condition_results"))
+        ),
+        writes=tuple(
+            _write_result_from_dict(item)
+            for item in _mapping_sequence(data.get("writes"))
+        ),
+        alignments=tuple(
+            _alignment_from_dict(item)
+            for item in _mapping_sequence(data.get("alignments"))
+        ),
+        retrieval_traces=tuple(
+            _retrieval_trace_from_dict(item)
+            for item in _mapping_sequence(data.get("retrieval_traces"))
+        ),
+        error_class=_optional_string(data.get("error_class")),
+        error_message=_optional_string(data.get("error_message")),
+    )
 
 
 def hash_text(value: str) -> str:
@@ -1475,6 +1510,231 @@ def _outcome_from_dict(data: Mapping[str, object]) -> ContinuationOutcome:
     )
 
 
+def _condition_run_result_from_dict(
+    data: Mapping[str, object],
+) -> ConditionRunResult:
+    return ConditionRunResult(
+        result_id=str(data["result_id"]),
+        condition=str(data["condition"]),
+        readout=cast(
+            Literal["none", "native", "common_rerank"],
+            str(data["readout"]),
+        ),
+        status=cast(ConditionStatus, str(data["status"])),
+        sceu_results=tuple(
+            _sceu_run_result_from_dict(item)
+            for item in _mapping_sequence(data.get("sceu_results"))
+        ),
+        error_class=_optional_string(data.get("error_class")),
+        error_message=_optional_string(data.get("error_message")),
+    )
+
+
+def _sceu_run_result_from_dict(
+    data: Mapping[str, object],
+) -> SCEURunResult:
+    return SCEURunResult(
+        result_id=str(data["result_id"]),
+        sceu_id=str(data["sceu_id"]),
+        opportunity_id=str(data["opportunity_id"]),
+        checkpoint_session=_integer(data.get("checkpoint_session")),
+        matched_group=str(data.get("matched_group", "")),
+        control_kind=str(data.get("control_kind", "")),
+        workspace_hash=str(data.get("workspace_hash", "")),
+        candidate_memory_ids=_string_tuple(data.get("candidate_memory_ids")),
+        retrieved_memory_ids=_string_tuple(data.get("retrieved_memory_ids")),
+        model_visible_memory_ids=_string_tuple(
+            data.get("model_visible_memory_ids")
+        ),
+        selected_option_id=str(data.get("selected_option_id", "")),
+        selected_action_id=str(data.get("selected_action_id", "")),
+        behavior=_outcome_from_dict(
+            _mapping(data.get("behavior"), "SCEU behavior")
+        ),
+        normalized_drift_flags=_string_tuple(
+            data.get("normalized_drift_flags")
+        ),
+        baseline_stable=bool(data.get("baseline_stable", False)),
+        baseline_evaluations=tuple(
+            _policy_evaluation_from_dict(item)
+            for item in _mapping_sequence(
+                data.get("baseline_evaluations")
+            )
+        ),
+        interventions=tuple(
+            _intervention_run_from_dict(item)
+            for item in _mapping_sequence(data.get("interventions"))
+        ),
+        retrieval_trace_id=_optional_string(
+            data.get("retrieval_trace_id")
+        ),
+    )
+
+
+def _policy_evaluation_from_dict(
+    data: Mapping[str, object],
+) -> PolicyEvaluation:
+    return PolicyEvaluation(
+        call_id=str(data["call_id"]),
+        call_kind=str(data["call_kind"]),
+        request=_policy_request_from_dict(
+            _mapping(data.get("request"), "policy request")
+        ),
+        response=_policy_response_from_dict(
+            _mapping(data.get("response"), "policy response")
+        ),
+        selected_action_id=str(data["selected_action_id"]),
+        checker_result=_behavior_result_from_dict(
+            _mapping(data.get("checker_result"), "checker result")
+        ),
+        outcome=_outcome_from_dict(
+            _mapping(data.get("outcome"), "policy outcome")
+        ),
+        normalized_drift_flags=_string_tuple(
+            data.get("normalized_drift_flags")
+        ),
+        workspace_hash=str(data.get("workspace_hash", "")),
+        transcript_hash=str(data.get("transcript_hash", "")),
+        policy_request_hash=str(data.get("policy_request_hash", "")),
+        model_visible_memory_ids=_string_tuple(
+            data.get("model_visible_memory_ids")
+        ),
+        model_visible_blocks=_string_tuple(
+            data.get("model_visible_blocks")
+        ),
+        model_visible_context_hash=str(
+            data.get("model_visible_context_hash", "")
+        ),
+    )
+
+
+def _intervention_run_from_dict(
+    data: Mapping[str, object],
+) -> InterventionRun:
+    evaluations = tuple(
+        _policy_evaluation_from_dict(item)
+        for item in _mapping_sequence(data.get("evaluations"))
+    )
+    if len(evaluations) != 2:
+        raise QualificationStorageError(
+            "trace_incomplete",
+            "intervention result must contain exactly two evaluations",
+        )
+    classification_data = _mapping(
+        data.get("classification"),
+        "intervention classification",
+    )
+    return InterventionRun(
+        intervention_kind=str(data["intervention_kind"]),
+        target_memory_id=str(data["target_memory_id"]),
+        replacement_memory_id=_optional_string(
+            data.get("replacement_memory_id")
+        ),
+        evaluations=(evaluations[0], evaluations[1]),
+        classification=CausalUseResult(
+            memory_id=str(classification_data["memory_id"]),
+            intervention_kind=cast(
+                InterventionKind,
+                str(classification_data["intervention_kind"]),
+            ),
+            memory_role=cast(
+                MemoryRole,
+                str(classification_data["memory_role"]),
+            ),
+            label=cast(
+                CausalUseLabel,
+                str(classification_data["label"]),
+            ),
+            effect_direction=cast(
+                EffectDirection,
+                str(classification_data["effect_direction"]),
+            ),
+            behaviorally_used=bool(
+                classification_data.get("behaviorally_used", False)
+            ),
+            baseline_stable=bool(
+                classification_data.get("baseline_stable", False)
+            ),
+            intervention_stable=bool(
+                classification_data.get("intervention_stable", False)
+            ),
+            action_changed=bool(
+                classification_data.get("action_changed", False)
+            ),
+            checker_changed=bool(
+                classification_data.get("checker_changed", False)
+            ),
+        ),
+    )
+
+
+def _alignment_from_dict(
+    data: Mapping[str, object],
+) -> MemoryAlignmentSnapshot:
+    return MemoryAlignmentSnapshot(
+        checkpoint_session=_integer(data.get("checkpoint_session")),
+        inventory_store_hash=str(data.get("inventory_store_hash", "")),
+        attributions=tuple(
+            MemoryAttribution(
+                memory_id=str(item["memory_id"]),
+                state_ids=_string_tuple(item.get("state_ids")),
+                method=cast(
+                    AttributionMethod,
+                    str(item["method"]),
+                ),
+                contributes_positive_coverage=bool(
+                    item.get("contributes_positive_coverage", False)
+                ),
+                reason=str(item.get("reason", "")),
+            )
+            for item in _mapping_sequence(data.get("attributions"))
+        ),
+    )
+
+
+def _retrieval_trace_from_dict(
+    data: Mapping[str, object],
+) -> RetrievalTrace:
+    candidate_search = _candidate_search_from_dict(
+        {
+            **data,
+            "latency_seconds": data.get("search_latency_seconds"),
+        }
+    )
+    rerank_data = data.get("rerank_result")
+    return RetrievalTrace(
+        trace_id=str(data["trace_id"]),
+        sceu_id=str(data["sceu_id"]),
+        opportunity_id=str(data["opportunity_id"]),
+        checkpoint_session=_integer(data.get("checkpoint_session")),
+        query=str(data.get("query", "")),
+        query_hash=str(data.get("query_hash", "")),
+        candidates=candidate_search.candidates,
+        candidate_memory_ids=_string_tuple(
+            data.get("candidate_memory_ids")
+        ),
+        native_retrieved_memory_ids=_string_tuple(
+            data.get("native_retrieved_memory_ids")
+        ),
+        common_reranked_memory_ids=_string_tuple(
+            data.get("common_reranked_memory_ids")
+        ),
+        candidate_shortfall=bool(
+            data.get("candidate_shortfall", False)
+        ),
+        search_latency_seconds=_number(
+            data.get("search_latency_seconds")
+        ),
+        rerank_result=(
+            _rerank_result_from_dict(
+                _mapping(rerank_data, "rerank result")
+            )
+            if rerank_data is not None
+            else None
+        ),
+    )
+
+
 def _write_result_from_dict(data: Mapping[str, object]) -> WriteSessionResult:
     inventory_data = _mapping(data.get("inventory"), "write inventory")
     inventory = InventorySnapshot(
@@ -1691,6 +1951,7 @@ __all__ = [
     "TaskIsolation",
     "hash_text",
     "policy_request_hash",
+    "qualification_task_result_from_dict",
     "run_qualification_matrix",
     "run_qualification_task",
 ]
