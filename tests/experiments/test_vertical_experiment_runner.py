@@ -91,8 +91,15 @@ def test_plan_is_idempotent_and_binds_dataset_code_and_config(
     frozen_vertical: Path,
     offline_config: Path,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run_dir = tmp_path / "run"
+    snapshot = GitSnapshot(commit="a" * 40, dirty=True, ref="feature")
+    monkeypatch.setattr(
+        vertical_runner,
+        "current_git_snapshot",
+        lambda root=None: snapshot,
+    )
 
     first = plan_vertical_run(
         frozen_vertical,
@@ -114,8 +121,9 @@ def test_plan_is_idempotent_and_binds_dataset_code_and_config(
     assert first.task_count == 6
     assert first.dataset_manifest_sha256
     assert first.config_hash
-    assert first.code_commit
-    assert first.code_dirty
+    assert first.code_commit == snapshot.commit
+    assert first.code_dirty is snapshot.dirty
+    assert first.code_ref == snapshot.ref
     assert (run_dir / "run_manifest.json").read_bytes() == manifest_bytes
     assert (run_dir / "tasks.jsonl").read_bytes() == tasks_bytes
     assert (run_dir / "run_config.yaml").read_bytes() == config_bytes
