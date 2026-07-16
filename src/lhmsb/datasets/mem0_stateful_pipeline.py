@@ -17,6 +17,7 @@ from lhmsb.families.software.mem0_vertical import (
     SoftwareMem0VerticalFamily,
     SoftwareMem0VerticalSpec,
 )
+from lhmsb.longhorizon.attribution import build_software_fact_signatures
 from lhmsb.longhorizon.public_surface import SurfaceLeakPolicy, validate_public_payload
 from lhmsb.longhorizon.replay import plan_hash
 
@@ -291,6 +292,7 @@ def _write_stage(out: Path, generated: Sequence[Mem0StatefulGenerated]) -> None:
     episode_records: list[dict[str, object]] = []
     all_states: list[dict[str, object]] = []
     all_events: list[dict[str, object]] = []
+    all_signatures: list[dict[str, object]] = []
     all_sceu: list[dict[str, object]] = []
     mappings: list[dict[str, object]] = []
     dependencies: dict[str, list[str]] = {}
@@ -312,6 +314,13 @@ def _write_stage(out: Path, generated: Sequence[Mem0StatefulGenerated]) -> None:
         episode_records.append(record)
         all_states.extend(asdict(state) for state in plan.state_units)
         all_events.extend(asdict(event) for event in plan.events)
+        all_signatures.extend(
+            {
+                "episode_id": plan.episode_id,
+                **asdict(signature),
+            }
+            for signature in build_software_fact_signatures(plan)
+        )
         all_sceu.extend(asdict(sceu) for sceu in plan.sceu_units)
         mappings.extend(item.to_dict() for item in spec.evaluator_continuations)
         dependencies.update(
@@ -340,6 +349,7 @@ def _write_stage(out: Path, generated: Sequence[Mem0StatefulGenerated]) -> None:
     _write_jsonl(evaluator_root / "episodes.jsonl", episode_records)
     _write_jsonl(evaluator_root / "state_units.jsonl", all_states)
     _write_jsonl(evaluator_root / "state_events.jsonl", all_events)
+    _write_jsonl(evaluator_root / "fact_signatures.jsonl", all_signatures)
     _write_jsonl(evaluator_root / "sceu.jsonl", all_sceu)
     _write_jsonl(evaluator_root / "continuation_mappings.jsonl", mappings)
     _write_json(evaluator_root / "dependencies.json", dependencies)
@@ -372,6 +382,10 @@ def _evaluator_record(spec: SoftwareMem0VerticalSpec) -> dict[str, object]:
         "package_files": [list(pair) for pair in spec.package_files],
         "hidden_tests": [list(pair) for pair in spec.hidden_tests],
         "actions": [asdict(action) for action in spec.actions],
+        "fact_signatures": [
+            asdict(signature)
+            for signature in build_software_fact_signatures(spec.plan)
+        ],
         "evaluator_continuations": [
             continuation.to_dict() for continuation in spec.evaluator_continuations
         ],

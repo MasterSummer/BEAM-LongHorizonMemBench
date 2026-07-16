@@ -37,7 +37,27 @@ def test_generate_separates_public_and_evaluator_trees(tmp_path: Path) -> None:
     assert (stage / "public" / "software-mem0-42" / "continuation").is_dir()
     assert (stage / "evaluator" / "episodes.jsonl").is_file()
     assert (stage / "evaluator" / "state_units.jsonl").is_file()
+    assert (stage / "evaluator" / "fact_signatures.jsonl").is_file()
     assert (stage / "evaluator" / "continuation_mappings.jsonl").is_file()
+    signatures = [
+        json.loads(line)
+        for line in (stage / "evaluator" / "fact_signatures.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert {item["state_id"] for item in signatures} == {
+        "G0",
+        "C1",
+        "C2",
+        "P1",
+        "U1",
+        "P2",
+        "L1",
+        "V2",
+    }
+    c1 = next(item for item in signatures if item["state_id"] == "C1")
+    assert c1["source_sessions"] == [0]
+    assert c1["source_event_ids"] == ["e-01-offline"]
     public_text = "\n".join(path.read_text(encoding="utf-8") for path in _public_json_files(stage))
     for forbidden in (
         "source_event_ids",
