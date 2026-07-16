@@ -1,0 +1,10 @@
+profile_id: deepseek_v4_pro
+provider: deepseek
+model_id: deepseek-v4-pro
+api_key_env: DEEPSEEK_API_KEY
+endpoint: https://api.deepseek.com
+endpoint_override_env: DEEPSEEK_BASE_URL
+request_api: chat_completions
+timeout_seconds: 180
+max_retries: 2
+format_repair_attempts: 1

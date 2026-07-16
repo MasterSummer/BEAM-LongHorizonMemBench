@@ -1,0 +1,15 @@
+profile_id: mem0_native
+track: native
+package: mem0ai
+version: 2.0.12
+source_commit: 42cf18c4e6adb448e981aa1c7b55c1602b0cb670
+wheel_sha256: 6b7e1afa466f6e14dd34b5e9222c159a69fad38f8d787e73adbf91dbb29e73e2
+internal_llm_mode: explicit_native
+internal_llm_provider: openai
+internal_llm_model: gpt-5-mini
+embedding_provider: openai
+embedding_model: text-embedding-3-small
+vector_store: qdrant
+reranker_enabled: false
+prompt_source: mem0_builtin
+telemetry_enabled: false

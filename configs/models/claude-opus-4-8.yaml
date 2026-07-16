@@ -1,0 +1,10 @@
+profile_id: opus_4_8
+provider: anthropic
+model_id: claude-opus-4-8
+api_key_env: ANTHROPIC_API_KEY
+endpoint: https://api.anthropic.com
+endpoint_override_env: ANTHROPIC_BASE_URL
+request_api: messages
+timeout_seconds: 180
+max_retries: 2
+format_repair_attempts: 1
