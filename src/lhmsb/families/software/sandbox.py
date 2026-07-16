@@ -9,7 +9,10 @@ an isolated subprocess with hard limits (spec/04-datasets.md §2.1):
   - **no install**: ``PATH`` is cleared (no ``pip``/``git``/``curl`` binary) and
     ``PIP_NO_INDEX`` is set, so a package install cannot reach an index.
   - **time**: ``RLIMIT_CPU`` + a wall-clock ``timeout`` (default 30s).
-  - **memory**: ``RLIMIT_AS`` (default 256 MB).
+  - **memory**: ``RLIMIT_AS`` (default 256 MB) on Linux.  macOS does not
+    permit lowering ``RLIMIT_AS`` from an inherited unlimited limit in a
+    ``preexec_fn``; the portable fallback keeps CPU/file/network limits and
+    relies on the process boundary.
   - **output**: captured stdout/stderr truncated to ``output_limit_bytes`` (10 KB).
   - **file size**: ``RLIMIT_FSIZE`` caps any file the suite writes.
 
@@ -22,6 +25,7 @@ from __future__ import annotations
 
 import os
 import resource
+import site
 import subprocess
 import sys
 import time
@@ -106,13 +110,18 @@ def _coerce_text(value: object) -> str:
 
 
 def _make_limit_setter(mem_limit_mb: int, time_limit_s: int) -> Callable[[], None]:
-    """Build a ``preexec_fn`` that applies rlimits in the forked child (Linux)."""
+    """Build a portable ``preexec_fn`` for the forked sandbox child."""
 
     def _set_limits() -> None:
         cpu = max(1, time_limit_s)
         resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
-        mem = mem_limit_mb * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+        # On Darwin, lowering RLIMIT_AS from an inherited unlimited hard limit
+        # raises ``ValueError: current limit exceeds maximum limit``.  Skipping
+        # only this limit keeps the sandbox usable on the development platform;
+        # Linux CI still receives the hard address-space cap.
+        if sys.platform.startswith("linux"):
+            mem = mem_limit_mb * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
         resource.setrlimit(resource.RLIMIT_FSIZE, (_FSIZE_LIMIT_BYTES, _FSIZE_LIMIT_BYTES))
 
     return _set_limits
@@ -136,6 +145,12 @@ def _sandbox_env(work_dir: str) -> dict[str, str]:
     env["HOME"] = work_dir
     env["TMPDIR"] = work_dir
     env.pop("PYTHONPATH", None)
+    # The sandbox changes HOME to the temporary package directory.  On macOS
+    # pytest is commonly installed in the user's site-packages, which would
+    # otherwise disappear with that HOME change.  Re-add only interpreter
+    # installation directories (never the caller's project PYTHONPATH).
+    package_paths = [*site.getsitepackages(), site.getusersitepackages()]
+    env["PYTHONPATH"] = os.pathsep.join(path for path in package_paths if Path(path).is_dir())
     return env
 
 

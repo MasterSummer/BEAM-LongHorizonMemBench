@@ -15,6 +15,11 @@ from lhmsb.families.software.generator import (
     SoftwareSpec,
 )
 from lhmsb.families.software.sandbox import TestResult, run_tests_sandboxed
+from lhmsb.families.software.vertical import (
+    SoftwareVerticalFamily,
+    SoftwareVerticalSpec,
+    action_source_hash,
+)
 
 __all__ = [
     "RuleSet",
@@ -24,4 +29,7 @@ __all__ = [
     "SoftwareSpec",
     "TestResult",
     "run_tests_sandboxed",
+    "SoftwareVerticalFamily",
+    "SoftwareVerticalSpec",
+    "action_source_hash",
 ]

@@ -31,6 +31,19 @@ from lhmsb.datasets.pipeline import (
     regen_check,
     verify_dataset,
 )
+from lhmsb.datasets.stateful_pipeline import (
+    STATEFUL_GENERATOR_VERSION,
+    STATEFUL_SCHEMA_VERSION,
+    StatefulDatasetError,
+    StatefulGenerated,
+    StatefulManifest,
+    StatefulRegenReport,
+    StatefulVerifyReport,
+    freeze_stateful,
+    generate_stateful_to_staging,
+    regen_check_stateful,
+    verify_stateful,
+)
 
 __all__ = [
     "DatasetError",
@@ -45,4 +58,15 @@ __all__ = [
     "import_wide_research_to_staging",
     "regen_check",
     "verify_dataset",
+    "STATEFUL_GENERATOR_VERSION",
+    "STATEFUL_SCHEMA_VERSION",
+    "StatefulDatasetError",
+    "StatefulGenerated",
+    "StatefulManifest",
+    "StatefulRegenReport",
+    "StatefulVerifyReport",
+    "freeze_stateful",
+    "generate_stateful_to_staging",
+    "regen_check_stateful",
+    "verify_stateful",
 ]

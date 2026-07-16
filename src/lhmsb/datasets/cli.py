@@ -28,6 +28,15 @@ from lhmsb.datasets.pipeline import (
     regen_check,
     verify_dataset,
 )
+from lhmsb.datasets.stateful_pipeline import (
+    StatefulDatasetError,
+    StatefulRegenReport,
+    StatefulVerifyReport,
+    freeze_stateful,
+    generate_stateful_to_staging,
+    regen_check_stateful,
+    verify_stateful,
+)
 from lhmsb.families.research import (
     ArxivSearch,
     LocalArxivSearch,
@@ -46,6 +55,7 @@ _PROG = "python -m lhmsb.datasets"
 # Generation failures that should surface as a clean exit code (not a traceback).
 _GENERATION_ERRORS = (
     DatasetError,
+    StatefulDatasetError,
     RenderValidationError,
     RealEntityLeakError,
     ScheduleError,
@@ -160,10 +170,33 @@ def _build_parser() -> argparse.ArgumentParser:
     ver = sub.add_parser("verify", help="recompute checksums and assert manifest match")
     ver.add_argument("--frozen", required=True, type=Path, help="frozen dataset dir")
 
-    regen = sub.add_parser(
-        "regen-check", help="regenerate from seeds and assert identical hashes"
-    )
+    regen = sub.add_parser("regen-check", help="regenerate from seeds and assert identical hashes")
     regen.add_argument("--frozen", required=True, type=Path, help="frozen dataset dir")
+
+    stateful_gen = sub.add_parser(
+        "generate-stateful", help="build the offline state-first Software vertical staging tree"
+    )
+    stateful_gen.add_argument("--family", required=True, choices=["software"])
+    stateful_gen.add_argument("--seeds", required=True, nargs="+", type=int)
+    stateful_gen.add_argument("--n-episodes", type=int, default=1)
+    stateful_gen.add_argument("--n-sessions", type=int, default=16)
+    stateful_gen.add_argument("--out", required=True, type=Path)
+
+    stateful_freeze = sub.add_parser(
+        "freeze-stateful", help="seal a state-first staging tree with checksums"
+    )
+    stateful_freeze.add_argument("--src", required=True, type=Path)
+    stateful_freeze.add_argument("--out", required=True, type=Path)
+
+    stateful_verify = sub.add_parser(
+        "verify-stateful", help="verify checksums in a state-first frozen dataset"
+    )
+    stateful_verify.add_argument("--frozen", required=True, type=Path)
+
+    stateful_regen = sub.add_parser(
+        "regen-check-stateful", help="regenerate a state-first dataset from stored seeds"
+    )
+    stateful_regen.add_argument("--frozen", required=True, type=Path)
     return parser
 
 
@@ -335,6 +368,75 @@ def _cmd_regen_check(args: argparse.Namespace) -> int:
     return _report_regen(report, args.frozen)
 
 
+def _cmd_generate_stateful(args: argparse.Namespace) -> int:
+    try:
+        generated = generate_stateful_to_staging(
+            args.out,
+            family=args.family,
+            seeds=args.seeds,
+            n_episodes=args.n_episodes,
+            n_sessions=args.n_sessions,
+        )
+    except _GENERATION_ERRORS as exc:
+        print(f"generate-stateful FAILED: {type(exc).__name__}: {exc}")
+        return 1
+    print(f"generated {len(generated)} stateful episode(s) -> {args.out}")
+    return 0
+
+
+def _cmd_freeze_stateful(args: argparse.Namespace) -> int:
+    try:
+        manifest = freeze_stateful(args.src, args.out)
+    except _GENERATION_ERRORS as exc:
+        print(f"freeze-stateful FAILED: {type(exc).__name__}: {exc}")
+        return 1
+    print(
+        f"froze {manifest.n_episodes} stateful episode(s) -> {args.out} "
+        f"({len(manifest.files)} files checksummed)"
+    )
+    return 0
+
+
+def _report_stateful_verify(report: StatefulVerifyReport, frozen: Path) -> int:
+    if report.ok:
+        print(f"verify-stateful OK: {report.n_checked} file(s) match {frozen}")
+        return 0
+    print(f"verify-stateful FAILED for {frozen}:")
+    for relative, expected, actual in report.mismatches:
+        print(f"  checksum mismatch: {relative}\n    expected {expected}\n    actual   {actual}")
+    for relative in report.missing:
+        print(f"  missing file: {relative}")
+    return 1
+
+
+def _cmd_verify_stateful(args: argparse.Namespace) -> int:
+    try:
+        report = verify_stateful(args.frozen)
+    except StatefulDatasetError as exc:
+        print(f"verify-stateful FAILED: {exc}")
+        return 1
+    return _report_stateful_verify(report, args.frozen)
+
+
+def _report_stateful_regen(report: StatefulRegenReport, frozen: Path) -> int:
+    if report.ok:
+        print(f"regen-check-stateful OK: {report.checked} episode(s) regenerated in {frozen}")
+        return 0
+    print(f"regen-check-stateful FAILED for {frozen}:")
+    for episode_id, reason in report.mismatches:
+        print(f"  {episode_id}: {reason}")
+    return 1
+
+
+def _cmd_regen_check_stateful(args: argparse.Namespace) -> int:
+    try:
+        report = regen_check_stateful(args.frozen)
+    except (StatefulDatasetError, KeyError, TypeError, ValueError) as exc:
+        print(f"regen-check-stateful FAILED: {type(exc).__name__}: {exc}")
+        return 1
+    return _report_stateful_regen(report, args.frozen)
+
+
 _DISPATCH = {
     "generate": _cmd_generate,
     "import-wide": _cmd_import_wide,
@@ -345,6 +447,10 @@ _DISPATCH = {
     "freeze": _cmd_freeze,
     "verify": _cmd_verify,
     "regen-check": _cmd_regen_check,
+    "generate-stateful": _cmd_generate_stateful,
+    "freeze-stateful": _cmd_freeze_stateful,
+    "verify-stateful": _cmd_verify_stateful,
+    "regen-check-stateful": _cmd_regen_check_stateful,
 }
 
 

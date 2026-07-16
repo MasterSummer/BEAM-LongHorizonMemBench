@@ -24,6 +24,7 @@ from lhmsb.adapters.fakes import (
     WrongMemoryAdapter,
 )
 from lhmsb.adapters.no_memory import NoMemoryAdapter
+from lhmsb.adapters.vertical_stub import StubTraceEvent, VerticalStubAdapter
 
 __all__ = [
     "Capabilities",
@@ -37,4 +38,6 @@ __all__ = [
     "ReflectionCapability",
     "SessionCapability",
     "UnsupportedOperation",
+    "StubTraceEvent",
+    "VerticalStubAdapter",
 ]
