@@ -2,11 +2,11 @@
   "release": "software-vertical-mem0-v0.2.0",
   "created_at_utc": "2026-07-16T00:00:00Z",
   "code_branch": "feat/mem0-qualification",
-  "code_commit": "91d1cffd005a50e482ac97440c58d21df1dbeccf",
+  "code_commit": "4a2a3a0fd60a3f4f6697cecbd81bf95e01cc3916",
   "dataset_directory": "software_mem0_v2",
   "dataset_archive": "software_mem0_v2.tar.gz",
-  "dataset_archive_sha256": "b985ad8225c8ecb6f3ff9aab48f2d09c05c11a4423894e329d763c514fe5b240",
-  "dataset_manifest_sha256": "5b1779b2d950cbd01a7a8fbe2c895f162e5f17c31ca223bbb6d14d84cfbe83a3",
+  "dataset_archive_sha256": "4a455e1a16cc66fa7c218ba48543174426ec710989a301de3fa61f694c170380",
+  "dataset_manifest_sha256": "6563c08b9b7df3a0dd0b19715273e8c89f998e6799de724ffe9211c17d4d3bfb",
   "schema_version": 2,
   "generator_version": "software-project-mem0-vertical-0.2",
   "semantic_seeds": [42],
@@ -16,5 +16,5 @@
   "plan_hash": "31a63c0a3b8955bc3a371391bd435eb492198a14b6525bdececc33a8054df26f",
   "surface_hash": "2bdc2a275e22934a8f024cdf0964127fbd158cbac8be5c43ac3a2e6214706a3e",
   "workspace_hash": "3d4a6b1a104961e224875234aaf153d883dcc8729b0cd351cf839cbc59bb93b0",
-  "evaluator_hash": "0061e660a3e917242941bb4671e8eb4a4bea023e962fe5d1909bf2106817ce5f"
+  "evaluator_hash": "ac117bbb838b77ebde3f7703e71bb3d585b2978d81940c62c5aef97d67fa4194"
 }
