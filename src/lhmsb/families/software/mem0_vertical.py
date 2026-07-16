@@ -46,6 +46,14 @@ class SoftwareMem0VerticalSpec:
     def evaluator_continuation_map(self) -> dict[str, EvaluatorContinuation]:
         return {item.opportunity_id: item for item in self.evaluator_continuations}
 
+    @property
+    def package_file_map(self) -> dict[str, str]:
+        return dict(self.package_files)
+
+    @property
+    def hidden_test_map(self) -> dict[str, str]:
+        return dict(self.hidden_tests)
+
     def write_transcript(self, session_index: int) -> str:
         """Return only public observations and explicit tool reads for one write."""
         try:

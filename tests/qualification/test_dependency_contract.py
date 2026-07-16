@@ -5,7 +5,6 @@ import json
 import tomllib
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 LEGACY_RELEASE = ROOT / "datasets" / "releases" / "software-vertical-v0.1.0"
 

@@ -152,6 +152,12 @@ class Mem0QualificationAdapter:
     def filters(self) -> dict[str, object]:
         return {"user_id": self.user_id, "run_id": self.run_id}
 
+    def restore_write_count(self, n_write: int) -> None:
+        """Restore the cumulative native mutation count when resuming a task."""
+        if n_write < 0:
+            raise ValueError("n_write must be non-negative")
+        self._n_write = n_write
+
     @classmethod
     def create_live(
         cls,

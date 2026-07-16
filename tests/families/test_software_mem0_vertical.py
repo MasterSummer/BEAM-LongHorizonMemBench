@@ -69,6 +69,12 @@ def test_write_transcript_excludes_unread_raw_workspace() -> None:
     assert "source_event_ids" not in transcript
 
 
+def test_mem0_spec_exposes_checker_compatible_file_maps() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    assert spec.package_file_map == dict(spec.package_files)
+    assert spec.hidden_test_map == dict(spec.hidden_tests)
+
+
 def test_public_continuations_are_opaque_and_evaluator_mapping_is_private() -> None:
     spec = SoftwareMem0VerticalFamily.generate(42)
     assert len(spec.public_continuations) == len(spec.plan.opportunities)

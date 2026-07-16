@@ -200,6 +200,15 @@ def test_history_delta_returns_only_new_native_rows() -> None:
     )
 
 
+def test_resume_restores_the_cumulative_native_write_count() -> None:
+    backend = FakeMem0V2()
+    adapter = Mem0QualificationAdapter(backend, user_id="user", run_id="run")
+    adapter.restore_write_count(7)
+    assert adapter.snapshot_inventory(checkpoint_session=3).n_write == 7
+    with pytest.raises(ValueError, match="non-negative"):
+        adapter.restore_write_count(-1)
+
+
 def test_controlled_and_native_live_configs_are_explicit(tmp_path: Path) -> None:
     controlled = build_mem0_live_config(
         _profile("controlled"),
