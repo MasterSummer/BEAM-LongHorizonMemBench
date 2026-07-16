@@ -152,3 +152,44 @@ def test_bootstrap_and_bundle_dry_runs_do_not_require_network_or_docker(
     assert "DRY-RUN" in bootstrap.stdout
     assert "DRY-RUN" in bundle.stdout
     assert not (tmp_path / "data root").exists()
+
+
+def test_bootstrap_forwards_allow_dirty_to_repository_preflight(
+    tmp_path: Path,
+) -> None:
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPTS["bootstrap_server.sh"]),
+            "--data-root",
+            str(tmp_path / "data"),
+            "--allow-dirty",
+            "--dry-run",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "preflight" in completed.stdout
+    assert "--allow-dirty" in completed.stdout
+
+
+def test_preflight_generates_host_manifest_before_entering_worker() -> None:
+    text = SCRIPTS["preflight_mem0.sh"].read_text(encoding="utf-8")
+
+    assert "mem0_write_host_manifest" in text
+    assert text.index("mem0_write_host_manifest") < text.index(
+        "run --rm worker"
+    )
+
+
+def test_full_qualification_keeps_independent_tasks_running_after_a_failure() -> None:
+    text = SCRIPTS["run_mem0_qualification.sh"].read_text(
+        encoding="utf-8"
+    )
+
+    assert "run-matrix --run-dir" in text
+    assert "--keep-going" in text

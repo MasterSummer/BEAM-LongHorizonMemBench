@@ -503,10 +503,12 @@ the declared resource profile to match the actual placement.
 TEI image tags and OCI digests, model revisions, model-file hashes, dtype,
 served model name, device assignment, and startup arguments are pinned.
 
-The embedding service must expose an OpenAI-compatible embedding endpoint that
-Mem0's Hugging Face embedder can call. The reranker is benchmark-owned and is
-called through TEI's rerank endpoint after Mem0 returns the native candidate
-list.
+The embedding service exposes an OpenAI-compatible endpoint. Controlled Mem0
+uses Mem0's OpenAI embedder client against that local endpoint because the
+Mem0 2.0.12 Hugging Face provider imports the full `sentence-transformers`
+runtime even when configured for remote inference. The served model remains
+the pinned BGE-M3 revision. The reranker is benchmark-owned and is called
+through TEI's rerank endpoint after Mem0 returns the native candidate list.
 
 ### 9.1 Network boundary
 
@@ -546,20 +548,21 @@ The server data root is:
 ```text
 ${LHMSB_DATA_ROOT:-/data/lhmsb}/
 ├── datasets/
-│   ├── software-vertical-v0.1.0/
-│   └── software-vertical-mem0-v0.2.0/
+│   ├── software_v1/
+│   └── software_mem0_v2/
 ├── models/
-│   ├── BAAI--bge-m3/5617a9f61b028005a4858fdac845db406aefb181/
-│   └── BAAI--bge-reranker-v2-m3/953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e/
-├── qdrant/
-│   └── <run_identity>/<task_id>/
-├── history/
-│   └── <run_identity>/<task_id>.sqlite
+│   ├── bge-m3/
+│   └── bge-reranker-v2-m3/
+├── qdrant/                  # task isolation is by collection namespace
+├── history/preflight/
 ├── hf-cache/
-├── wheels/
+├── wheelhouse/
 ├── images/
+├── manifests/
 ├── runs/
-│   └── <experiment_id>/<run_identity>/
+│   ├── preflight/latest.json
+│   └── mem0/<run_name>/
+│       └── cells/tasks/<task_id>/store/history.sqlite
 ├── logs/
 └── bundles/
 ```
@@ -749,7 +752,8 @@ Each SCEU records:
 - reranker calls and candidate pairs;
 - read/write/rerank/policy latency;
 - retry and terminal-failure rates;
-- Qdrant and history-store bytes.
+- Qdrant compressed collection-snapshot bytes and closed SQLite
+  main/WAL/SHM bytes.
 
 Token counts are cost diagnostics, not the RQ5 scale variable. RQ5 uses native
 memory-object counts.
@@ -761,6 +765,7 @@ Run identity hashes:
 - code commit and dirty state;
 - dataset manifest and archive hash;
 - experiment config hash;
+- resolved persistent data-root path;
 - Mem0 package, source commit, and wheel hash;
 - Python lock hash;
 - Docker image digests;
@@ -796,7 +801,9 @@ The runner classifies failures as:
 - `surface_leak`;
 - `checker_failure`;
 - `trace_incomplete`;
-- `identity_mismatch`.
+- `identity_mismatch`;
+- `resource_measurement_failure`;
+- `resource_cleanup_failure`.
 
 Retries are bounded and recorded. No failure path may:
 

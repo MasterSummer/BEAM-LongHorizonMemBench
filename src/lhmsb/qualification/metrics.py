@@ -101,6 +101,9 @@ class UsageMetricInput:
     latency_seconds: float
     retry_count: int
     terminal_failure: bool
+    component: str = "policy"
+    input_count: int = 1
+    usage_observed: bool = True
 
 
 def safe_ratio(numerator: float, denominator: float) -> MetricValue:
@@ -140,12 +143,37 @@ def compute_qualification_metrics(
     seen_calls: set[str] = set()
 
     for task in matrix.task_results:
+        for component, footprint in (
+            ("qdrant_store", task.qdrant_store_bytes),
+            ("history_store", task.history_store_bytes),
+        ):
+            if footprint is None:
+                continue
+            usages.append(
+                UsageMetricInput(
+                    input_tokens=None,
+                    output_tokens=None,
+                    cached_tokens=None,
+                    reasoning_tokens=None,
+                    latency_seconds=0.0,
+                    retry_count=0,
+                    terminal_failure=False,
+                    component=component,
+                    input_count=footprint,
+                    usage_observed=True,
+                )
+            )
         spec = specs[task.episode_id]
         alignment_by_session = {
             item.checkpoint_session: item for item in task.alignments
         }
         write_by_session = {item.session_index: item for item in task.writes}
         for index, write in enumerate(task.writes):
+            for event in write.usage_events:
+                if event.call_id in seen_calls:
+                    continue
+                seen_calls.add(event.call_id)
+                usages.append(_usage_from_provider_event(event))
             alignment = alignment_by_session.get(write.session_index)
             if alignment is None:
                 continue
@@ -308,6 +336,11 @@ def compute_qualification_metrics(
                 )
 
         for trace in task.retrieval_traces:
+            for event in trace.internal_usage:
+                if event.call_id in seen_calls:
+                    continue
+                seen_calls.add(event.call_id)
+                usages.append(_usage_from_provider_event(event))
             if trace.rerank_result is not None:
                 usages.append(
                     UsageMetricInput(
@@ -318,6 +351,9 @@ def compute_qualification_metrics(
                         latency_seconds=trace.rerank_result.latency_seconds,
                         retry_count=0,
                         terminal_failure=False,
+                        component="reranker",
+                        input_count=trace.rerank_result.input_count,
+                        usage_observed=False,
                     )
                 )
         for write in write_by_session.values():
@@ -659,6 +695,9 @@ def _usage_metrics(
     values: dict[str, MetricValue],
     observations: Sequence[UsageMetricInput],
 ) -> None:
+    policy = [
+        item for item in observations if item.component == "policy"
+    ]
     for field, metric_name in (
         ("input_tokens", "policy_input_tokens"),
         ("output_tokens", "policy_output_tokens"),
@@ -667,26 +706,101 @@ def _usage_metrics(
     ):
         numbers = [
             getattr(item, field)
-            for item in observations
+            for item in policy
             if getattr(item, field) is not None
         ]
         values[metric_name] = (
             safe_ratio(sum(numbers), 1) if numbers else safe_ratio(0, 0)
         )
     values["mean_policy_latency_seconds"] = safe_ratio(
-        sum(item.latency_seconds for item in observations),
-        len(observations),
+        sum(item.latency_seconds for item in policy),
+        len(policy),
     )
     values["policy_retry_rate"] = safe_ratio(
-        sum(item.retry_count > 0 for item in observations),
-        len(observations),
+        sum(item.retry_count > 0 for item in policy),
+        len(policy),
     )
+    reliability = [
+        item
+        for item in observations
+        if item.component not in {"qdrant_store", "history_store"}
+    ]
     values["terminal_failure_rate"] = safe_ratio(
-        sum(item.terminal_failure for item in observations),
-        len(observations),
+        sum(item.terminal_failure for item in reliability),
+        len(reliability),
     )
-    values["qdrant_store_bytes"] = safe_ratio(0, 0)
-    values["history_store_bytes"] = safe_ratio(0, 0)
+    internal = [
+        item
+        for item in observations
+        if item.component == "memory_internal_llm"
+    ]
+    for field, metric_name in (
+        ("input_tokens", "memory_internal_input_tokens"),
+        ("output_tokens", "memory_internal_output_tokens"),
+        ("cached_tokens", "memory_internal_cached_tokens"),
+        ("reasoning_tokens", "memory_internal_reasoning_tokens"),
+    ):
+        values[metric_name] = _observed_token_total(internal, field)
+    values["memory_internal_call_count"] = safe_ratio(len(internal), 1)
+    values["memory_internal_usage_observed_rate"] = safe_ratio(
+        sum(item.usage_observed for item in internal),
+        len(internal),
+    )
+    values["mean_memory_internal_latency_seconds"] = safe_ratio(
+        sum(item.latency_seconds for item in internal),
+        len(internal),
+    )
+
+    embedding = [
+        item for item in observations if item.component == "embedding"
+    ]
+    values["embedding_call_count"] = safe_ratio(len(embedding), 1)
+    values["embedding_input_count"] = safe_ratio(
+        sum(item.input_count for item in embedding),
+        1,
+    )
+    values["embedding_input_tokens"] = _observed_token_total(
+        embedding,
+        "input_tokens",
+    )
+    values["embedding_usage_observed_rate"] = safe_ratio(
+        sum(item.usage_observed for item in embedding),
+        len(embedding),
+    )
+    values["mean_embedding_latency_seconds"] = safe_ratio(
+        sum(item.latency_seconds for item in embedding),
+        len(embedding),
+    )
+
+    reranker = [
+        item for item in observations if item.component == "reranker"
+    ]
+    values["reranker_call_count"] = safe_ratio(len(reranker), 1)
+    values["reranker_candidate_pairs"] = safe_ratio(
+        sum(item.input_count for item in reranker),
+        1,
+    )
+    values["mean_reranker_service_latency_seconds"] = safe_ratio(
+        sum(item.latency_seconds for item in reranker),
+        len(reranker),
+    )
+    for component, metric_name in (
+        ("qdrant_store", "qdrant_store_bytes"),
+        ("history_store", "history_store_bytes"),
+    ):
+        footprints = [
+            item
+            for item in observations
+            if item.component == component
+        ]
+        values[metric_name] = (
+            safe_ratio(
+                sum(item.input_count for item in footprints),
+                1,
+            )
+            if footprints
+            else safe_ratio(0, 0)
+        )
 
 
 def _usage_from_evaluation(evaluation: PolicyEvaluation) -> UsageMetricInput:
@@ -699,7 +813,43 @@ def _usage_from_evaluation(evaluation: PolicyEvaluation) -> UsageMetricInput:
         latency_seconds=evaluation.response.latency_seconds,
         retry_count=evaluation.response.retry_count,
         terminal_failure=False,
+        component="policy",
+        input_count=1,
+        usage_observed=usage.observed,
     )
+
+
+def _usage_from_provider_event(
+    event: object,
+) -> UsageMetricInput:
+    from lhmsb.adapters.mem0_qualification import ProviderUsageEvent
+
+    if not isinstance(event, ProviderUsageEvent):
+        raise TypeError("provider usage event has the wrong type")
+    return UsageMetricInput(
+        input_tokens=event.input_tokens,
+        output_tokens=event.output_tokens,
+        cached_tokens=event.cached_tokens,
+        reasoning_tokens=event.reasoning_tokens,
+        latency_seconds=event.latency_seconds,
+        retry_count=event.retry_count or 0,
+        terminal_failure=event.error_class is not None,
+        component=event.component,
+        input_count=event.input_count,
+        usage_observed=event.usage_observed,
+    )
+
+
+def _observed_token_total(
+    observations: Sequence[UsageMetricInput],
+    field: str,
+) -> MetricValue:
+    numbers = [
+        getattr(item, field)
+        for item in observations
+        if getattr(item, field) is not None
+    ]
+    return safe_ratio(sum(numbers), 1) if numbers else safe_ratio(0, 0)
 
 
 def _matched_decay(

@@ -19,6 +19,7 @@ from lhmsb.qualification.runner import (
     PolicyEvaluation,
     QualificationMatrixResult,
     QualificationTaskResult,
+    RetrievalTrace,
     SCEURunResult,
 )
 
@@ -188,6 +189,13 @@ def _flatten_rows(
                     **_jsonable(asdict(write.inventory)),
                 }
             )
+            for usage in write.usage_events:
+                _append_internal_usage(
+                    rows["api_usage.jsonl"],
+                    seen_calls,
+                    write_context,
+                    usage,
+                )
         for trace in task.retrieval_traces:
             rows["retrieval_trace.jsonl"].append(
                 {
@@ -195,6 +203,25 @@ def _flatten_rows(
                     **_jsonable(asdict(trace)),
                 }
             )
+            for usage in trace.internal_usage:
+                _append_internal_usage(
+                    rows["api_usage.jsonl"],
+                    seen_calls,
+                    {
+                        **task_context,
+                        "sceu_id": trace.sceu_id,
+                        "opportunity_id": trace.opportunity_id,
+                        "checkpoint_session": trace.checkpoint_session,
+                    },
+                    usage,
+                )
+            if trace.rerank_result is not None:
+                _append_reranker_usage(
+                    rows["api_usage.jsonl"],
+                    seen_calls,
+                    task_context,
+                    trace,
+                )
         for condition in task.condition_results:
             condition_context = {
                 **task_context,
@@ -276,11 +303,99 @@ def _append_api_usage(
             "cached_tokens": evaluation.response.usage.cached_tokens,
             "reasoning_tokens": evaluation.response.usage.reasoning_tokens,
             "usage_observed": evaluation.response.usage.observed,
+            "input_count": 1,
             "latency_seconds": evaluation.response.latency_seconds,
             "retry_count": evaluation.response.retry_count,
             "format_repair_used": evaluation.response.format_repair_used,
+            "error_class": None,
             "started_at_utc": evaluation.response.started_at_utc,
             "ended_at_utc": evaluation.response.ended_at_utc,
+        }
+    )
+
+
+def _append_internal_usage(
+    rows: list[dict[str, object]],
+    seen_calls: set[str],
+    context: Mapping[str, object],
+    usage: object,
+) -> None:
+    from lhmsb.adapters.mem0_qualification import ProviderUsageEvent
+
+    if not isinstance(usage, ProviderUsageEvent):
+        raise TypeError("internal provider usage has the wrong type")
+    if usage.call_id in seen_calls:
+        return
+    seen_calls.add(usage.call_id)
+    rows.append(
+        {
+            **context,
+            "call_id": usage.call_id,
+            "call_kind": usage.component,
+            "provider": usage.provider,
+            "model_id": usage.model_id,
+            "endpoint_identity": usage.endpoint_identity,
+            "provider_request_id": None,
+            "request_hash": usage.request_hash,
+            "response_hash": usage.response_hash,
+            "policy_request_hash": None,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cached_tokens": usage.cached_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
+            "usage_observed": usage.usage_observed,
+            "input_count": usage.input_count,
+            "latency_seconds": usage.latency_seconds,
+            "retry_count": usage.retry_count,
+            "format_repair_used": False,
+            "error_class": usage.error_class,
+            "started_at_utc": usage.started_at_utc,
+            "ended_at_utc": usage.ended_at_utc,
+        }
+    )
+
+
+def _append_reranker_usage(
+    rows: list[dict[str, object]],
+    seen_calls: set[str],
+    context: Mapping[str, object],
+    trace: RetrievalTrace,
+) -> None:
+    result = trace.rerank_result
+    if result is None:
+        return
+    call_id = f"reranker:{trace.trace_id}"
+    if call_id in seen_calls:
+        return
+    seen_calls.add(call_id)
+    rows.append(
+        {
+            **context,
+            "sceu_id": trace.sceu_id,
+            "opportunity_id": trace.opportunity_id,
+            "checkpoint_session": trace.checkpoint_session,
+            "call_id": call_id,
+            "call_kind": "reranker",
+            "provider": "local_tei",
+            "model_id": result.model,
+            "model_revision": result.revision,
+            "endpoint_identity": "local://tei-reranker",
+            "provider_request_id": None,
+            "request_hash": result.request_hash,
+            "response_hash": result.response_hash,
+            "policy_request_hash": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "cached_tokens": None,
+            "reasoning_tokens": None,
+            "usage_observed": False,
+            "input_count": result.input_count,
+            "latency_seconds": result.latency_seconds,
+            "retry_count": 0,
+            "format_repair_used": False,
+            "error_class": None,
+            "started_at_utc": None,
+            "ended_at_utc": None,
         }
     )
 
@@ -315,7 +430,27 @@ def _summary(
         "n_inventory_snapshots": len(rows["memory_inventory.jsonl"]),
         "n_retrieval_traces": len(rows["retrieval_trace.jsonl"]),
         "n_interventions": len(rows["interventions.jsonl"]),
-        "n_policy_calls": len(rows["api_usage.jsonl"]),
+        "n_api_calls": len(rows["api_usage.jsonl"]),
+        "n_policy_calls": sum(
+            row.get("call_kind") not in {
+                "memory_internal_llm",
+                "embedding",
+                "reranker",
+            }
+            for row in rows["api_usage.jsonl"]
+        ),
+        "n_memory_internal_calls": sum(
+            row.get("call_kind") == "memory_internal_llm"
+            for row in rows["api_usage.jsonl"]
+        ),
+        "n_embedding_calls": sum(
+            row.get("call_kind") == "embedding"
+            for row in rows["api_usage.jsonl"]
+        ),
+        "n_reranker_calls": sum(
+            row.get("call_kind") == "reranker"
+            for row in rows["api_usage.jsonl"]
+        ),
     }
 
 

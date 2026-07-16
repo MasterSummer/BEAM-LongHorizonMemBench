@@ -43,4 +43,12 @@ srun --ntasks=1 docker compose \
   -f "${COMPOSE_FILE}" \
   run --rm worker \
   run-matrix --run-dir "${RUN_DIR}" \
+  --keep-going \
   --json "${RUN_DIR}/matrix-status.json"
+
+srun --ntasks=1 docker compose \
+  --env-file "${ENV_FILE}" \
+  -f "${COMPOSE_FILE}" \
+  run --rm worker \
+  validate --report "${RUN_DIR}/report" \
+  --json "${RUN_DIR}/validation.json"

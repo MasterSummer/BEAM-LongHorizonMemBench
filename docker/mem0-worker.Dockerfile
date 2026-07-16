@@ -5,6 +5,9 @@ ARG PYTHON_BASE_DIGEST
 FROM ${PYTHON_BASE_IMAGE}@${PYTHON_BASE_DIGEST}
 
 ARG UV_VERSION=0.8.0
+ARG SOURCE_COMMIT=unknown
+ARG SOURCE_REF=detached
+ARG SOURCE_DIRTY=false
 
 ENV DEBIAN_FRONTEND=noninteractive \
     MEM0_TELEMETRY=False \
@@ -31,6 +34,11 @@ COPY src/ ./src/
 COPY configs/ ./configs/
 COPY datasets/releases/ ./datasets/releases/
 COPY runs/vertical/software_mem0_v2/ ./runs/vertical/software_mem0_v2/
+
+RUN SOURCE_COMMIT="${SOURCE_COMMIT}" \
+    SOURCE_REF="${SOURCE_REF}" \
+    SOURCE_DIRTY="${SOURCE_DIRTY}" \
+    python -c 'import json, os, pathlib; pathlib.Path("/app/BUILD.json").write_text(json.dumps({"commit": os.environ["SOURCE_COMMIT"], "dirty": os.environ["SOURCE_DIRTY"].lower() == "true", "ref": os.environ["SOURCE_REF"]}, sort_keys=True) + "\n", encoding="utf-8")'
 
 RUN uv sync --frozen --offline --no-dev --extra qualification \
     && /app/.venv/bin/python -m lhmsb.qualification --help >/dev/null

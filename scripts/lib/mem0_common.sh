@@ -44,3 +44,47 @@ mem0_compose() {
     -f "${repo_root}/deploy/compose.mem0.yaml" \
     "$@"
 }
+
+mem0_write_host_manifest() {
+  local data_root="$1"
+  local manifest="${data_root}/manifests/host.json"
+  local docker_version
+  local compose_version
+  local gpu_inventory
+  docker_version="$(docker --version)"
+  compose_version="$(docker compose version)"
+  gpu_inventory="$(nvidia-smi \
+    --query-gpu=index,name,memory.total \
+    --format=csv,noheader)"
+  mkdir -p "$(dirname "${manifest}")"
+  DOCKER_VERSION="${docker_version}" \
+    COMPOSE_VERSION="${compose_version}" \
+    GPU_INVENTORY="${gpu_inventory}" \
+    python3 - "${manifest}" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+gpus = [
+    line.strip()
+    for line in os.environ["GPU_INVENTORY"].splitlines()
+    if line.strip()
+]
+if len(gpus) < 2:
+    raise SystemExit(f"at least two NVIDIA GPUs are required, found {len(gpus)}")
+payload = {
+    "schema_version": 1,
+    "docker": os.environ["DOCKER_VERSION"],
+    "compose": os.environ["COMPOSE_VERSION"],
+    "gpus": gpus,
+}
+temporary = path.with_suffix(".json.tmp")
+temporary.write_text(
+    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+temporary.replace(path)
+PY
+}

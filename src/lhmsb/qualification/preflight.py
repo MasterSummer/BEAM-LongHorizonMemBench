@@ -14,6 +14,10 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal, cast
 
+from lhmsb.adapters.mem0_qualification import (
+    Mem0QualificationAdapter,
+    build_mem0_live_config,
+)
 from lhmsb.datasets.mem0_stateful_pipeline import (
     Mem0StatefulDatasetError,
     regen_check_mem0_stateful,
@@ -192,6 +196,11 @@ def default_preflight_gates() -> tuple[PreflightGate, ...]:
         PreflightGate("provider_credentials", "live", _gate_provider_credentials),
         PreflightGate("provider_structured_smoke", "live", _gate_provider_smoke),
         PreflightGate("mem0_runtime_pin", "live", _gate_mem0_runtime),
+        PreflightGate(
+            "controlled_mem0_lifecycle",
+            "live",
+            _gate_controlled_mem0_lifecycle,
+        ),
         PreflightGate("native_mem0_profile", "live", _gate_native_profile),
         PreflightGate("trace_and_prompt_contract", "live", _gate_trace_contract),
     )
@@ -212,23 +221,48 @@ def require_live_gate(
 
 def current_repository_snapshot(root: Path) -> RepositorySnapshot:
     """Inspect Git without importing the legacy experiment runtime."""
-    commit = _git_output(root, ("rev-parse", "HEAD"))
-    status = _git_output(
-        root,
-        ("status", "--porcelain", "--untracked-files=normal"),
-    )
     try:
-        ref = _git_output(
+        commit = _git_output(root, ("rev-parse", "HEAD"))
+        status = _git_output(
             root,
-            ("symbolic-ref", "--short", "-q", "HEAD"),
+            ("status", "--porcelain", "--untracked-files=normal"),
         )
-    except PreflightError:
-        ref = "detached"
-    return RepositorySnapshot(
-        commit=commit,
-        dirty=bool(status),
-        ref=ref,
-    )
+        try:
+            ref = _git_output(
+                root,
+                ("symbolic-ref", "--short", "-q", "HEAD"),
+            )
+        except PreflightError:
+            ref = "detached"
+        return RepositorySnapshot(
+            commit=commit,
+            dirty=bool(status),
+            ref=ref,
+        )
+    except PreflightError as git_error:
+        manifest = root / "BUILD.json"
+        if not manifest.is_file():
+            raise git_error
+        data = _read_json(manifest)
+        commit_value = data.get("commit")
+        dirty_value = data.get("dirty")
+        ref_value = data.get("ref")
+        if (
+            not isinstance(commit_value, str)
+            or not commit_value
+            or not isinstance(dirty_value, bool)
+            or not isinstance(ref_value, str)
+            or not ref_value
+        ):
+            raise PreflightError(
+                "preflight_failure",
+                f"invalid container build manifest: {manifest}",
+            ) from git_error
+        return RepositorySnapshot(
+            commit=commit_value,
+            dirty=dirty_value,
+            ref=ref_value,
+        )
 
 
 def redact_secrets(value: object) -> object:
@@ -418,20 +452,71 @@ def _gate_dependency_locks(context: PreflightContext) -> dict[str, object]:
     }
 
 
+def _host_runtime_inventory(
+    context: PreflightContext,
+) -> dict[str, object]:
+    if context.environment.get("LHMSB_CONTAINERIZED") != "1":
+        return {
+            "docker": _command_output(("docker", "--version")),
+            "compose": _command_output(("docker", "compose", "version")),
+            "gpus": _command_output(
+                (
+                    "nvidia-smi",
+                    "--query-gpu=index,name,memory.total",
+                    "--format=csv,noheader",
+                )
+            ).splitlines(),
+        }
+    manifest = Path(
+        context.environment.get(
+            "LHMSB_HOST_MANIFEST",
+            str(context.data_root / "manifests/host.json"),
+        )
+    )
+    data = _read_json(manifest)
+    if data.get("schema_version") != 1:
+        raise PreflightError(
+            "preflight_failure",
+            f"unsupported host manifest schema: {manifest}",
+        )
+    docker = data.get("docker")
+    compose = data.get("compose")
+    gpus = _sequence(data.get("gpus"), "host manifest gpus")
+    if not isinstance(docker, str) or not docker.strip():
+        raise PreflightError(
+            "preflight_failure",
+            f"host manifest lacks Docker version: {manifest}",
+        )
+    if not isinstance(compose, str) or not compose.strip():
+        raise PreflightError(
+            "preflight_failure",
+            f"host manifest lacks Compose version: {manifest}",
+        )
+    if not all(isinstance(item, str) and item.strip() for item in gpus):
+        raise PreflightError(
+            "preflight_failure",
+            f"host manifest has invalid GPU inventory: {manifest}",
+        )
+    return {
+        "docker": docker,
+        "compose": compose,
+        "gpus": list(gpus),
+    }
+
+
 def _gate_host_runtime(context: PreflightContext) -> dict[str, object]:
     require_live_gate(
         context.environment,
         variable="LHMSB_LIVE_PREFLIGHT",
     )
-    docker = _command_output(("docker", "--version"))
-    compose = _command_output(("docker", "compose", "version"))
-    gpu_lines = _command_output(
-        (
-            "nvidia-smi",
-            "--query-gpu=index,name,memory.total",
-            "--format=csv,noheader",
+    inventory = _host_runtime_inventory(context)
+    gpu_lines = tuple(
+        str(item)
+        for item in _sequence(
+            inventory.get("gpus"),
+            "host GPU inventory",
         )
-    ).splitlines()
+    )
     if len(gpu_lines) < 2:
         raise PreflightError(
             "preflight_failure",
@@ -462,8 +547,8 @@ def _gate_host_runtime(context: PreflightContext) -> dict[str, object]:
     if _sha256(wheel) != expected:
         raise PreflightError("preflight_failure", "Mem0 wheel hash mismatch")
     return {
-        "docker": docker,
-        "compose": compose,
+        "docker": inventory["docker"],
+        "compose": inventory["compose"],
         "gpus": gpu_lines,
         "free_bytes": free_bytes,
         "mem0_wheel_sha256": expected,
@@ -727,6 +812,153 @@ def _gate_mem0_runtime(context: PreflightContext) -> dict[str, object]:
     }
 
 
+def _gate_controlled_mem0_lifecycle(
+    context: PreflightContext,
+) -> dict[str, object]:
+    try:
+        qdrant_client = importlib.import_module("qdrant_client")
+    except ImportError as exc:
+        raise PreflightError(
+            "preflight_failure",
+            "qdrant-client is not installed",
+        ) from exc
+    config = load_qualification_config(context.config_path)
+    qdrant_url = context.environment.get(
+        "LHMSB_QDRANT_URL",
+        "http://qdrant:6333",
+    )
+    embedding_url = context.environment.get(
+        "LHMSB_EMBEDDING_URL",
+        "http://embedding:80",
+    )
+    history_root = context.data_root / "history" / "preflight"
+    history_root.mkdir(parents=True, exist_ok=True)
+    client = qdrant_client.QdrantClient(url=qdrant_url, timeout=30)
+    results: list[dict[str, object]] = []
+    try:
+        for profile in config.policy_profiles:
+            effective = _effective_profile(profile, context.environment)
+            collection = (
+                "lhmsb_preflight_mem0_"
+                + profile.profile_id.replace("-", "_")
+            )
+            history_path = history_root / f"{profile.profile_id}.sqlite"
+            if client.collection_exists(collection):
+                client.delete_collection(collection)
+            _remove_sqlite_files(history_path)
+            live_config = build_mem0_live_config(
+                config.controlled_mem0,
+                policy=effective,
+                internal_llm_api_key=context.environment[
+                    profile.api_key_env
+                ],
+                native_openai_api_key=context.environment.get(
+                    "OPENAI_API_KEY",
+                    "",
+                ),
+                native_openai_base_url=context.environment.get(
+                    "OPENAI_BASE_URL",
+                    "https://api.openai.com/v1",
+                ),
+                qdrant_url=qdrant_url,
+                collection_name=collection,
+                history_db_path=history_path,
+                embedding_base_url=embedding_url,
+                embedding_dimension=config.retrieval.embedding_dimension,
+            )
+            adapter: Mem0QualificationAdapter | None = None
+            try:
+                def collection_count(
+                    collection_name: str = collection,
+                ) -> int:
+                    return int(
+                        client.count(
+                            collection_name=collection_name,
+                            exact=True,
+                        ).count
+                    )
+
+                adapter = Mem0QualificationAdapter.create_live(
+                    live_config,
+                    user_id=f"preflight-user-{profile.profile_id}",
+                    run_id=f"preflight-run-{profile.profile_id}",
+                    candidate_k=config.retrieval.candidate_k,
+                    collection_count=collection_count,
+                )
+                write = adapter.write_session(
+                    [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Remember this durable project fact: "
+                                "the preflight canary code is ALPHA-7."
+                            ),
+                        }
+                    ],
+                    session_index=0,
+                    metadata={"write_origin": "preflight_canary"},
+                )
+                if not write.inventory.items:
+                    raise PreflightError(
+                        "mem0_write_failure",
+                        f"{profile.profile_id} produced no live memory",
+                    )
+                first_memory = write.inventory.items[0]
+                history = adapter.history_delta(
+                    first_memory.memory_id,
+                    previous_length=0,
+                )
+                if not history:
+                    raise PreflightError(
+                        "inventory_failure",
+                        f"{profile.profile_id} produced no memory history",
+                    )
+                search = adapter.search_candidates(
+                    "What is the preflight canary code?",
+                    checkpoint_session=0,
+                )
+                if not search.candidates:
+                    raise PreflightError(
+                        "mem0_search_failure",
+                        f"{profile.profile_id} returned no search candidate",
+                    )
+                usage_components = {
+                    event.component
+                    for event in (
+                        *write.usage_events,
+                        *search.usage_events,
+                    )
+                }
+                required_usage = {"memory_internal_llm", "embedding"}
+                if not required_usage <= usage_components:
+                    raise PreflightError(
+                        "trace_incomplete",
+                        f"{profile.profile_id} lacks internal usage trace",
+                    )
+                results.append(
+                    {
+                        "profile_id": profile.profile_id,
+                        "model_id": effective.model_id,
+                        "n_live": write.inventory.n_live,
+                        "n_write": write.n_write,
+                        "candidate_count": len(search.candidates),
+                        "history_rows": len(history),
+                        "usage_components": sorted(usage_components),
+                    }
+                )
+            finally:
+                try:
+                    if adapter is not None:
+                        adapter.close()
+                finally:
+                    if client.collection_exists(collection):
+                        client.delete_collection(collection)
+                    _remove_sqlite_files(history_path)
+    finally:
+        client.close()
+    return {"profiles": results}
+
+
 def _gate_native_profile(context: PreflightContext) -> dict[str, object]:
     profile = load_qualification_config(context.config_path).native_mem0
     expected = (
@@ -745,6 +977,15 @@ def _gate_native_profile(context: PreflightContext) -> dict[str, object]:
         "internal_llm_model": profile.internal_llm_model,
         "embedding_model": profile.embedding_model,
     }
+
+
+def _remove_sqlite_files(path: Path) -> None:
+    for candidate in (
+        path,
+        Path(f"{path}-shm"),
+        Path(f"{path}-wal"),
+    ):
+        candidate.unlink(missing_ok=True)
 
 
 def _gate_trace_contract(context: PreflightContext) -> dict[str, object]:

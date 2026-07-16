@@ -111,6 +111,33 @@ This starts a Neo4j container on `localhost:7687`. Set `GRAPHITI_NEO4J_URI=bolt:
 
 All commands assume the repository root as working directory and an activated virtual environment with the package installed (`pip install -e ".[dev,chroma,tokenizers]"`).
 
+### Mem0 A100 qualification
+
+The first real long-horizon qualification slice is frozen separately from the
+legacy v1 pilot. It runs three policy models over workspace, oracle, Controlled
+Mem0, and Native Mem0 conditions; records the full
+`stored → retrieved → visible → causal use → behavior` chain; and emits
+programmatic state-evolution and behavioral-drift metrics.
+
+On a clean Linux server with Docker, the NVIDIA container runtime, and at least
+two visible A100 GPUs:
+
+```bash
+cp .env.example .env
+# Fill ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, and OPENAI_API_KEY.
+
+scripts/bootstrap_server.sh --data-root /data/lhmsb --env-file .env
+scripts/preflight_mem0.sh --data-root /data/lhmsb --env-file .env
+scripts/run_mem0_smoke.sh --data-root /data/lhmsb --env-file .env
+scripts/run_mem0_qualification.sh \
+  --data-root /data/lhmsb --env-file .env \
+  --run-name "mem0-q1-$(git rev-parse --short HEAD)"
+```
+
+See [the Mem0 server workflow](docs/mem0-server-workflow.md) for the pinned
+matrix, directory contract, Slurm commands, resume procedure, outputs, and
+metric mapping.
+
 ### Smoke Run (offline, ~30 seconds)
 
 Runs 4 offline conditions (`no_memory`, `chroma`, `fake_perfect`, `fake_bad`) over 1 episode per family with a deterministic stub agent. No network, no paid APIs, no live backends.
@@ -164,6 +191,7 @@ Every run records a `run_manifest.json` with the full configuration hash, git SH
 | `spec/04-datasets.md` | Dataset generation, freezing, and verification contract. |
 | `spec/05-systems.md` | Memory system adapter interface and graceful degradation. |
 | `docs/extending.md` | How to add new adapters, task families, and deferred dimensions. |
+| `docs/mem0-server-workflow.md` | A100 migration, Docker/Slurm execution, resume, validation, and result collection. |
 
 ## License
 

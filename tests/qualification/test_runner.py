@@ -510,6 +510,11 @@ def test_task_result_has_a_portable_lossless_json_round_trip(
         ),
         storage=storage,
     )
+    result = replace(
+        result,
+        qdrant_store_bytes=4096,
+        history_store_bytes=1024,
+    )
 
     restored = qualification_task_result_from_dict(asdict(result))
 

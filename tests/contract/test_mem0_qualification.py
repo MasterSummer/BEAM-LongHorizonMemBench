@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from lhmsb.adapters.mem0_qualification import (
     Mem0QualificationAdapter,
     Mem0QualificationError,
+    ProviderUsageEvent,
     build_mem0_live_config,
 )
 from lhmsb.qualification.schema import Mem0Profile, PolicyProfile
@@ -19,6 +21,7 @@ class FakeMem0V2:
         self.histories: dict[str, list[dict[str, object]]] = {}
         self.add_result: object = {"results": []}
         self.search_result: object = {"results": []}
+        self.closed = False
 
     def add(self, messages: list[dict[str, str]], **kwargs: object) -> object:
         self.calls.append(("add", (messages,), dict(kwargs)))
@@ -35,6 +38,9 @@ class FakeMem0V2:
     def history(self, memory_id: str) -> object:
         self.calls.append(("history", (memory_id,), {}))
         return [dict(item) for item in self.histories.get(memory_id, [])]
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _policy(provider: str = "openai") -> PolicyProfile:
@@ -69,7 +75,9 @@ def _profile(track: str) -> Mem0Profile:
         internal_llm_mode="explicit_native" if native else "policy_model",
         internal_llm_provider="openai" if native else None,
         internal_llm_model="gpt-5-mini" if native else None,
-        embedding_provider="openai" if native else "huggingface",
+        embedding_provider=(
+            "openai" if native else "openai_compatible_tei"
+        ),
         embedding_model="text-embedding-3-small" if native else "BAAI/bge-m3",
         vector_store="qdrant",
         reranker_enabled=False,
@@ -209,6 +217,16 @@ def test_resume_restores_the_cumulative_native_write_count() -> None:
         adapter.restore_write_count(-1)
 
 
+def test_adapter_close_releases_the_mem0_backend_once() -> None:
+    backend = FakeMem0V2()
+    adapter = Mem0QualificationAdapter(backend, user_id="user", run_id="run")
+
+    adapter.close()
+    adapter.close()
+
+    assert backend.closed is True
+
+
 def test_controlled_and_native_live_configs_are_explicit(tmp_path: Path) -> None:
     controlled = build_mem0_live_config(
         _profile("controlled"),
@@ -230,10 +248,11 @@ def test_controlled_and_native_live_configs_are_explicit(tmp_path: Path) -> None
         },
     }
     assert controlled["embedder"] == {
-        "provider": "huggingface",
+        "provider": "openai",
         "config": {
             "model": "BAAI/bge-m3",
-            "huggingface_base_url": "http://embedding:80/v1",
+            "api_key": "local-tei",
+            "openai_base_url": "http://embedding:80/v1",
             "embedding_dims": 1024,
         },
     }
@@ -245,6 +264,7 @@ def test_controlled_and_native_live_configs_are_explicit(tmp_path: Path) -> None
         policy=_policy("deepseek"),
         internal_llm_api_key="unused",
         native_openai_api_key="openai-secret",
+        native_openai_base_url="https://openai.example/v1",
         qdrant_url="http://qdrant:6333",
         collection_name="native_collection",
         history_db_path=tmp_path / "native.sqlite",
@@ -256,6 +276,7 @@ def test_controlled_and_native_live_configs_are_explicit(tmp_path: Path) -> None
         "config": {
             "model": "gpt-5-mini",
             "api_key": "openai-secret",
+            "openai_base_url": "https://openai.example/v1",
             "is_reasoning_model": True,
         },
     }
@@ -264,9 +285,28 @@ def test_controlled_and_native_live_configs_are_explicit(tmp_path: Path) -> None
         "config": {
             "model": "text-embedding-3-small",
             "api_key": "openai-secret",
+            "openai_base_url": "https://openai.example/v1",
             "embedding_dims": 1536,
         },
     }
+
+
+def test_openai_mem0_clients_receive_v1_base_url(tmp_path: Path) -> None:
+    config = build_mem0_live_config(
+        _profile("controlled"),
+        policy=_policy("openai"),
+        internal_llm_api_key="openai-secret",
+        native_openai_api_key="openai-secret",
+        qdrant_url="http://qdrant:6333",
+        collection_name="controlled_openai_collection",
+        history_db_path=tmp_path / "controlled-openai.sqlite",
+        embedding_base_url="http://embedding:80",
+        embedding_dimension=1024,
+    )
+
+    assert config["llm"]["config"]["openai_base_url"] == (  # type: ignore[index]
+        "https://openai.example/v1"
+    )
 
 
 def test_bare_list_responses_are_supported() -> None:
@@ -275,3 +315,107 @@ def test_bare_list_responses_are_supported() -> None:
     backend.search_result = [{"id": "m1", "memory": "one", "score": 1.0}]
     adapter = Mem0QualificationAdapter(backend, user_id="user", run_id="run")
     assert adapter.search_candidates("one", checkpoint_session=0).candidates[0].memory_id == "m1"
+
+
+def test_live_adapter_captures_internal_llm_and_embedding_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class CompletionResource:
+        def create(self, **_: object) -> object:
+            return SimpleNamespace(
+                id="completion-1",
+                model="gpt-test",
+                usage=SimpleNamespace(
+                    prompt_tokens=11,
+                    completion_tokens=3,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=2),
+                    completion_tokens_details=SimpleNamespace(reasoning_tokens=1),
+                ),
+            )
+
+    class EmbeddingResource:
+        def create(self, **_: object) -> object:
+            return SimpleNamespace(
+                id="embedding-1",
+                model="bge-test",
+                usage=SimpleNamespace(prompt_tokens=7, total_tokens=7),
+                data=[SimpleNamespace(embedding=[0.0, 1.0])],
+            )
+
+    class LiveBackend(FakeMem0V2):
+        def __init__(self) -> None:
+            super().__init__()
+            self.llm = SimpleNamespace(
+                client=SimpleNamespace(
+                    chat=SimpleNamespace(
+                        completions=CompletionResource(),
+                    )
+                )
+            )
+            self.embedding_model = SimpleNamespace(
+                client=SimpleNamespace(
+                    embeddings=EmbeddingResource(),
+                )
+            )
+
+        def add(self, messages: list[dict[str, str]], **kwargs: object) -> object:
+            self.llm.client.chat.completions.create(
+                model="gpt-test",
+                messages=messages,
+            )
+            self.embedding_model.client.embeddings.create(
+                model="bge-test",
+                input=["memory"],
+            )
+            return super().add(messages, **kwargs)
+
+        def search(self, query: str, **kwargs: object) -> object:
+            self.embedding_model.client.embeddings.create(
+                model="bge-test",
+                input=[query],
+            )
+            return super().search(query, **kwargs)
+
+    backend = LiveBackend()
+    memory_class = SimpleNamespace(from_config=lambda _: backend)
+    monkeypatch.setattr(
+        "lhmsb.adapters.mem0_qualification._load_mem0",
+        lambda: SimpleNamespace(Memory=memory_class),
+    )
+    config = build_mem0_live_config(
+        _profile("controlled"),
+        policy=_policy("openai"),
+        internal_llm_api_key="secret",
+        native_openai_api_key="unused",
+        qdrant_url="http://qdrant:6333",
+        collection_name="usage_collection",
+        history_db_path=tmp_path / "usage.sqlite",
+        embedding_base_url="http://embedding:80",
+        embedding_dimension=1024,
+    )
+    adapter = Mem0QualificationAdapter.create_live(
+        config,
+        user_id="user",
+        run_id="run",
+    )
+
+    write = adapter.write_session(
+        [{"role": "user", "content": "remember this"}],
+        session_index=0,
+    )
+    search = adapter.search_candidates("current state", checkpoint_session=0)
+
+    assert all(isinstance(event, ProviderUsageEvent) for event in write.usage_events)
+    assert [event.component for event in write.usage_events] == [
+        "memory_internal_llm",
+        "embedding",
+    ]
+    llm_usage = write.usage_events[0]
+    assert llm_usage.input_tokens == 11
+    assert llm_usage.output_tokens == 3
+    assert llm_usage.cached_tokens == 2
+    assert llm_usage.reasoning_tokens == 1
+    assert llm_usage.usage_observed
+    assert [event.component for event in search.usage_events] == ["embedding"]
+    assert search.usage_events[0].input_count == 1

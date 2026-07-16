@@ -40,6 +40,10 @@ def test_tracks_are_explicit_and_separate() -> None:
     config = load_qualification_config(CONFIG)
     assert config.controlled_mem0.track == "controlled"
     assert config.controlled_mem0.internal_llm_mode == "policy_model"
+    assert (
+        config.controlled_mem0.embedding_provider
+        == "openai_compatible_tei"
+    )
     assert config.controlled_mem0.embedding_model == "BAAI/bge-m3"
     assert config.controlled_mem0.reranker_enabled is False
     assert config.native_mem0.track == "native"

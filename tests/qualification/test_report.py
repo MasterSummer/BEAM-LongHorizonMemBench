@@ -59,6 +59,8 @@ def _matrix() -> tuple[QualificationMatrixResult, dict[str, object]]:
         writes=(),
         alignments=(),
         retrieval_traces=(),
+        qdrant_store_bytes=4096,
+        history_store_bytes=1024,
     )
     return (
         QualificationMatrixResult(
@@ -101,6 +103,8 @@ def test_report_emits_required_deterministic_hashed_artifacts(
     )
     assert metrics["write_coverage"]["value"] is None
     assert metrics["mean_behavior_score"]["value"] == 1.0
+    assert metrics["qdrant_store_bytes"]["value"] == 4096
+    assert metrics["history_store_bytes"]["value"] == 1024
     scorecard = (tmp_path / "first" / "scorecard.csv").read_text(
         encoding="utf-8"
     )

@@ -11,12 +11,15 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/lib/mem0_common.sh
+source "${REPO_ROOT}/scripts/lib/mem0_common.sh"
 COMPOSE_FILE="${REPO_ROOT}/deploy/compose.mem0.yaml"
 ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
 DATA_ROOT="${LHMSB_DATA_ROOT:-/data/lhmsb}"
 CONFIG_PATH="/app/configs/experiments/mem0_qualification.yaml"
 DATASET_PATH="/data/lhmsb/datasets/software_mem0_v2"
-REPORT_PATH="/data/lhmsb/runs/preflight/preflight-${SLURM_JOB_ID:-manual}.json"
+REPORT_PATH="/data/lhmsb/runs/preflight/latest.json"
+ARCHIVE_PATH="${DATA_ROOT}/runs/preflight/preflight-${SLURM_JOB_ID:-manual}.json"
 
 # Override at submission time when the cluster uses a different GRES label:
 # sbatch --gres="${LHMSB_SLURM_GRES:-gpu:a100:2}" deploy/slurm/mem0_preflight.sbatch
@@ -24,6 +27,7 @@ export LHMSB_DATA_ROOT="${DATA_ROOT}"
 export LHMSB_LIVE_PREFLIGHT=1
 
 mkdir -p "${DATA_ROOT}/runs/preflight"
+mem0_write_host_manifest "${DATA_ROOT}"
 
 srun --ntasks=1 docker compose \
   --env-file "${ENV_FILE}" \
@@ -38,3 +42,5 @@ srun --ntasks=1 docker compose \
   --config "${CONFIG_PATH}" \
   --data-root /data/lhmsb \
   --json "${REPORT_PATH}"
+
+cp "${DATA_ROOT}/runs/preflight/latest.json" "${ARCHIVE_PATH}"

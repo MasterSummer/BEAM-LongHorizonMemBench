@@ -9,6 +9,9 @@ import os
 import shutil
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -61,7 +64,7 @@ from lhmsb.qualification.storage import (
 from lhmsb.qualification.tei import RerankerClient
 from lhmsb.qualification.validate import validate_qualification_artifacts
 
-QUALIFICATION_RUN_SCHEMA_VERSION = 1
+QUALIFICATION_RUN_SCHEMA_VERSION = 2
 _PROG = "python -m lhmsb.qualification"
 
 
@@ -82,6 +85,10 @@ class QualificationRunManifest:
     config_path: str
     config_hash: str
     dependency_lock_sha256: str
+    data_root: str
+    image_digests_hash: str
+    model_files_hash: str
+    hardware_profile_hash: str
     task_count: int
     episode_ids: tuple[str, ...]
     n_sessions: int
@@ -117,6 +124,19 @@ class QualificationRunManifest:
                 data.get("dependency_lock_sha256"),
                 "dependency_lock_sha256",
             ),
+            data_root=_text(data.get("data_root"), "data_root"),
+            image_digests_hash=_text(
+                data.get("image_digests_hash"),
+                "image_digests_hash",
+            ),
+            model_files_hash=_text(
+                data.get("model_files_hash"),
+                "model_files_hash",
+            ),
+            hardware_profile_hash=_text(
+                data.get("hardware_profile_hash"),
+                "hardware_profile_hash",
+            ),
             task_count=_integer(data.get("task_count"), "task_count"),
             episode_ids=_string_tuple(
                 data.get("episode_ids"),
@@ -128,6 +148,14 @@ class QualificationRunManifest:
                 "required_secret_env",
             ),
         )
+
+
+@dataclass(frozen=True)
+class RuntimeIdentity:
+    data_root: Path
+    image_digests_hash: str
+    model_files_hash: str
+    hardware_profile_hash: str
 
 
 @dataclass(frozen=True)
@@ -175,6 +203,14 @@ def plan_qualification_run(
     uv_lock = repository_root / "uv.lock"
     dataset_manifest_sha256 = _sha256(dataset_manifest)
     dependency_lock_sha256 = _sha256(uv_lock)
+    data_root = Path(
+        os.environ.get(config.data_root_env, "/data/lhmsb")
+    ).resolve()
+    runtime = _runtime_identity(
+        data_root,
+        environment=dict(os.environ),
+        required=os.environ.get("LHMSB_LIVE_QUALIFICATION") == "1",
+    )
     identity_payload = {
         "schema_version": QUALIFICATION_RUN_SCHEMA_VERSION,
         "code_commit": snapshot.commit,
@@ -182,6 +218,10 @@ def plan_qualification_run(
         "dataset_manifest_sha256": dataset_manifest_sha256,
         "config_hash": config.config_hash,
         "dependency_lock_sha256": dependency_lock_sha256,
+        "data_root": runtime.data_root.as_posix(),
+        "image_digests_hash": runtime.image_digests_hash,
+        "model_files_hash": runtime.model_files_hash,
+        "hardware_profile_hash": runtime.hardware_profile_hash,
     }
     run_identity = canonical_hash(identity_payload)
     tasks = build_qualification_tasks(
@@ -201,6 +241,10 @@ def plan_qualification_run(
         config_path=str(config_path.resolve()),
         config_hash=config.config_hash,
         dependency_lock_sha256=dependency_lock_sha256,
+        data_root=runtime.data_root.as_posix(),
+        image_digests_hash=runtime.image_digests_hash,
+        model_files_hash=runtime.model_files_hash,
+        hardware_profile_hash=runtime.hardware_profile_hash,
         task_count=len(tasks),
         episode_ids=tuple(spec.plan.episode_id for spec in specs),
         n_sessions=next(iter(session_counts)),
@@ -273,12 +317,36 @@ def execute_qualification_task(
         config=config,
         environment=env,
     )
-    result = run_qualification_task(
-        task,
-        spec,
-        components=components,
-        storage=storage,
-        visible_k=config.retrieval.visible_k,
+    try:
+        result = run_qualification_task(
+            task,
+            spec,
+            components=components,
+            storage=storage,
+            visible_k=config.retrieval.visible_k,
+        )
+    except BaseException as exc:
+        try:
+            _close_task_components(components)
+        except Exception as cleanup_exc:
+            exc.add_note(f"task resource cleanup also failed: {cleanup_exc}")
+        raise
+    _close_task_components(components)
+    if task.condition.startswith("mem0_"):
+        qdrant_store_bytes = _qdrant_collection_snapshot_size(
+            env.get("LHMSB_QDRANT_URL", "http://qdrant:6333"),
+            isolation.collection_name,
+        )
+        history_store_bytes = _sqlite_store_size(
+            isolation.history_db_path
+        )
+    else:
+        qdrant_store_bytes = 0
+        history_store_bytes = 0
+    result = replace(
+        result,
+        qdrant_store_bytes=qdrant_store_bytes,
+        history_store_bytes=history_store_bytes,
     )
     _write_task_result(result_path, manifest, task, result)
     return result
@@ -350,6 +418,10 @@ def aggregate_qualification_run(
             "dataset_manifest_sha256": manifest.dataset_manifest_sha256,
             "config_hash": manifest.config_hash,
             "dependency_lock_sha256": manifest.dependency_lock_sha256,
+            "data_root": manifest.data_root,
+            "image_digests_hash": manifest.image_digests_hash,
+            "model_files_hash": manifest.model_files_hash,
+            "hardware_profile_hash": manifest.hardware_profile_hash,
             "planned_task_count": manifest.task_count,
             "missing_task_count": missing,
             "required_secret_env": list(manifest.required_secret_env),
@@ -665,6 +737,23 @@ def _load_run_contract(
         raise QualificationCliError(
             "dataset manifest hash does not match the planned run identity"
         )
+    runtime = _runtime_identity(
+        Path(manifest.data_root),
+        environment=dict(os.environ),
+        required=manifest.image_digests_hash != "unavailable",
+    )
+    if runtime.image_digests_hash != manifest.image_digests_hash:
+        raise QualificationCliError(
+            "image digest manifest changed after planning"
+        )
+    if runtime.model_files_hash != manifest.model_files_hash:
+        raise QualificationCliError(
+            "model file manifest changed after planning"
+        )
+    if runtime.hardware_profile_hash != manifest.hardware_profile_hash:
+        raise QualificationCliError(
+            "hardware profile changed after planning"
+        )
     return manifest, config, specs, tasks
 
 
@@ -707,15 +796,16 @@ def _live_components(
             else config.native_mem0
         )
         isolation.history_db_path.parent.mkdir(parents=True, exist_ok=True)
+        qdrant_url = environment.get(
+            "LHMSB_QDRANT_URL",
+            "http://qdrant:6333",
+        )
         live_config = build_mem0_live_config(
             profile,
             policy=effective_policy,
             internal_llm_api_key=policy_key,
             native_openai_api_key=environment.get("OPENAI_API_KEY", ""),
-            qdrant_url=environment.get(
-                "LHMSB_QDRANT_URL",
-                "http://qdrant:6333",
-            ),
+            qdrant_url=qdrant_url,
             collection_name=isolation.collection_name,
             history_db_path=isolation.history_db_path,
             embedding_base_url=environment.get(
@@ -723,12 +813,20 @@ def _live_components(
                 "http://embedding:80",
             ),
             embedding_dimension=config.retrieval.embedding_dimension,
+            native_openai_base_url=environment.get(
+                "OPENAI_BASE_URL",
+                "https://api.openai.com/v1",
+            ),
         )
         memory = Mem0QualificationAdapter.create_live(
             live_config,
             user_id=isolation.user_id,
             run_id=isolation.run_id,
             candidate_k=config.retrieval.candidate_k,
+            collection_count=lambda: _qdrant_collection_count(
+                qdrant_url,
+                isolation.collection_name,
+            ),
         )
         if task.condition == "mem0_controlled":
             reranker = RerankerClient(
@@ -745,6 +843,265 @@ def _live_components(
         memory=memory,
         reranker=reranker,
     )
+
+
+def _qdrant_collection_count(
+    qdrant_url: str,
+    collection_name: str,
+) -> int:
+    encoded_collection = urllib.parse.quote(
+        collection_name,
+        safe="",
+    )
+    request = urllib.request.Request(
+        (
+            f"{qdrant_url.rstrip('/')}/collections/"
+            f"{encoded_collection}/points/count"
+        ),
+        data=b'{"exact":true}',
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30.0) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return 0
+        raise QualificationRunError(
+            "inventory_failure",
+            f"Qdrant count failed with HTTP {exc.code}",
+        ) from exc
+    except OSError as exc:
+        raise QualificationRunError(
+            "inventory_failure",
+            f"Qdrant count request failed: {exc}",
+        ) from exc
+    data = json.loads(raw)
+    if not isinstance(data, Mapping):
+        raise QualificationRunError(
+            "inventory_failure",
+            "Qdrant count response must be an object",
+        )
+    result = data.get("result")
+    if not isinstance(result, Mapping):
+        raise QualificationRunError(
+            "inventory_failure",
+            "Qdrant count response lacks result",
+        )
+    count = result.get("count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise QualificationRunError(
+            "inventory_failure",
+            "Qdrant count response has an invalid count",
+        )
+    return count
+
+
+def _qdrant_collection_snapshot_size(
+    qdrant_url: str,
+    collection_name: str,
+) -> int:
+    """Measure the compressed bytes of one isolated Qdrant collection."""
+    try:
+        from qdrant_client import QdrantClient
+    except ImportError as exc:  # pragma: no cover - qualification extra gate
+        raise QualificationRunError(
+            "resource_measurement_failure",
+            "qdrant-client is required to measure collection footprint",
+        ) from exc
+
+    client = QdrantClient(url=qdrant_url, timeout=60)
+    snapshot_name: str | None = None
+    try:
+        try:
+            snapshot = client.create_snapshot(
+                collection_name=collection_name,
+                wait=True,
+            )
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 404:
+                return 0
+            raise QualificationRunError(
+                "resource_measurement_failure",
+                f"Qdrant snapshot creation failed: {exc}",
+            ) from exc
+        if snapshot is None:
+            raise QualificationRunError(
+                "resource_measurement_failure",
+                "Qdrant snapshot creation returned no description",
+            )
+        raw_name = getattr(snapshot, "name", None)
+        raw_size = getattr(snapshot, "size", None)
+        if not isinstance(raw_name, str) or not raw_name:
+            raise QualificationRunError(
+                "resource_measurement_failure",
+                "Qdrant snapshot description lacks a name",
+            )
+        snapshot_name = raw_name
+        if (
+            isinstance(raw_size, bool)
+            or not isinstance(raw_size, int)
+            or raw_size < 0
+        ):
+            raise QualificationRunError(
+                "resource_measurement_failure",
+                "Qdrant snapshot description has an invalid size",
+            )
+        return raw_size
+    finally:
+        cleanup_errors: list[str] = []
+        if snapshot_name is not None:
+            try:
+                client.delete_snapshot(
+                    collection_name=collection_name,
+                    snapshot_name=snapshot_name,
+                    wait=True,
+                )
+            except Exception as exc:  # pragma: no cover - remote cleanup
+                cleanup_errors.append(f"delete snapshot: {exc}")
+        try:
+            client.close()
+        except Exception as exc:  # pragma: no cover - remote cleanup
+            cleanup_errors.append(f"close client: {exc}")
+        if cleanup_errors:
+            raise QualificationRunError(
+                "resource_cleanup_failure",
+                "; ".join(cleanup_errors),
+            )
+
+
+def _sqlite_store_size(path: Path) -> int:
+    """Return SQLite database bytes including any live WAL/SHM sidecars."""
+    return sum(
+        candidate.stat().st_size
+        for candidate in (
+            path,
+            Path(f"{path}-wal"),
+            Path(f"{path}-shm"),
+        )
+        if candidate.is_file()
+    )
+
+
+def _close_task_components(components: TaskComponents) -> None:
+    errors: list[str] = []
+    seen: set[int] = set()
+    for name, resource in (
+        ("memory", components.memory),
+        ("reranker", components.reranker),
+        ("policy", components.policy),
+    ):
+        if resource is None or id(resource) in seen:
+            continue
+        seen.add(id(resource))
+        close = getattr(resource, "close", None)
+        if not callable(close):
+            continue
+        try:
+            close()
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+    if errors:
+        raise QualificationRunError(
+            "resource_cleanup_failure",
+            "; ".join(errors),
+        )
+
+
+def _runtime_identity(
+    data_root: Path,
+    *,
+    environment: Mapping[str, str],
+    required: bool,
+) -> RuntimeIdentity:
+    image_manifest = data_root / "manifests" / "images.json"
+    model_manifest = data_root / "manifests" / "models.json"
+    preflight_report = data_root / "runs" / "preflight" / "latest.json"
+    image_hash = _required_or_unavailable_hash(
+        image_manifest,
+        required=required,
+        label="image digest manifest",
+    )
+    model_hash = _required_or_unavailable_hash(
+        model_manifest,
+        required=required,
+        label="model file manifest",
+    )
+    if not preflight_report.is_file():
+        if required:
+            raise QualificationCliError(
+                f"missing successful preflight report: {preflight_report}"
+            )
+        hardware_hash = "unavailable"
+    else:
+        data = _read_json(preflight_report)
+        checks = data.get("checks")
+        if not isinstance(checks, Sequence) or isinstance(
+            checks,
+            (str, bytes),
+        ):
+            raise QualificationCliError(
+                "preflight report checks must be an array"
+            )
+        host_details: Mapping[str, object] | None = None
+        for raw_check in checks:
+            if not isinstance(raw_check, Mapping):
+                continue
+            if raw_check.get("name") != "host_and_gpu_runtime":
+                continue
+            if raw_check.get("status") != "pass":
+                raise QualificationCliError(
+                    "host_and_gpu_runtime preflight gate did not pass"
+                )
+            details = raw_check.get("details")
+            if isinstance(details, Mapping):
+                host_details = details
+            break
+        if host_details is None:
+            raise QualificationCliError(
+                "preflight report lacks passed host_and_gpu_runtime details"
+            )
+        gpus = host_details.get("gpus")
+        if not isinstance(gpus, Sequence) or isinstance(
+            gpus,
+            (str, bytes),
+        ):
+            raise QualificationCliError(
+                "preflight hardware details lack a GPU array"
+            )
+        hardware_hash = canonical_hash(
+            {
+                "gpus": [str(item) for item in gpus],
+                "embedding_gpu_id": environment.get(
+                    "LHMSB_EMBEDDING_GPU_ID",
+                    "0",
+                ),
+                "reranker_gpu_id": environment.get(
+                    "LHMSB_RERANKER_GPU_ID",
+                    "1",
+                ),
+            }
+        )
+    return RuntimeIdentity(
+        data_root=data_root,
+        image_digests_hash=image_hash,
+        model_files_hash=model_hash,
+        hardware_profile_hash=hardware_hash,
+    )
+
+
+def _required_or_unavailable_hash(
+    path: Path,
+    *,
+    required: bool,
+    label: str,
+) -> str:
+    if path.is_file():
+        return _sha256(path)
+    if required:
+        raise QualificationCliError(f"missing {label}: {path}")
+    return "unavailable"
 
 
 def _effective_policy(

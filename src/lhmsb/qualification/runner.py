@@ -16,6 +16,7 @@ from lhmsb.adapters.mem0_qualification import (
     InventorySnapshot,
     Mem0QualificationError,
     NativeMemoryEvent,
+    ProviderUsageEvent,
     SearchCandidate,
     WriteSessionResult,
 )
@@ -183,6 +184,7 @@ class RetrievalTrace:
     candidate_shortfall: bool
     search_latency_seconds: float
     rerank_result: RerankResult | None = None
+    internal_usage: tuple[ProviderUsageEvent, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -258,6 +260,8 @@ class QualificationTaskResult:
     retrieval_traces: tuple[RetrievalTrace, ...]
     error_class: str | None = None
     error_message: str | None = None
+    qdrant_store_bytes: int | None = None
+    history_store_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -294,6 +298,12 @@ def qualification_task_result_from_dict(
         ),
         error_class=_optional_string(data.get("error_class")),
         error_message=_optional_string(data.get("error_message")),
+        qdrant_store_bytes=_optional_integer(
+            data.get("qdrant_store_bytes")
+        ),
+        history_store_bytes=_optional_integer(
+            data.get("history_store_bytes")
+        ),
     )
 
 
@@ -489,6 +499,7 @@ def run_qualification_task(
                         candidate_shortfall=search.candidate_shortfall,
                         search_latency_seconds=search.latency_seconds,
                         rerank_result=rerank,
+                        internal_usage=search.usage_events,
                     )
                     retrieval_traces.append(trace)
 
@@ -1732,6 +1743,10 @@ def _retrieval_trace_from_dict(
             if rerank_data is not None
             else None
         ),
+        internal_usage=tuple(
+            _provider_usage_event_from_dict(item)
+            for item in _mapping_sequence(data.get("internal_usage", ()))
+        ),
     )
 
 
@@ -1771,6 +1786,10 @@ def _write_result_from_dict(data: Mapping[str, object]) -> WriteSessionResult:
         inventory=inventory,
         n_write=_integer(data.get("n_write")),
         latency_seconds=_number(data.get("latency_seconds")),
+        usage_events=tuple(
+            _provider_usage_event_from_dict(item)
+            for item in _mapping_sequence(data.get("usage_events", ()))
+        ),
     )
 
 
@@ -1820,6 +1839,35 @@ def _candidate_search_from_dict(
         ),
         candidate_shortfall=bool(data.get("candidate_shortfall", False)),
         latency_seconds=_number(data.get("latency_seconds")),
+        usage_events=tuple(
+            _provider_usage_event_from_dict(item)
+            for item in _mapping_sequence(data.get("usage_events", ()))
+        ),
+    )
+
+
+def _provider_usage_event_from_dict(
+    data: Mapping[str, object],
+) -> ProviderUsageEvent:
+    return ProviderUsageEvent(
+        call_id=str(data.get("call_id", "")),
+        component=str(data.get("component", "")),
+        provider=str(data.get("provider", "")),
+        model_id=str(data.get("model_id", "")),
+        endpoint_identity=str(data.get("endpoint_identity", "")),
+        request_hash=str(data.get("request_hash", "")),
+        response_hash=str(data.get("response_hash", "")),
+        input_tokens=_optional_integer(data.get("input_tokens")),
+        output_tokens=_optional_integer(data.get("output_tokens")),
+        cached_tokens=_optional_integer(data.get("cached_tokens")),
+        reasoning_tokens=_optional_integer(data.get("reasoning_tokens")),
+        usage_observed=bool(data.get("usage_observed", False)),
+        input_count=_integer(data.get("input_count")),
+        latency_seconds=_number(data.get("latency_seconds")),
+        retry_count=_optional_integer(data.get("retry_count")),
+        error_class=_optional_string(data.get("error_class")),
+        started_at_utc=str(data.get("started_at_utc", "")),
+        ended_at_utc=str(data.get("ended_at_utc", "")),
     )
 
 

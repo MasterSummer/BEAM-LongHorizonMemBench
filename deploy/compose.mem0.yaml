@@ -114,6 +114,10 @@ services:
       LHMSB_RERANKER_URL: http://reranker:80
       LHMSB_LIVE_PREFLIGHT: "${LHMSB_LIVE_PREFLIGHT:-0}"
       LHMSB_LIVE_QUALIFICATION: "${LHMSB_LIVE_QUALIFICATION:-0}"
+      LHMSB_CONTAINERIZED: "1"
+      LHMSB_HOST_MANIFEST: /data/lhmsb/manifests/host.json
+      LHMSB_EMBEDDING_GPU_ID: "${LHMSB_EMBEDDING_GPU_ID:-0}"
+      LHMSB_RERANKER_GPU_ID: "${LHMSB_RERANKER_GPU_ID:-1}"
       LHMSB_MEM0_WHEEL: /data/lhmsb/wheelhouse/mem0ai-2.0.12-py3-none-any.whl
       LHMSB_IMAGE_DIGEST_MANIFEST: /data/lhmsb/manifests/images.json
       LHMSB_MODEL_FILE_MANIFEST: /data/lhmsb/manifests/models.json

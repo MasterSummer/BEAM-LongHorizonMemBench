@@ -7,7 +7,7 @@ wheel_sha256: 6b7e1afa466f6e14dd34b5e9222c159a69fad38f8d787e73adbf91dbb29e73e2
 internal_llm_mode: policy_model
 internal_llm_provider: null
 internal_llm_model: null
-embedding_provider: huggingface
+embedding_provider: openai_compatible_tei
 embedding_model: BAAI/bge-m3
 vector_store: qdrant
 reranker_enabled: false

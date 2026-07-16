@@ -33,6 +33,18 @@ def test_compose_has_isolated_worker_qdrant_and_two_tei_services() -> None:
     assert isinstance(worker, dict)
     assert set(worker["networks"]) == {"backend", "provider_egress"}
     assert worker.get("healthcheck")
+    environment = worker.get("environment")
+    assert isinstance(environment, dict)
+    assert environment["LHMSB_CONTAINERIZED"] == "1"
+    assert environment["LHMSB_HOST_MANIFEST"] == (
+        "/data/lhmsb/manifests/host.json"
+    )
+    assert environment["LHMSB_EMBEDDING_GPU_ID"] == (
+        "${LHMSB_EMBEDDING_GPU_ID:-0}"
+    )
+    assert environment["LHMSB_RERANKER_GPU_ID"] == (
+        "${LHMSB_RERANKER_GPU_ID:-1}"
+    )
 
 
 def test_compose_pins_images_gpus_and_shared_data_root() -> None:
@@ -51,6 +63,8 @@ def test_compose_pins_images_gpus_and_shared_data_root() -> None:
 def test_worker_image_is_offline_locked_unprivileged_and_has_cli_entrypoint() -> None:
     text = DOCKERFILE.read_text(encoding="utf-8")
     assert "PYTHON_BASE_DIGEST" in text
+    assert "SOURCE_COMMIT" in text
+    assert "BUILD.json" in text
     assert "--no-index" in text
     assert "--find-links=/opt/wheelhouse" in text
     assert "uv sync --frozen --offline" in text
@@ -71,7 +85,11 @@ def test_slurm_uses_two_a100s_and_the_same_frozen_cli_contract() -> None:
         assert "visible-k" not in text
     assert "preflight --dataset" in preflight
     assert "--repository-only" not in preflight
+    assert "mem0_write_host_manifest" in preflight
+    assert "/runs/preflight/latest.json" in preflight
     assert "run-matrix --run-dir" in qualification
+    assert "--keep-going" in qualification
+    assert "validate --report" in qualification
     assert "LHMSB_LIVE_QUALIFICATION=1" in qualification
 
 

@@ -143,6 +143,138 @@ def test_causal_use_drift_behavior_and_reliability_formulas() -> None:
     assert metrics["terminal_failure_rate"].value == 0.5
 
 
+def test_cost_metrics_separate_policy_internal_embedding_and_reranking() -> None:
+    metrics = compute_metric_collection(
+        usages=(
+            UsageMetricInput(
+                input_tokens=10,
+                output_tokens=2,
+                cached_tokens=None,
+                reasoning_tokens=None,
+                latency_seconds=4.0,
+                retry_count=0,
+                terminal_failure=False,
+                component="policy",
+                input_count=1,
+                usage_observed=True,
+            ),
+            UsageMetricInput(
+                input_tokens=6,
+                output_tokens=1,
+                cached_tokens=2,
+                reasoning_tokens=3,
+                latency_seconds=2.0,
+                retry_count=0,
+                terminal_failure=False,
+                component="memory_internal_llm",
+                input_count=1,
+                usage_observed=True,
+            ),
+            UsageMetricInput(
+                input_tokens=None,
+                output_tokens=None,
+                cached_tokens=None,
+                reasoning_tokens=None,
+                latency_seconds=0.5,
+                retry_count=0,
+                terminal_failure=False,
+                component="embedding",
+                input_count=4,
+                usage_observed=False,
+            ),
+            UsageMetricInput(
+                input_tokens=None,
+                output_tokens=None,
+                cached_tokens=None,
+                reasoning_tokens=None,
+                latency_seconds=0.25,
+                retry_count=0,
+                terminal_failure=False,
+                component="reranker",
+                input_count=20,
+                usage_observed=False,
+            ),
+            UsageMetricInput(
+                input_tokens=None,
+                output_tokens=None,
+                cached_tokens=None,
+                reasoning_tokens=None,
+                latency_seconds=0.0,
+                retry_count=0,
+                terminal_failure=False,
+                component="qdrant_store",
+                input_count=4096,
+                usage_observed=True,
+            ),
+            UsageMetricInput(
+                input_tokens=None,
+                output_tokens=None,
+                cached_tokens=None,
+                reasoning_tokens=None,
+                latency_seconds=0.0,
+                retry_count=0,
+                terminal_failure=False,
+                component="history_store",
+                input_count=1024,
+                usage_observed=True,
+            ),
+        )
+    )
+
+    assert metrics["policy_input_tokens"].value == 10
+    assert metrics["memory_internal_input_tokens"].value == 6
+    assert metrics["memory_internal_cached_tokens"].value == 2
+    assert metrics["memory_internal_reasoning_tokens"].value == 3
+    assert metrics["memory_internal_usage_observed_rate"].value == 1.0
+    assert metrics["embedding_call_count"].value == 1
+    assert metrics["embedding_input_count"].value == 4
+    assert metrics["reranker_call_count"].value == 1
+    assert metrics["reranker_candidate_pairs"].value == 20
+    assert metrics["qdrant_store_bytes"].value == 4096
+    assert metrics["history_store_bytes"].value == 1024
+
+
+def test_store_footprints_do_not_dilute_terminal_failure_rate() -> None:
+    metrics = compute_metric_collection(
+        usages=(
+            UsageMetricInput(
+                input_tokens=None,
+                output_tokens=None,
+                cached_tokens=None,
+                reasoning_tokens=None,
+                latency_seconds=1.0,
+                retry_count=0,
+                terminal_failure=True,
+                component="policy",
+            ),
+            UsageMetricInput(
+                input_tokens=None,
+                output_tokens=None,
+                cached_tokens=None,
+                reasoning_tokens=None,
+                latency_seconds=0.0,
+                retry_count=0,
+                terminal_failure=False,
+                component="qdrant_store",
+                input_count=4096,
+            ),
+            UsageMetricInput(
+                input_tokens=None,
+                output_tokens=None,
+                cached_tokens=None,
+                reasoning_tokens=None,
+                latency_seconds=0.0,
+                retry_count=0,
+                terminal_failure=False,
+                component="history_store",
+                input_count=1024,
+            ),
+        )
+    )
+
+    assert metrics["terminal_failure_rate"].value == 1.0
+
+
 def test_workspace_gain_oracle_gap_and_common_rerank_delta() -> None:
     behaviors = (
         BehaviorMetricInput(
@@ -182,4 +314,3 @@ def test_workspace_gain_oracle_gap_and_common_rerank_delta() -> None:
     assert metrics["mem0_gain_beyond_workspace"].value == 0.5
     assert metrics["oracle_gap_closed"].value == 0.625
     assert metrics["common_rerank_behavior_delta"].value == 0.2
-

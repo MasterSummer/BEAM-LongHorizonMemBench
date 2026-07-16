@@ -9,6 +9,7 @@ REPO_ROOT="$(mem0_repo_root)"
 DATA_ROOT="${LHMSB_DATA_ROOT:-/data/lhmsb}"
 ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
 DRY_RUN=0
+ALLOW_DIRTY=0
 
 LEGACY_RELEASE="software-vertical-v0.1.0"
 LEGACY_ARCHIVE="software_v1-6b4edbf.tar.gz"
@@ -31,6 +32,7 @@ Prepare an online A100 host for the frozen Mem0 qualification.
 Options:
   --data-root PATH  Persistent benchmark root (default: /data/lhmsb)
   --env-file PATH   Compose environment file (default: .env)
+  --allow-dirty     Permit a non-reproducible image build from local changes
   --dry-run         Print every external action without writing or downloading
   -h, --help        Show this help
 EOF
@@ -50,6 +52,10 @@ while (($#)); do
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --allow-dirty)
+      ALLOW_DIRTY=1
       shift
       ;;
     -h|--help)
@@ -82,10 +88,16 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   mem0_print_command download-model "${RERANKER_REPOSITORY}" "${RERANKER_REVISION}"
   mem0_print_command hash-models "manifests/models.json"
   mem0_print_command pull-build-save-images "manifests/images.json"
-  mem0_print_command uv run python -m lhmsb.qualification preflight --repository-only \
-    --dataset "${DATA_ROOT}/datasets/software_mem0_v2" \
-    --config "${REPO_ROOT}/configs/experiments/mem0_qualification.yaml" \
+  PREFLIGHT_COMMAND=(
+    uv run python -m lhmsb.qualification preflight --repository-only
+    --dataset "${DATA_ROOT}/datasets/software_mem0_v2"
+    --config "${REPO_ROOT}/configs/experiments/mem0_qualification.yaml"
     --data-root "${DATA_ROOT}"
+  )
+  if [[ "${ALLOW_DIRTY}" == "1" ]]; then
+    PREFLIGHT_COMMAND+=(--allow-dirty)
+  fi
+  mem0_print_command "${PREFLIGHT_COMMAND[@]}"
   exit 0
 fi
 
@@ -93,6 +105,18 @@ command -v docker >/dev/null
 command -v git >/dev/null
 command -v python3 >/dev/null
 command -v uv >/dev/null
+
+SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+SOURCE_REF="$(git -C "${REPO_ROOT}" symbolic-ref --short -q HEAD || printf 'detached')"
+SOURCE_DIRTY=false
+if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=normal)" ]]; then
+  SOURCE_DIRTY=true
+  if [[ "${ALLOW_DIRTY}" != "1" ]]; then
+    printf '%s\n' \
+      'repository is dirty; commit changes or pass --allow-dirty for a non-formal build' >&2
+    exit 1
+  fi
+fi
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   cp "${REPO_ROOT}/.env.example" "${ENV_FILE}"
@@ -265,6 +289,9 @@ TEI_IMAGE_DIGEST="$(resolve_repo_digest "${TEI_REFERENCE}")"
 docker build \
   --build-arg "PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE}" \
   --build-arg "PYTHON_BASE_DIGEST=${PYTHON_BASE_DIGEST}" \
+  --build-arg "SOURCE_COMMIT=${SOURCE_COMMIT}" \
+  --build-arg "SOURCE_REF=${SOURCE_REF}" \
+  --build-arg "SOURCE_DIRTY=${SOURCE_DIRTY}" \
   --tag "${LHMSB_WORKER_IMAGE}:qualification" \
   --file "${REPO_ROOT}/docker/mem0-worker.Dockerfile" \
   "${REPO_ROOT}"
@@ -338,10 +365,16 @@ for key, value in updates.items():
 path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
 PY
 
-uv run python -m lhmsb.qualification preflight --repository-only \
-  --dataset "${DATA_ROOT}/datasets/software_mem0_v2" \
-  --config "${REPO_ROOT}/configs/experiments/mem0_qualification.yaml" \
+PREFLIGHT_COMMAND=(
+  uv run python -m lhmsb.qualification preflight --repository-only
+  --dataset "${DATA_ROOT}/datasets/software_mem0_v2"
+  --config "${REPO_ROOT}/configs/experiments/mem0_qualification.yaml"
   --data-root "${DATA_ROOT}"
+)
+if [[ "${ALLOW_DIRTY}" == "1" ]]; then
+  PREFLIGHT_COMMAND+=(--allow-dirty)
+fi
+"${PREFLIGHT_COMMAND[@]}"
 
 printf 'Mem0 server bootstrap complete: %s\n' "${DATA_ROOT}"
 printf 'Manifests: manifests/models.json manifests/wheels.json manifests/images.json\n'

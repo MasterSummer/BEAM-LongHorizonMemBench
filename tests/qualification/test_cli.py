@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.longhorizon.interventions import ContinuationOutcome
-from lhmsb.qualification.cli import main
+from lhmsb.qualification.cli import (
+    _qdrant_collection_count,
+    _qdrant_collection_snapshot_size,
+    _sqlite_store_size,
+    main,
+)
 from lhmsb.qualification.report import write_qualification_report
 from lhmsb.qualification.runner import (
     ConditionRunResult,
@@ -54,6 +61,39 @@ def test_plan_writes_redacted_identity_bound_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-written")
+    data_root = tmp_path / "data"
+    (data_root / "manifests").mkdir(parents=True)
+    (data_root / "runs" / "preflight").mkdir(parents=True)
+    image_manifest = data_root / "manifests" / "images.json"
+    model_manifest = data_root / "manifests" / "models.json"
+    image_manifest.write_text(
+        '{"qdrant":"sha256:image"}\n',
+        encoding="utf-8",
+    )
+    model_manifest.write_text(
+        '{"files":{},"revisions":{}}\n',
+        encoding="utf-8",
+    )
+    (data_root / "runs" / "preflight" / "latest.json").write_text(
+        json.dumps(
+            {
+                "checks": [
+                    {
+                        "name": "host_and_gpu_runtime",
+                        "status": "pass",
+                        "details": {
+                            "gpus": [
+                                "0, NVIDIA A100-SXM4-80GB, 81920 MiB",
+                                "1, NVIDIA A100-SXM4-80GB, 81920 MiB",
+                            ]
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LHMSB_DATA_ROOT", str(data_root))
     report_path = tmp_path / "plan.json"
     run_dir = tmp_path / "run"
 
@@ -77,6 +117,13 @@ def test_plan_writes_redacted_identity_bound_contract(
     assert "must-not-be-written" not in manifest_text
     manifest = json.loads(manifest_text)
     assert manifest["task_count"] == 12
+    assert manifest["image_digests_hash"] == hashlib.sha256(
+        image_manifest.read_bytes()
+    ).hexdigest()
+    assert manifest["model_files_hash"] == hashlib.sha256(
+        model_manifest.read_bytes()
+    ).hexdigest()
+    assert len(manifest["hardware_profile_hash"]) == 64
     assert manifest["required_secret_env"] == [
         "ANTHROPIC_API_KEY",
         "DEEPSEEK_API_KEY",
@@ -177,6 +224,40 @@ def test_run_contract_identity_mismatch_is_rejected(
     assert "identity" in capsys.readouterr().err.casefold()
 
 
+def test_run_identity_changes_when_the_persistent_data_root_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identities: list[str] = []
+    for index in range(2):
+        monkeypatch.setenv(
+            "LHMSB_DATA_ROOT",
+            str(tmp_path / f"data-{index}"),
+        )
+        run_dir = tmp_path / f"run-{index}"
+        assert (
+            main(
+                [
+                    "plan",
+                    "--dataset",
+                    str(DATASET),
+                    "--config",
+                    str(CONFIG),
+                    "--out",
+                    str(run_dir),
+                    "--allow-dirty",
+                ]
+            )
+            == 0
+        )
+        manifest = json.loads(
+            (run_dir / "run_manifest.json").read_text(encoding="utf-8")
+        )
+        identities.append(manifest["run_identity"])
+
+    assert identities[0] != identities[1]
+
+
 def _tiny_report(tmp_path: Path) -> Path:
     spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
     sceu = spec.plan.sceu_units[0]
@@ -252,3 +333,103 @@ def test_validate_command_checks_hashes_and_trace_ordering(
     assert invalid.ok is False
     assert any("retrieved" in error for error in invalid.errors)
     assert main(["validate", "--report", str(report)]) == 1
+
+
+def test_qdrant_collection_count_uses_exact_task_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"result":{"count":7},"status":"ok"}'
+
+    def urlopen(request: object, *, timeout: float) -> Response:
+        captured["url"] = request.full_url  # type: ignore[attr-defined]
+        captured["data"] = request.data  # type: ignore[attr-defined]
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+
+    count = _qdrant_collection_count(
+        "http://qdrant:6333",
+        "run--task",
+    )
+
+    assert count == 7
+    assert captured == {
+        "url": "http://qdrant:6333/collections/run--task/points/count",
+        "data": b'{"exact":true}',
+        "timeout": 30.0,
+    }
+
+
+def test_qdrant_snapshot_size_is_measured_and_snapshot_is_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class FakeQdrantClient:
+        def __init__(self, *, url: str, timeout: float) -> None:
+            calls.append(("init", (url, timeout)))
+
+        def create_snapshot(
+            self,
+            *,
+            collection_name: str,
+            wait: bool,
+        ) -> object:
+            calls.append(("create", (collection_name, wait)))
+            return SimpleNamespace(name="task.snapshot", size=8192)
+
+        def delete_snapshot(
+            self,
+            *,
+            collection_name: str,
+            snapshot_name: str,
+            wait: bool,
+        ) -> None:
+            calls.append(
+                ("delete", (collection_name, snapshot_name, wait))
+            )
+
+        def close(self) -> None:
+            calls.append(("close", None))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "qdrant_client",
+        SimpleNamespace(QdrantClient=FakeQdrantClient),
+    )
+
+    size = _qdrant_collection_snapshot_size(
+        "http://qdrant:6333",
+        "run--task",
+    )
+
+    assert size == 8192
+    assert calls == [
+        ("init", ("http://qdrant:6333", 60.0)),
+        ("create", ("run--task", True)),
+        ("delete", ("run--task", "task.snapshot", True)),
+        ("close", None),
+    ]
+
+
+def test_sqlite_store_size_includes_wal_and_shared_memory(
+    tmp_path: Path,
+) -> None:
+    history = tmp_path / "history.sqlite"
+    history.write_bytes(b"a" * 11)
+    Path(f"{history}-wal").write_bytes(b"b" * 13)
+    Path(f"{history}-shm").write_bytes(b"c" * 17)
+
+    assert _sqlite_store_size(history) == 41
+    assert _sqlite_store_size(tmp_path / "missing.sqlite") == 0

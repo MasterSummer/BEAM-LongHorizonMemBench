@@ -69,6 +69,7 @@ mem0_compose "${REPO_ROOT}" "${ENV_FILE}" run --rm worker \
   --out "${RUN_DIR}"
 mem0_compose "${REPO_ROOT}" "${ENV_FILE}" run --rm worker \
   run-matrix --run-dir "${RUN_DIR}" \
+  --keep-going \
   --json "${RUN_DIR}/matrix-status.json"
 mem0_compose "${REPO_ROOT}" "${ENV_FILE}" run --rm worker \
   validate --report "${RUN_DIR}/report" \

@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import lhmsb.qualification.preflight as preflight_module
 from lhmsb.qualification.preflight import (
     PreflightContext,
     PreflightError,
     PreflightGate,
+    _gate_controlled_mem0_lifecycle,
+    _host_runtime_inventory,
+    current_repository_snapshot,
+    default_preflight_gates,
     redact_secrets,
     require_live_gate,
     run_preflight,
 )
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _context(tmp_path: Path) -> PreflightContext:
@@ -118,3 +126,169 @@ def test_recursive_redaction_never_emits_secret_values() -> None:
     assert "secret-b" not in rendered
     assert "visible" in rendered
     assert "OPENAI_API_KEY" in rendered
+
+
+def test_repository_snapshot_uses_container_build_manifest_without_git(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "BUILD.json").write_text(
+        json.dumps(
+            {
+                "commit": "abc123",
+                "dirty": False,
+                "ref": "feat/mem0-qualification",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = current_repository_snapshot(tmp_path)
+
+    assert snapshot.commit == "abc123"
+    assert snapshot.dirty is False
+    assert snapshot.ref == "feat/mem0-qualification"
+
+
+def test_containerized_preflight_reads_host_runtime_manifest(
+    tmp_path: Path,
+) -> None:
+    host_manifest = tmp_path / "data" / "manifests" / "host.json"
+    host_manifest.parent.mkdir(parents=True)
+    host_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "docker": "Docker version 28.0.0",
+                "compose": "Docker Compose version v2.35.0",
+                "gpus": [
+                    "0, NVIDIA A100-SXM4-80GB, 81920 MiB",
+                    "1, NVIDIA A100-SXM4-80GB, 81920 MiB",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    context = PreflightContext(
+        repository_root=tmp_path,
+        dataset_root=tmp_path / "dataset",
+        config_path=tmp_path / "config.yaml",
+        data_root=tmp_path / "data",
+        allow_dirty=False,
+        repository_only=False,
+        environment={
+            "LHMSB_CONTAINERIZED": "1",
+            "LHMSB_HOST_MANIFEST": str(host_manifest),
+        },
+    )
+
+    inventory = _host_runtime_inventory(context)
+
+    assert inventory["docker"] == "Docker version 28.0.0"
+    assert inventory["compose"] == "Docker Compose version v2.35.0"
+    assert len(inventory["gpus"]) == 2
+
+
+def test_live_preflight_includes_real_controlled_mem0_lifecycle_gate() -> None:
+    names = [gate.name for gate in default_preflight_gates()]
+
+    assert names.index("mem0_runtime_pin") < names.index(
+        "controlled_mem0_lifecycle"
+    )
+    assert names.index("controlled_mem0_lifecycle") < names.index(
+        "native_mem0_profile"
+    )
+
+
+def test_controlled_mem0_lifecycle_checks_all_policy_profiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed_profiles = 0
+
+    class FakeQdrantClient:
+        def __init__(self, **_: object) -> None:
+            self.closed = False
+
+        def collection_exists(self, _: str) -> bool:
+            return False
+
+        def delete_collection(self, _: str) -> None:
+            raise AssertionError("no fake collection should need deletion")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeAdapter:
+        def close(self) -> None:
+            nonlocal closed_profiles
+            closed_profiles += 1
+
+        def write_session(self, *_: object, **__: object) -> object:
+            return SimpleNamespace(
+                inventory=SimpleNamespace(
+                    items=(SimpleNamespace(memory_id="memory-1"),),
+                    n_live=1,
+                ),
+                n_write=1,
+                usage_events=(
+                    SimpleNamespace(component="memory_internal_llm"),
+                    SimpleNamespace(component="embedding"),
+                ),
+            )
+
+        def history_delta(self, *_: object, **__: object) -> tuple[object, ...]:
+            return ({"event": "ADD"},)
+
+        def search_candidates(self, *_: object, **__: object) -> object:
+            return SimpleNamespace(
+                candidates=(SimpleNamespace(memory_id="memory-1"),),
+                usage_events=(SimpleNamespace(component="embedding"),),
+            )
+
+    monkeypatch.setattr(
+        preflight_module,
+        "build_mem0_live_config",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        preflight_module.Mem0QualificationAdapter,
+        "create_live",
+        lambda *args, **kwargs: FakeAdapter(),
+    )
+    real_import = preflight_module.importlib.import_module
+    monkeypatch.setattr(
+        preflight_module.importlib,
+        "import_module",
+        lambda name: (
+            SimpleNamespace(QdrantClient=FakeQdrantClient)
+            if name == "qdrant_client"
+            else real_import(name)
+        ),
+    )
+    context = PreflightContext(
+        repository_root=ROOT,
+        dataset_root=ROOT / "runs" / "vertical" / "software_mem0_v2",
+        config_path=ROOT
+        / "configs"
+        / "experiments"
+        / "mem0_qualification.yaml",
+        data_root=tmp_path / "data",
+        allow_dirty=False,
+        repository_only=False,
+        environment={
+            "ANTHROPIC_API_KEY": "secret-a",
+            "DEEPSEEK_API_KEY": "secret-d",
+            "OPENAI_API_KEY": "secret-o",
+        },
+    )
+
+    result = _gate_controlled_mem0_lifecycle(context)
+
+    profiles = result["profiles"]
+    assert isinstance(profiles, list)
+    assert [item["profile_id"] for item in profiles] == [
+        "opus_4_8",
+        "deepseek_v4_pro",
+        "gpt_5_6_sol",
+    ]
+    assert closed_profiles == 3
