@@ -11,9 +11,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from itertools import zip_longest
 from pathlib import Path
 
 from lhmsb.datasets.stateful_loader import load_software_vertical_specs
@@ -120,6 +122,18 @@ class VerticalRunManifest:
             raise VerticalExperimentError(f"run manifest missing field: {exc.args[0]}") from exc
 
 
+@dataclass(frozen=True)
+class VerticalAggregate:
+    """Completion state for one aggregation pass."""
+
+    run_identity: str
+    planned_tasks: int
+    completed_tasks: int
+    failed_tasks: int
+    missing_tasks: int
+    complete: bool
+
+
 def current_git_snapshot(root: Path | None = None) -> GitSnapshot:
     """Return the current checkout SHA, dirty flag, and branch/ref label."""
     cwd = root or Path(__file__).resolve().parents[3]
@@ -220,8 +234,8 @@ def run_vertical_task(
             f"task index {task_index} is outside [0, {len(tasks) - 1}]"
         )
     task = tasks[task_index]
-    task_dir = run_dir / "tasks" / task.task_id
-    result_path = task_dir / "result.json"
+    task_dir: Path = run_dir / "tasks" / str(task.task_id)
+    result_path: Path = task_dir / "result.json"
     if result_path.exists() and not force:
         _validate_result_file(result_path, manifest, task)
         return result_path
@@ -239,6 +253,47 @@ def run_vertical_task(
     except Exception as exc:
         _atomic_json(task_dir / "failure.json", _failure_envelope(manifest, task, exc))
         raise
+
+
+def aggregate_vertical_run(run_dir: Path) -> VerticalAggregate:
+    """Aggregate all valid completed tasks into deterministic pilot artifacts."""
+    manifest, tasks = _load_run_contract(run_dir)
+    _verify_current_code(manifest)
+    completed: list[tuple[VerticalTask, dict[str, object]]] = []
+    failed_tasks = 0
+    missing_tasks = 0
+    for task in tasks:
+        task_dir = run_dir / "tasks" / task.task_id
+        result_path = task_dir / "result.json"
+        failure_path = task_dir / "failure.json"
+        if result_path.is_file():
+            completed.append(
+                (task, _validated_result_payload(result_path, manifest, task))
+            )
+        elif failure_path.is_file():
+            _validate_failure_file(failure_path, manifest, task)
+            failed_tasks += 1
+        else:
+            missing_tasks += 1
+    aggregate = VerticalAggregate(
+        run_identity=manifest.run_identity,
+        planned_tasks=len(tasks),
+        completed_tasks=len(completed),
+        failed_tasks=failed_tasks,
+        missing_tasks=missing_tasks,
+        complete=len(completed) == len(tasks) and failed_tasks == 0 and missing_tasks == 0,
+    )
+    task_rows = [payload for _, payload in completed]
+    sceu_rows = [
+        row
+        for task, payload in completed
+        for row in _flatten_sceu_rows(manifest, task, payload)
+    ]
+    summary = _aggregate_summary(aggregate, completed, sceu_rows)
+    _atomic_jsonl(run_dir / "task_results.jsonl", task_rows)
+    _atomic_jsonl(run_dir / "sceu_results.jsonl", sceu_rows)
+    _atomic_json(run_dir / "summary.json", summary)
+    return aggregate
 
 
 def _prepare_run_directory(
@@ -393,7 +448,15 @@ def _validate_result_file(
     path: Path,
     manifest: VerticalRunManifest,
     task: VerticalTask,
-) -> None:
+) -> dict[str, object]:
+    return _validated_result_payload(path, manifest, task)
+
+
+def _validated_result_payload(
+    path: Path,
+    manifest: VerticalRunManifest,
+    task: VerticalTask,
+) -> dict[str, object]:
     try:
         payload = _read_json(path)
     except VerticalExperimentError as exc:
@@ -407,6 +470,186 @@ def _validate_result_file(
         raise VerticalExperimentError(
             f"stale or corrupt result file for task {task.task_id}; pass force=True"
         )
+    return payload
+
+
+def _validate_failure_file(
+    path: Path,
+    manifest: VerticalRunManifest,
+    task: VerticalTask,
+) -> None:
+    payload = _read_json(path)
+    if (
+        payload.get("run_identity") != manifest.run_identity
+        or payload.get("task_payload_hash") != task.task_payload_hash
+        or payload.get("task") != task.to_dict()
+        or not isinstance(payload.get("error_type"), str)
+        or not isinstance(payload.get("message"), str)
+    ):
+        raise VerticalExperimentError(f"stale or corrupt failure file for task {task.task_id}")
+
+
+def _flatten_sceu_rows(
+    manifest: VerticalRunManifest,
+    task: VerticalTask,
+    payload: Mapping[str, object],
+) -> list[dict[str, object]]:
+    result = _object(payload.get("result"), "result")
+    prefix_hash = _required_string(result.get("prefix_hash"), "prefix_hash")
+    transcript_hash = _required_string(result.get("transcript_hash"), "transcript_hash")
+    rows: list[dict[str, object]] = []
+    for raw_sceu in _array(result.get("sceu_results"), "sceu_results"):
+        sceu = _object(raw_sceu, "sceu result")
+        behavior = _object(sceu.get("behavior"), "behavior result")
+        rows.append(
+            {
+                "run_identity": manifest.run_identity,
+                "task_id": task.task_id,
+                "task_index": task.task_index,
+                "episode_id": task.episode_id,
+                "condition": task.condition,
+                "intervention_state_id": task.intervention_state_id,
+                "sceu_id": _required_string(sceu.get("sceu_id"), "sceu_id"),
+                "opportunity_id": _required_string(
+                    sceu.get("opportunity_id"), "opportunity_id"
+                ),
+                "stored_state_ids": _string_array(
+                    sceu.get("stored_state_ids"), "stored_state_ids"
+                ),
+                "retrieved_state_ids": _string_array(
+                    sceu.get("retrieved_state_ids"), "retrieved_state_ids"
+                ),
+                "model_visible_state_ids": _string_array(
+                    sceu.get("model_visible_state_ids"), "model_visible_state_ids"
+                ),
+                "used_state_ids": _string_array(
+                    sceu.get("used_state_ids"), "used_state_ids"
+                ),
+                "selected_action": _required_string(
+                    sceu.get("selected_action"), "selected_action"
+                ),
+                "behavior_score": _number(behavior.get("score"), "behavior score"),
+                "is_correct": _required_bool(behavior.get("is_correct"), "is_correct"),
+                "violated_state_ids": _string_array(
+                    behavior.get("violated_state_ids"), "violated_state_ids"
+                ),
+                "passed_tests": _string_array(behavior.get("passed_tests"), "passed_tests"),
+                "failed_tests": _string_array(behavior.get("failed_tests"), "failed_tests"),
+                "drift_flags": _string_array(behavior.get("drift_flags"), "drift_flags"),
+                "workspace_snapshot_hash": _required_string(
+                    sceu.get("workspace_snapshot_hash"), "workspace_snapshot_hash"
+                ),
+                "prefix_hash": prefix_hash,
+                "transcript_hash": transcript_hash,
+            }
+        )
+    return rows
+
+
+def _aggregate_summary(
+    aggregate: VerticalAggregate,
+    completed: Sequence[tuple[VerticalTask, dict[str, object]]],
+    sceu_rows: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    scores_by_group: dict[str, list[float]] = defaultdict(list)
+    selected_actions: Counter[str] = Counter()
+    drift_flags: Counter[str] = Counter()
+    for task, payload in completed:
+        result = _object(payload.get("result"), "result")
+        group = _group_key(task)
+        scores_by_group[group].append(
+            _number(result.get("behavior_score"), "behavior_score")
+        )
+    for row in sceu_rows:
+        selected_actions[_required_string(row.get("selected_action"), "selected_action")] += 1
+        drift_flags.update(_string_array(row.get("drift_flags"), "drift_flags"))
+    mean_scores = {
+        key: round(sum(values) / len(values), 6)
+        for key, values in sorted(scores_by_group.items())
+    }
+    eligible = [row for row in sceu_rows if row.get("condition") == "fake_native"]
+    complete_chain_rows = sum(
+        bool(
+            row.get("stored_state_ids")
+            and row.get("retrieved_state_ids")
+            and row.get("model_visible_state_ids")
+            and row.get("used_state_ids")
+        )
+        for row in eligible
+    )
+    baseline_by_episode = {
+        task.episode_id: (task, payload)
+        for task, payload in completed
+        if task.condition == "fake_native" and task.intervention_state_id is None
+    }
+    leave_one_out: list[dict[str, object]] = []
+    for task, payload in completed:
+        if task.condition != "fake_native" or task.intervention_state_id is None:
+            continue
+        baseline = baseline_by_episode.get(task.episode_id)
+        if baseline is None:
+            continue
+        baseline_task, baseline_payload = baseline
+        baseline_result = _object(baseline_payload.get("result"), "baseline result")
+        intervention_result = _object(payload.get("result"), "intervention result")
+        baseline_score = _number(
+            baseline_result.get("behavior_score"), "baseline behavior_score"
+        )
+        intervention_score = _number(
+            intervention_result.get("behavior_score"), "intervention behavior_score"
+        )
+        baseline_actions = _string_array(
+            baseline_result.get("selected_actions"), "baseline selected_actions"
+        )
+        intervention_actions = _string_array(
+            intervention_result.get("selected_actions"), "intervention selected_actions"
+        )
+        action_changes = sum(
+            left != right
+            for left, right in zip_longest(
+                baseline_actions,
+                intervention_actions,
+                fillvalue="<missing>",
+            )
+        )
+        leave_one_out.append(
+            {
+                "episode_id": task.episode_id,
+                "intervention_state_id": task.intervention_state_id,
+                "baseline_task_id": baseline_task.task_id,
+                "task_id": task.task_id,
+                "baseline_behavior_score": baseline_score,
+                "behavior_score": intervention_score,
+                "score_delta": round(intervention_score - baseline_score, 6),
+                "action_changes": action_changes,
+            }
+        )
+    return {
+        "schema_version": VERTICAL_RUN_SCHEMA_VERSION,
+        "run_identity": aggregate.run_identity,
+        "planned_tasks": aggregate.planned_tasks,
+        "completed_tasks": aggregate.completed_tasks,
+        "failed_tasks": aggregate.failed_tasks,
+        "missing_tasks": aggregate.missing_tasks,
+        "complete": aggregate.complete,
+        "mean_behavior_score_by_group": mean_scores,
+        "selected_action_counts": dict(sorted(selected_actions.items())),
+        "drift_flag_counts": dict(sorted(drift_flags.items())),
+        "chain_coverage": {
+            "eligible_rows": len(eligible),
+            "complete_rows": complete_chain_rows,
+            "rate": (
+                0.0
+                if not eligible
+                else round(complete_chain_rows / len(eligible), 6)
+            ),
+        },
+        "leave_one_out": leave_one_out,
+    }
+
+
+def _group_key(task: VerticalTask) -> str:
+    return f"{task.condition}:{task.intervention_state_id or 'baseline'}"
 
 
 def _stateful_manifest(path: Path) -> StatefulManifest:
@@ -571,9 +814,48 @@ def _string_mapping(value: object, label: str) -> dict[str, str]:
     return {key: str(item) for key, item in mapping.items()}
 
 
+def _object(value: object, label: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise VerticalExperimentError(f"{label} must be an object")
+    return {str(key): item for key, item in value.items()}
+
+
+def _array(value: object, label: str) -> Sequence[object]:
+    if not isinstance(value, (list, tuple)):
+        raise VerticalExperimentError(f"{label} must be an array")
+    return value
+
+
+def _string_array(value: object, label: str) -> list[str]:
+    values = _array(value, label)
+    if any(not isinstance(item, str) for item in values):
+        raise VerticalExperimentError(f"{label} values must be strings")
+    return [str(item) for item in values]
+
+
+def _required_string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise VerticalExperimentError(f"{label} must be a non-empty string")
+    return value
+
+
+def _required_bool(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise VerticalExperimentError(f"{label} must be a boolean")
+    return value
+
+
+def _number(value: object, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise VerticalExperimentError(f"{label} must be numeric")
+    return float(value)
+
+
 __all__ = [
     "VERTICAL_RUN_SCHEMA_VERSION",
+    "VerticalAggregate",
     "VerticalRunManifest",
+    "aggregate_vertical_run",
     "current_git_snapshot",
     "plan_vertical_run",
     "read_vertical_tasks",

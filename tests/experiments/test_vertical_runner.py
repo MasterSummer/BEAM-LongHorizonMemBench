@@ -11,6 +11,7 @@ from lhmsb.datasets.stateful_pipeline import StatefulDatasetError
 from lhmsb.experiments import vertical_runner
 from lhmsb.experiments.vertical_config import GitSnapshot, VerticalExperimentError
 from lhmsb.experiments.vertical_runner import (
+    aggregate_vertical_run,
     current_git_snapshot,
     plan_vertical_run,
     read_vertical_tasks,
@@ -26,6 +27,7 @@ def test_public_experiment_api_exports_runner_primitives() -> None:
     assert public_api.plan_vertical_run is plan_vertical_run
     assert public_api.read_vertical_tasks is read_vertical_tasks
     assert public_api.run_vertical_task is run_vertical_task
+    assert public_api.aggregate_vertical_run is aggregate_vertical_run
 
 
 @pytest.fixture
@@ -281,3 +283,121 @@ def test_run_task_rejects_code_snapshot_mismatch(
 
     with pytest.raises(VerticalExperimentError, match="code snapshot"):
         run_vertical_task(planned_run, 0)
+
+
+def test_partial_aggregate_reports_missing_tasks(planned_run: Path) -> None:
+    run_vertical_task(planned_run, 0)
+
+    aggregate = aggregate_vertical_run(planned_run)
+    summary = json.loads((planned_run / "summary.json").read_text(encoding="utf-8"))
+
+    assert not aggregate.complete
+    assert aggregate.planned_tasks == 6
+    assert aggregate.completed_tasks == 1
+    assert aggregate.failed_tasks == 0
+    assert aggregate.missing_tasks == 5
+    assert summary["complete"] is False
+    assert summary["completed_tasks"] == 1
+    assert (planned_run / "task_results.jsonl").is_file()
+    assert (planned_run / "sceu_results.jsonl").is_file()
+
+
+def test_aggregate_counts_failed_tasks(
+    planned_run: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("aggregate-visible failure")
+
+    monkeypatch.setattr(vertical_runner, "run_vertical_episode", fail)
+    with pytest.raises(RuntimeError, match="aggregate-visible"):
+        run_vertical_task(planned_run, 0)
+
+    aggregate = aggregate_vertical_run(planned_run)
+
+    assert aggregate.failed_tasks == 1
+    assert aggregate.completed_tasks == 0
+    assert aggregate.missing_tasks == 5
+    assert not aggregate.complete
+
+
+def test_aggregate_reconstructs_chain_and_leave_one_out(planned_run: Path) -> None:
+    for index in (5, 2, 0, 4, 1, 3):
+        run_vertical_task(planned_run, index)
+
+    aggregate = aggregate_vertical_run(planned_run)
+    summary = json.loads((planned_run / "summary.json").read_text(encoding="utf-8"))
+    sceu_rows = [
+        json.loads(line)
+        for line in (planned_run / "sceu_results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+
+    assert aggregate.complete
+    assert aggregate.completed_tasks == 6
+    assert summary["chain_coverage"]["complete_rows"] > 0
+    assert summary["chain_coverage"]["eligible_rows"] >= summary["chain_coverage"][
+        "complete_rows"
+    ]
+    assert {item["intervention_state_id"] for item in summary["leave_one_out"]} == {
+        "P2",
+        "C1",
+        "U1",
+    }
+    p2 = next(
+        item for item in summary["leave_one_out"] if item["intervention_state_id"] == "P2"
+    )
+    assert p2["action_changes"] > 0 or p2["score_delta"] != 0
+    native_rows = [row for row in sceu_rows if row["condition"] == "fake_native"]
+    assert any(
+        row["stored_state_ids"]
+        and row["retrieved_state_ids"]
+        and row["model_visible_state_ids"]
+        and row["used_state_ids"]
+        for row in native_rows
+    )
+    required = {
+        "run_identity",
+        "task_id",
+        "task_index",
+        "episode_id",
+        "condition",
+        "intervention_state_id",
+        "sceu_id",
+        "opportunity_id",
+        "stored_state_ids",
+        "retrieved_state_ids",
+        "model_visible_state_ids",
+        "used_state_ids",
+        "selected_action",
+        "behavior_score",
+        "is_correct",
+        "violated_state_ids",
+        "drift_flags",
+        "workspace_snapshot_hash",
+        "prefix_hash",
+        "transcript_hash",
+    }
+    assert required <= set(sceu_rows[0])
+
+
+def test_aggregate_is_independent_of_execution_order(
+    frozen_vertical: Path,
+    offline_config: Path,
+    tmp_path: Path,
+) -> None:
+    sequential = tmp_path / "sequential"
+    shuffled = tmp_path / "shuffled"
+    plan_vertical_run(frozen_vertical, offline_config, sequential, allow_dirty=True)
+    plan_vertical_run(frozen_vertical, offline_config, shuffled, allow_dirty=True)
+    for index in range(6):
+        run_vertical_task(sequential, index)
+    for index in (5, 2, 0, 4, 1, 3):
+        run_vertical_task(shuffled, index)
+
+    aggregate_vertical_run(sequential)
+    aggregate_vertical_run(shuffled)
+
+    for name in ("task_results.jsonl", "sceu_results.jsonl", "summary.json"):
+        assert (sequential / name).read_bytes() == (shuffled / name).read_bytes()
