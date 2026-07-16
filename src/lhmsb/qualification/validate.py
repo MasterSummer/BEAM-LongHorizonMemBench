@@ -235,6 +235,16 @@ def validate_qualification_artifacts(
         allow_empty=True,
     )
     _read_json(report_directory / "metrics.json", errors, required=False)
+    metrics_by_cell = _read_json(
+        report_directory / "metrics_by_cell.json",
+        errors,
+        required=False,
+    )
+    _validate_metrics_by_cell(
+        metrics_by_cell,
+        jsonl["task_results.jsonl"],
+        errors,
+    )
     _read_json(report_directory / "summary.json", errors, required=False)
     return ArtifactValidationReport(
         ok=not errors,
@@ -280,6 +290,62 @@ def _validate_trace_match(
     )
     if retrieved != trace_retrieved[: len(retrieved)]:
         errors.append(f"SCEU retrieved IDs do not match retrieval trace for {key}")
+
+
+def _validate_metrics_by_cell(
+    payload: Mapping[str, object],
+    task_results: Sequence[Mapping[str, object]],
+    errors: list[str],
+) -> None:
+    raw_groups = payload.get("groups")
+    if not isinstance(raw_groups, Sequence) or isinstance(
+        raw_groups,
+        (str, bytes),
+    ):
+        errors.append("metrics_by_cell groups must be an array")
+        return
+    expected: set[tuple[str, str, str]] = set()
+    for task in task_results:
+        policy_profile_id = str(task.get("policy_profile_id", ""))
+        conditions = task.get("condition_results")
+        if not isinstance(conditions, Sequence) or isinstance(
+            conditions,
+            (str, bytes),
+        ):
+            continue
+        for condition in conditions:
+            if not isinstance(condition, Mapping):
+                continue
+            expected.add(
+                (
+                    policy_profile_id,
+                    str(condition.get("condition", "")),
+                    str(condition.get("readout", "")),
+                )
+            )
+    actual: set[tuple[str, str, str]] = set()
+    for index, group in enumerate(raw_groups):
+        if not isinstance(group, Mapping):
+            errors.append(f"metrics_by_cell group {index} must be an object")
+            continue
+        key = (
+            str(group.get("policy_profile_id", "")),
+            str(group.get("condition", "")),
+            str(group.get("readout", "")),
+        )
+        if not all(key):
+            errors.append(f"metrics_by_cell group {index} lacks a complete key")
+            continue
+        if key in actual:
+            errors.append(f"duplicate metrics_by_cell group: {key}")
+        actual.add(key)
+        if not isinstance(group.get("metrics"), Mapping):
+            errors.append(f"metrics_by_cell group {key} lacks metrics")
+    if actual != expected:
+        errors.append(
+            "metrics_by_cell coverage mismatch: "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
 
 
 def _unique_ids(

@@ -54,7 +54,7 @@ mem0_write_host_manifest() {
   docker_version="$(docker --version)"
   compose_version="$(docker compose version)"
   gpu_inventory="$(nvidia-smi \
-    --query-gpu=index,name,memory.total \
+    --query-gpu=index,name,uuid,memory.total,driver_version,compute_cap \
     --format=csv,noheader)"
   mkdir -p "$(dirname "${manifest}")"
   DOCKER_VERSION="${docker_version}" \

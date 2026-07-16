@@ -121,12 +121,34 @@ fi
 if [[ ! -f "${ENV_FILE}" ]]; then
   cp "${REPO_ROOT}/.env.example" "${ENV_FILE}"
 fi
+chmod 600 "${ENV_FILE}"
 
 set -a
 # This file is operator-owned and must contain shell-compatible KEY=VALUE rows.
 # shellcheck disable=SC1090
 source "${ENV_FILE}"
 set +a
+
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+if [[ "${HOST_UID}" == "0" ]]; then
+  printf '%s\n' \
+    'run bootstrap_server.sh as the non-root user that will own /data/lhmsb' >&2
+  exit 1
+fi
+LHMSB_WORKER_UID="${HOST_UID}"
+LHMSB_WORKER_GID="${HOST_GID}"
+
+if ! mkdir -p "${DATA_ROOT}"; then
+  printf 'cannot create data root %s; pre-create it as the current non-root user\n' \
+    "${DATA_ROOT}" >&2
+  exit 1
+fi
+if [[ ! -w "${DATA_ROOT}" ]]; then
+  printf 'data root is not writable: %s; pre-create it as the current non-root user\n' \
+    "${DATA_ROOT}" >&2
+  exit 1
+fi
 
 PYTHON_BASE_IMAGE="${PYTHON_BASE_IMAGE:-python:3.11-slim}"
 QDRANT_IMAGE="${QDRANT_IMAGE:-qdrant/qdrant}"
@@ -176,55 +198,6 @@ verify_and_extract_release \
   "${LEGACY_RELEASE}" "${LEGACY_ARCHIVE}" "${LEGACY_SHA256}"
 verify_and_extract_release \
   "${MEM0_RELEASE}" "${MEM0_ARCHIVE}" "${MEM0_RELEASE_SHA256}"
-
-REQUIREMENTS_PATH="${DATA_ROOT}/manifests/qualification-requirements.txt"
-uv export --frozen --extra qualification --no-dev --no-emit-project \
-  --format requirements-txt --output-file "${REQUIREMENTS_PATH}"
-python3 -m pip download \
-  --dest "${DATA_ROOT}/wheelhouse" \
-  --requirement "${REQUIREMENTS_PATH}"
-python3 -m pip download --dest "${DATA_ROOT}/wheelhouse" "uv==0.8.0"
-uv build --wheel --out-dir "${DATA_ROOT}/wheelhouse"
-
-MEM0_WHEEL="${DATA_ROOT}/wheelhouse/mem0ai-2.0.12-py3-none-any.whl"
-if [[ ! -f "${MEM0_WHEEL}" ]]; then
-  printf 'missing exact Mem0 wheel: %s\n' "${MEM0_WHEEL}" >&2
-  exit 1
-fi
-MEM0_WHEEL_ACTUAL="$(python3 - "${MEM0_WHEEL}" <<'PY'
-import hashlib
-import pathlib
-import sys
-
-print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
-PY
-)"
-if [[ "${MEM0_WHEEL_ACTUAL}" != "${MEM0_WHEEL_SHA256}" ]]; then
-  printf 'Mem0 wheel hash mismatch: %s != %s\n' \
-    "${MEM0_WHEEL_ACTUAL}" "${MEM0_WHEEL_SHA256}" >&2
-  exit 1
-fi
-
-find "${REPO_ROOT}/docker/wheelhouse" -mindepth 1 -maxdepth 1 -type f -delete
-cp "${DATA_ROOT}"/wheelhouse/*.whl "${REPO_ROOT}/docker/wheelhouse/"
-
-python3 - "${DATA_ROOT}/wheelhouse" "${DATA_ROOT}/manifests/wheels.json" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-output = pathlib.Path(sys.argv[2])
-files = {
-    path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-    for path in sorted(root.glob("*.whl"))
-}
-output.write_text(
-    json.dumps({"schema_version": 1, "files": files}, sort_keys=True, indent=2) + "\n",
-    encoding="utf-8",
-)
-PY
 
 HF_HOME="${DATA_ROOT}/hf-cache" uvx --from "huggingface_hub==0.34.4" hf download \
   "${EMBEDDING_REPOSITORY}" \
@@ -286,6 +259,64 @@ QDRANT_IMAGE_DIGEST="$(resolve_repo_digest "${QDRANT_REFERENCE}")"
 TEI_REFERENCE="${TEI_IMAGE}:${TEI_IMAGE_TAG}"
 TEI_IMAGE_DIGEST="$(resolve_repo_digest "${TEI_REFERENCE}")"
 
+REQUIREMENTS_PATH="${DATA_ROOT}/manifests/qualification-requirements.txt"
+uv export --frozen --extra qualification --no-dev --no-emit-project \
+  --format requirements-txt --output-file "${REQUIREMENTS_PATH}"
+find "${DATA_ROOT}/wheelhouse" -type f -name '*.whl' -delete
+docker run --rm \
+  --user "${HOST_UID}:${HOST_GID}" \
+  --env HOME=/tmp \
+  --volume "${REQUIREMENTS_PATH}:/tmp/qualification-requirements.txt:ro" \
+  --volume "${DATA_ROOT}/wheelhouse:/wheelhouse" \
+  "${PYTHON_BASE_IMAGE}@${PYTHON_BASE_DIGEST}" \
+  python -m pip download \
+    --disable-pip-version-check \
+    --only-binary=:all: \
+    --dest /wheelhouse \
+    --requirement /tmp/qualification-requirements.txt
+uv build --wheel --out-dir "${DATA_ROOT}/wheelhouse"
+
+MEM0_WHEEL="${DATA_ROOT}/wheelhouse/mem0ai-2.0.12-py3-none-any.whl"
+if [[ ! -f "${MEM0_WHEEL}" ]]; then
+  printf 'missing exact Mem0 wheel: %s\n' "${MEM0_WHEEL}" >&2
+  exit 1
+fi
+MEM0_WHEEL_ACTUAL="$(python3 - "${MEM0_WHEEL}" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+if [[ "${MEM0_WHEEL_ACTUAL}" != "${MEM0_WHEEL_SHA256}" ]]; then
+  printf 'Mem0 wheel hash mismatch: %s != %s\n' \
+    "${MEM0_WHEEL_ACTUAL}" "${MEM0_WHEEL_SHA256}" >&2
+  exit 1
+fi
+
+find "${REPO_ROOT}/docker/wheelhouse" \
+  -mindepth 1 -maxdepth 1 -type f ! -name .gitkeep -delete
+cp "${DATA_ROOT}"/wheelhouse/*.whl "${REPO_ROOT}/docker/wheelhouse/"
+
+python3 - "${DATA_ROOT}/wheelhouse" "${DATA_ROOT}/manifests/wheels.json" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+output = pathlib.Path(sys.argv[2])
+files = {
+    path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in sorted(root.glob("*.whl"))
+}
+output.write_text(
+    json.dumps({"schema_version": 1, "files": files}, sort_keys=True, indent=2) + "\n",
+    encoding="utf-8",
+)
+PY
+
 docker build \
   --build-arg "PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE}" \
   --build-arg "PYTHON_BASE_DIGEST=${PYTHON_BASE_DIGEST}" \
@@ -336,7 +367,9 @@ python3 - \
   "${QDRANT_IMAGE_DIGEST}" \
   "${TEI_IMAGE_TAG}" \
   "${TEI_IMAGE_DIGEST}" \
-  "${LHMSB_WORKER_IMAGE_DIGEST}" <<'PY'
+  "${LHMSB_WORKER_IMAGE_DIGEST}" \
+  "${LHMSB_WORKER_UID}" \
+  "${LHMSB_WORKER_GID}" <<'PY'
 import pathlib
 import sys
 
@@ -348,6 +381,8 @@ updates = {
     "TEI_IMAGE_TAG": sys.argv[5],
     "TEI_IMAGE_DIGEST": sys.argv[6],
     "LHMSB_WORKER_IMAGE_DIGEST": sys.argv[7],
+    "LHMSB_WORKER_UID": sys.argv[8],
+    "LHMSB_WORKER_GID": sys.argv[9],
 }
 lines = path.read_text(encoding="utf-8").splitlines()
 seen = set()

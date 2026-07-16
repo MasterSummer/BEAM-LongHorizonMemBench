@@ -80,6 +80,10 @@ def test_plan_writes_redacted_identity_bound_contract(
     qualification_dataset: Path,
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-written")
+    monkeypatch.setenv(
+        "OPENAI_BASE_URL",
+        "https://gateway.example/openai/v1",
+    )
     data_root = tmp_path / "data"
     (data_root / "manifests").mkdir(parents=True)
     (data_root / "runs" / "preflight").mkdir(parents=True)
@@ -143,6 +147,7 @@ def test_plan_writes_redacted_identity_bound_contract(
         model_manifest.read_bytes()
     ).hexdigest()
     assert len(manifest["hardware_profile_hash"]) == 64
+    assert len(manifest["effective_policy_profiles_hash"]) == 64
     assert manifest["required_secret_env"] == [
         "ANTHROPIC_API_KEY",
         "DEEPSEEK_API_KEY",
@@ -280,6 +285,149 @@ def test_run_identity_changes_when_the_persistent_data_root_changes(
     assert identities[0] != identities[1]
 
 
+def test_run_identity_changes_when_a_provider_endpoint_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qualification_dataset: Path,
+) -> None:
+    identities: list[str] = []
+    monkeypatch.setenv("LHMSB_DATA_ROOT", str(tmp_path / "data"))
+    for index, endpoint in enumerate(
+        (
+            "https://api.openai.com",
+            "https://gateway.example/openai/v1",
+        )
+    ):
+        monkeypatch.setenv("OPENAI_BASE_URL", endpoint)
+        run_dir = tmp_path / f"run-endpoint-{index}"
+        assert (
+            main(
+                [
+                    "plan",
+                    "--dataset",
+                    str(qualification_dataset),
+                    "--config",
+                    str(CONFIG),
+                    "--out",
+                    str(run_dir),
+                    "--allow-dirty",
+                ]
+            )
+            == 0
+        )
+        manifest = json.loads(
+            (run_dir / "run_manifest.json").read_text(encoding="utf-8")
+        )
+        identities.append(manifest["run_identity"])
+
+    assert identities[0] != identities[1]
+
+
+def test_resume_rejects_a_changed_provider_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    qualification_dataset: Path,
+) -> None:
+    monkeypatch.setenv("LHMSB_DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com")
+    run_dir = tmp_path / "run"
+    assert (
+        main(
+            [
+                "plan",
+                "--dataset",
+                str(qualification_dataset),
+                "--config",
+                str(CONFIG),
+                "--out",
+                str(run_dir),
+                "--allow-dirty",
+            ]
+        )
+        == 0
+    )
+
+    monkeypatch.setenv(
+        "OPENAI_BASE_URL",
+        "https://gateway.example/openai/v1",
+    )
+    status = main(
+        [
+            "run-task",
+            "--run-dir",
+            str(run_dir),
+            "--task-index",
+            "0",
+            "--dry-run",
+        ]
+    )
+
+    assert status == 2
+    assert "provider request profiles" in capsys.readouterr().err
+
+
+def test_live_plan_requires_a_complete_successful_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    qualification_dataset: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    manifests = data_root / "manifests"
+    preflight = data_root / "runs" / "preflight"
+    manifests.mkdir(parents=True)
+    preflight.mkdir(parents=True)
+    (manifests / "images.json").write_text(
+        '{"qdrant":"sha256:image"}\n',
+        encoding="utf-8",
+    )
+    (manifests / "models.json").write_text(
+        '{"files":{},"revisions":{}}\n',
+        encoding="utf-8",
+    )
+    (preflight / "latest.json").write_text(
+        json.dumps(
+            {
+                "ok": False,
+                "stopped_at": "provider_structured_smoke",
+                "repository_only": False,
+                "checks": [
+                    {
+                        "name": "host_and_gpu_runtime",
+                        "status": "pass",
+                        "details": {
+                            "gpus": [
+                                "0, NVIDIA A100-SXM4-80GB, 81920 MiB",
+                                "1, NVIDIA A100-SXM4-80GB, 81920 MiB",
+                            ]
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LHMSB_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("LHMSB_LIVE_QUALIFICATION", "1")
+
+    status = main(
+        [
+            "plan",
+            "--dataset",
+            str(qualification_dataset),
+            "--config",
+            str(CONFIG),
+            "--out",
+            str(tmp_path / "run"),
+            "--allow-dirty",
+        ]
+    )
+
+    assert status == 2
+    assert "successful full preflight" in capsys.readouterr().err
+
+
 def _tiny_report(tmp_path: Path) -> Path:
     spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
     sceu = spec.plan.sceu_units[0]
@@ -355,6 +503,31 @@ def test_validate_command_checks_hashes_and_trace_ordering(
     assert invalid.ok is False
     assert any("retrieved" in error for error in invalid.errors)
     assert main(["validate", "--report", str(report)]) == 1
+
+
+def test_validation_requires_metrics_for_every_condition_cell(
+    tmp_path: Path,
+) -> None:
+    report = _tiny_report(tmp_path)
+    metrics_path = report / "metrics_by_cell.json"
+    metrics_path.write_text(
+        '{"groups":[],"schema_version":2}\n',
+        encoding="utf-8",
+    )
+    manifest_path = report / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_hashes"]["metrics_by_cell.json"] = hashlib.sha256(
+        metrics_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    invalid = validate_qualification_artifacts(report)
+
+    assert invalid.ok is False
+    assert any("metrics_by_cell coverage" in error for error in invalid.errors)
 
 
 def test_qdrant_collection_count_uses_exact_task_collection(

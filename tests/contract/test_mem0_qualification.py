@@ -9,6 +9,7 @@ from lhmsb.adapters.mem0_qualification import (
     Mem0QualificationAdapter,
     Mem0QualificationError,
     ProviderUsageEvent,
+    _provider_token_usage,
     build_mem0_live_config,
 )
 from lhmsb.qualification.schema import Mem0Profile, PolicyProfile
@@ -419,3 +420,16 @@ def test_live_adapter_captures_internal_llm_and_embedding_usage(
     assert llm_usage.usage_observed
     assert [event.component for event in search.usage_events] == ["embedding"]
     assert search.usage_events[0].input_count == 1
+
+
+def test_provider_usage_normalizes_deepseek_cache_and_reasoning_fields() -> None:
+    response = SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=21,
+            completion_tokens=8,
+            prompt_cache_hit_tokens=5,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=3),
+        )
+    )
+
+    assert _provider_token_usage(response) == (21, 8, 5, 3)

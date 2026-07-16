@@ -7,6 +7,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "deploy" / "compose.mem0.yaml"
 DOCKERFILE = ROOT / "docker" / "mem0-worker.Dockerfile"
+DOCKERIGNORE = ROOT / ".dockerignore"
 PREFLIGHT = ROOT / "deploy" / "slurm" / "mem0_preflight.sbatch"
 QUALIFICATION = ROOT / "deploy" / "slurm" / "mem0_qualification.sbatch"
 ENV_EXAMPLE = ROOT / ".env.example"
@@ -31,10 +32,15 @@ def test_compose_has_isolated_worker_qdrant_and_two_tei_services() -> None:
         assert service.get("networks") == ["backend"]
     worker = services["worker"]
     assert isinstance(worker, dict)
+    assert worker["user"] == (
+        "${LHMSB_WORKER_UID:?set LHMSB_WORKER_UID}:"
+        "${LHMSB_WORKER_GID:?set LHMSB_WORKER_GID}"
+    )
     assert set(worker["networks"]) == {"backend", "provider_egress"}
     assert worker.get("healthcheck")
     environment = worker.get("environment")
     assert isinstance(environment, dict)
+    assert environment["HOME"] == "/tmp"
     assert environment["LHMSB_CONTAINERIZED"] == "1"
     assert environment["LHMSB_HOST_MANIFEST"] == (
         "/data/lhmsb/manifests/host.json"
@@ -67,10 +73,46 @@ def test_worker_image_is_offline_locked_unprivileged_and_has_cli_entrypoint() ->
     assert "BUILD.json" in text
     assert "--no-index" in text
     assert "--find-links=/opt/wheelhouse" in text
-    assert "uv sync --frozen --offline" in text
+    assert "python -m venv /app/.venv" in text
+    assert "/app/.venv/bin/python -m pip install" in text
+    assert '"lhmsb[qualification]==0.1.0"' in text
+    assert "uv sync" not in text
     assert "MEM0_TELEMETRY=False" in text
     assert "USER lhmsb" in text
     assert 'ENTRYPOINT ["/app/.venv/bin/python", "-m", "lhmsb.qualification"]' in text
+
+
+def test_worker_image_does_not_copy_the_ignored_runtime_dataset() -> None:
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    assert "COPY runs/" not in text
+    assert "COPY datasets/releases/" in text
+
+
+def test_worker_build_context_is_allowlisted_and_excludes_credentials() -> None:
+    assert DOCKERIGNORE.is_file()
+    lines = [
+        line.strip()
+        for line in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert lines[0] == "**"
+    for required in (
+        "!pyproject.toml",
+        "!uv.lock",
+        "!README.md",
+        "!src/",
+        "!src/**",
+        "!configs/",
+        "!configs/**",
+        "!datasets/releases/",
+        "!datasets/releases/**",
+        "!docker/mem0-worker.Dockerfile",
+        "!docker/wheelhouse/",
+        "!docker/wheelhouse/**",
+    ):
+        assert required in lines
+    assert "!.env" not in lines
+    assert "!runs/" not in lines
 
 
 def test_slurm_uses_two_a100s_and_the_same_frozen_cli_contract() -> None:
@@ -105,6 +147,8 @@ def test_env_example_declares_only_expected_provider_and_service_controls() -> N
         "LHMSB_QDRANT_URL=http://qdrant:6333",
         "LHMSB_EMBEDDING_URL=http://embedding:80",
         "LHMSB_RERANKER_URL=http://reranker:80",
+        "LHMSB_WORKER_UID=",
+        "LHMSB_WORKER_GID=",
     ):
         assert name in text
     assert "AWS_" not in text

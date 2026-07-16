@@ -1,0 +1,23 @@
+# The worker build receives an explicit allowlist. In particular, never send
+# operator credentials, Git history, local runs, caches, or virtualenvs to the
+# Docker daemon as build-context data.
+**
+
+!pyproject.toml
+!uv.lock
+!README.md
+
+!src/
+!src/**
+
+!configs/
+!configs/**
+
+!datasets/
+!datasets/releases/
+!datasets/releases/**
+
+!docker/
+!docker/mem0-worker.Dockerfile
+!docker/wheelhouse/
+!docker/wheelhouse/**

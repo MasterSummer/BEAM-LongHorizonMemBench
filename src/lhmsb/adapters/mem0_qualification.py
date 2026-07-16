@@ -836,7 +836,11 @@ def _provider_token_usage(
     if cached_tokens is None:
         cached_tokens = _first_integer_attribute(
             usage,
-            ("cache_read_input_tokens", "cached_tokens"),
+            (
+                "prompt_cache_hit_tokens",
+                "cache_read_input_tokens",
+                "cached_tokens",
+            ),
         )
     reasoning_tokens = _first_integer_attribute(
         completion_details,

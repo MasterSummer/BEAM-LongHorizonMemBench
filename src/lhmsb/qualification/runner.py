@@ -28,6 +28,7 @@ from lhmsb.longhorizon.attribution import (
     MemoryAttribution,
     attribute_memory,
     build_software_fact_signatures,
+    eligible_write_state_ids,
 )
 from lhmsb.longhorizon.drift import (
     DriftEvidence,
@@ -641,10 +642,9 @@ def _alignment_snapshot(
     attributions: list[MemoryAttribution] = []
     events_by_session: dict[int, tuple[str, ...]] = {}
     for session in range(spec.plan.n_sessions):
-        events_by_session[session] = tuple(
-            event.target_state_id
-            for event in spec.plan.events
-            if event.session == session and event.type == "add"
+        events_by_session[session] = eligible_write_state_ids(
+            spec.plan,
+            session,
         )
     for item in inventory.items:
         metadata = dict(item.metadata)

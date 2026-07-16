@@ -6,10 +6,14 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
+from lhmsb.longhorizon.replay import replay_plan
 from lhmsb.longhorizon.schema import EpisodePlan
 
 AttributionMethod = Literal["exact_signature", "unique_provenance", "ambiguous"]
 FactPolarity = Literal["positive", "negative"]
+_POSITIVE_WRITE_EVENT_TYPES = frozenset(
+    {"add", "replace", "priority_change", "scope_change", "reopen"}
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,25 @@ class MemoryAttribution:
     method: AttributionMethod
     contributes_positive_coverage: bool
     reason: str
+
+
+def eligible_write_state_ids(
+    plan: EpisodePlan,
+    session_index: int,
+) -> tuple[str, ...]:
+    """Return current states introduced or materially updated in one session."""
+    current = replay_plan(plan, session_index).current
+    return tuple(
+        sorted(
+            {
+                event.target_state_id
+                for event in plan.events
+                if event.session == session_index
+                and event.type in _POSITIVE_WRITE_EVENT_TYPES
+                and event.target_state_id in current
+            }
+        )
+    )
 
 
 def normalize_fact_text(text: str) -> str:
@@ -333,5 +356,6 @@ __all__ = [
     "MemoryAttribution",
     "attribute_memory",
     "build_software_fact_signatures",
+    "eligible_write_state_ids",
     "normalize_fact_text",
 ]

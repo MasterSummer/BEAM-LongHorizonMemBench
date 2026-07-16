@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -95,6 +96,10 @@ def test_openai_responses_tool_call_and_usage_are_normalized() -> None:
     assert seen[0].url.path == "/v1/responses"
     assert sent["model"] == "gpt-5.6-sol"
     assert sent["tools"][0]["name"] == "submit_action"
+    assert sent["tools"][0]["strict"] is True
+    assert set(sent["tools"][0]["parameters"]["properties"]) == set(
+        sent["tools"][0]["parameters"]["required"]
+    )
     assert "top-secret" not in response.request_hash
     assert response.endpoint_identity == "https://openai.example"
 
@@ -136,7 +141,7 @@ def test_anthropic_messages_tool_call_is_normalized() -> None:
 
 def test_deepseek_uses_openai_compatible_chat_tools() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v1/chat/completions"
+        assert request.url.path == "/chat/completions"
         assert request.headers["authorization"] == "Bearer secret"
         return httpx.Response(
             200,
@@ -164,6 +169,7 @@ def test_deepseek_uses_openai_compatible_chat_tools() -> None:
                     "prompt_tokens": 50,
                     "completion_tokens": 9,
                     "prompt_cache_hit_tokens": 3,
+                    "completion_tokens_details": {"reasoning_tokens": 4},
                 },
             },
         )
@@ -175,6 +181,101 @@ def test_deepseek_uses_openai_compatible_chat_tools() -> None:
     ).submit_action(_request())
     assert response.selected_option_id == "option-01"
     assert response.usage.cached_tokens == 3
+    assert response.usage.reasoning_tokens == 4
+
+
+@pytest.mark.parametrize(
+    ("provider", "endpoint", "expected_path"),
+    (
+        ("anthropic", "https://gateway.example/anthropic/v1", "/anthropic/v1/messages"),
+        ("deepseek", "https://gateway.example/deepseek/v1", "/deepseek/v1/chat/completions"),
+        ("openai", "https://gateway.example/openai/v1", "/openai/v1/responses"),
+    ),
+)
+def test_versioned_provider_base_urls_do_not_duplicate_api_prefix(
+    provider: str,
+    endpoint: str,
+    expected_path: str,
+) -> None:
+    profile = replace(_profile(provider), endpoint=endpoint)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == expected_path
+        if provider == "anthropic":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_1",
+                    "model": profile.model_id,
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "submit_action",
+                            "input": {
+                                "action_id": "option-01",
+                                "optional_patch": None,
+                                "concise_rationale": "Selected.",
+                            },
+                        }
+                    ],
+                },
+            )
+        if provider == "deepseek":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chat_1",
+                    "model": profile.model_id,
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [
+                                    {
+                                        "function": {
+                                            "name": "submit_action",
+                                            "arguments": json.dumps(
+                                                {
+                                                    "action_id": "option-01",
+                                                    "optional_patch": None,
+                                                    "concise_rationale": "Selected.",
+                                                }
+                                            ),
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "model": profile.model_id,
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "submit_action",
+                        "arguments": json.dumps(
+                            {
+                                "action_id": "option-01",
+                                "optional_patch": None,
+                                "concise_rationale": "Selected.",
+                            }
+                        ),
+                    }
+                ],
+            },
+        )
+
+    response = HttpPolicyClient(
+        profile,
+        api_key="secret",
+        transport=httpx.MockTransport(handler),
+    ).submit_action(_request())
+
+    assert response.selected_option_id == "option-01"
 
 
 def test_one_format_repair_uses_the_same_model() -> None:
@@ -311,3 +412,33 @@ def test_timeout_and_model_mismatch_are_typed() -> None:
             transport=mismatch_transport,
         ).submit_action(_request())
     assert mismatch.value.error_class == "provider_model_unavailable"
+
+
+def test_missing_provider_model_identity_is_terminal() -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "id": "missing-model",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "submit_action",
+                        "arguments": (
+                            '{"action_id":"option-01","optional_patch":null,'
+                            '"concise_rationale":"Done."}'
+                        ),
+                    }
+                ],
+            },
+        )
+    )
+
+    with pytest.raises(PolicyCallError) as caught:
+        HttpPolicyClient(
+            _profile("openai"),
+            api_key="secret",
+            transport=transport,
+        ).submit_action(_request())
+
+    assert caught.value.error_class == "provider_model_unavailable"

@@ -152,6 +152,21 @@ git status --short
 git rev-parse HEAD
 ```
 
+使用能够访问 Docker daemon 的非 root 账户执行 bootstrap。脚本会把该账户
+的 UID/GID 写入 `.env`，worker container 以相同身份访问
+`/data/lhmsb`，避免 bind mount 因固定容器 UID 而不可写。
+
+首次使用默认 data root 时，先由管理员创建目录并交给该非 root 账户：
+
+```bash
+sudo install -d -m 0750 -o "$(id -un)" -g "$(id -gn)" /data/lhmsb
+test -w /data/lhmsb
+```
+
+如果不能使用 `/data`，选择一个持久且当前账户可写的路径，并在后续所有
+命令中传入相同的 `--data-root`。bootstrap 会在下载前显式拒绝不可写路径，
+不会半途留下只完成一部分的资产目录。
+
 ### 5.2 配置 provider credentials
 
 ```bash
@@ -193,6 +208,8 @@ scripts/bootstrap_server.sh \
 8. 运行不产生 provider 调用的 repository-only preflight。
 
 bootstrap 完成后，`.env` 中的 image digest 字段会被写入解析后的值。
+脚本会把 `.env` 权限固定为 `0600`。host manifest 同时记录 GPU UUID、
+显存、driver version 和 compute capability。
 
 ### 5.4 Live preflight
 
@@ -361,6 +378,7 @@ report/
 | `interventions.jsonl` | leave-one-out/replacement 的因果使用判断 |
 | `api_usage.jsonl` | policy、Mem0 internal LLM、embedding、reranker 调用 |
 | `metrics.json` | 全矩阵聚合指标及 numerator/denominator |
+| `metrics_by_cell.json` | 每个 policy × condition × readout 的完整指标及 numerator/denominator |
 | `summary.json` | task、trace 和 API call 数量 |
 | `scorecard.csv` / `scorecard.md` | policy × condition × readout 行为与 drift 对比 |
 
@@ -389,8 +407,12 @@ jq . "${RUN_DIR}/report/summary.json"
 
 - `mean_behavior_score`
 - `behavior_correct_rate`
-- `mem0_gain_beyond_workspace`
-- `oracle_gap_closed`
+- `mem0_controlled_native_gain_beyond_workspace`
+- `mem0_controlled_common_rerank_gain_beyond_workspace`
+- `mem0_native_gain_beyond_workspace`
+- 三个对应的 `*_oracle_gap_closed`
+- `mem0_gain_beyond_workspace` / `oracle_gap_closed`（三个 Mem0
+  condition/readout cell 的宏平均，只作总览，不能用于比较 track）
 - `common_rerank_behavior_delta`
 
 ### 9.2 写入、handoff 与 state maintenance
@@ -404,8 +426,9 @@ jq . "${RUN_DIR}/report/summary.json"
 - `duplicate_live_memory_rate`
 - `update_delete_responsiveness`
 - `write_to_continuation_alignment`
-- `memory_write_count`
-- `live_memory_count`
+- `memory_write_count`（每个 final checkpoint 的平均累计 `N_write`）
+- `live_memory_count`（每个 final checkpoint 的平均 `N_live`）
+- `memory_write_count_total` / `live_memory_count_total`（审计总量）
 
 ### 9.3 Retrieval、visible 与 causal use
 
@@ -436,6 +459,10 @@ jq . "${RUN_DIR}/report/summary.json"
 - `matched_early_late_behavioral_decay`
 - `aggregate_drift_rate`
 
+`state_conflict_resolution_accuracy` 的分母只包含真实冲突点：scope conflict、
+valid update，以及已经存在 invalidated alternative 的 late matched-branch。
+early matched baseline 不进入该分母。
+
 这四个 drift component 分别对应：
 
 1. 仍有效的约束逐渐失去行为影响；
@@ -458,10 +485,10 @@ Qdrant 压缩 snapshot 大小；测量后 snapshot 会删除。
 `history_store_bytes` 是关闭 Mem0 后 SQLite 主文件加仍存在的 WAL/SHM
 sidecar 字节数。两个值是观测量，不是从 memory count 估算。
 
-需要按 policy 或 condition 分析时，以 `task_results.jsonl`、
-`sceu_results.jsonl` 和 `scorecard.csv` 中的
-`policy_profile_id/condition/readout` 为分组键；`metrics.json` 是全矩阵
-汇总，不应被误解为单一 track 的结果。
+按 policy 或 condition 分析时，优先直接读取 `metrics_by_cell.json`；
+`task_results.jsonl`、`sceu_results.jsonl` 和 `scorecard.csv` 保留相同的
+`policy_profile_id/condition/readout` 分组键供逐记录审计。`metrics.json`
+是全矩阵汇总，不应被误解为单一 track 的结果。
 
 RQ5 的 scale 变量始终是 `memory_write_count` 和 `live_memory_count`，不是
 token 数。当前单 episode qualification 验证计数和选择性契约；正式的
@@ -499,7 +526,7 @@ Bundle 包含代码归档、commit、wheelhouse、OCI image archives、两个 BG
 它不包含 `.env` 或任何 credential。即使依赖通过 bundle 离线迁移，
 正式 qualification 仍需要三个 provider endpoint 的网络访问。
 
-## 12. Mem0 通过后的工作流
+## 12. Mem0 通过后的 decision gate
 
 1. 冻结 Mem0 的 raw run 和 validated report；
 2. 检查三条 policy、Controlled/Native、native/common-rerank 的可区分性；
@@ -507,6 +534,7 @@ Bundle 包含代码归档、commit、wheelhouse、OCI image archives、两个 BG
    `stored → candidate → retrieved → visible → causal use → behavior`
    链；
 4. 决定是否扩大 episode 数和 memory-count 梯度；
-5. 依次为 Letta、Graphiti、Hindsight、MemOS 实现同一 trace 和 output
-   contract；
-6. 只有各系统独立 qualification 通过后，才启动正式跨系统 pilot。
+5. 下一 memory system 待定；基于 Mem0 结果和届时的系统调查单独完成
+   selection、design 和 qualification，不在本阶段预先指定；
+6. 在下一系统被明确选择并独立 qualification 通过之前，不启动跨系统
+   pilot。

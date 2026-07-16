@@ -98,6 +98,7 @@ services:
 
   worker:
     image: "${LHMSB_WORKER_IMAGE_DIGEST:?set LHMSB_WORKER_IMAGE_DIGEST}"
+    user: "${LHMSB_WORKER_UID:?set LHMSB_WORKER_UID}:${LHMSB_WORKER_GID:?set LHMSB_WORKER_GID}"
     init: true
     depends_on:
       qdrant:
@@ -107,6 +108,7 @@ services:
       reranker:
         condition: service_healthy
     environment:
+      HOME: /tmp
       MEM0_TELEMETRY: "False"
       LHMSB_DATA_ROOT: /data/lhmsb
       LHMSB_QDRANT_URL: http://qdrant:6333

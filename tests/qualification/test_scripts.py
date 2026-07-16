@@ -177,12 +177,59 @@ def test_bootstrap_forwards_allow_dirty_to_repository_preflight(
     assert "--allow-dirty" in completed.stdout
 
 
+def test_bootstrap_preserves_the_tracked_wheelhouse_placeholder() -> None:
+    text = SCRIPTS["bootstrap_server.sh"].read_text(encoding="utf-8")
+
+    assert "! -name .gitkeep" in text
+
+
+def test_bootstrap_persists_non_root_host_identity_for_worker_mounts() -> None:
+    text = SCRIPTS["bootstrap_server.sh"].read_text(encoding="utf-8")
+
+    assert 'HOST_UID="$(id -u)"' in text
+    assert 'HOST_GID="$(id -g)"' in text
+    assert 'if [[ "${HOST_UID}" == "0" ]]' in text
+    assert '"LHMSB_WORKER_UID"' in text
+    assert '"LHMSB_WORKER_GID"' in text
+
+
+def test_bootstrap_secures_env_and_checks_data_root_writability() -> None:
+    text = SCRIPTS["bootstrap_server.sh"].read_text(encoding="utf-8")
+
+    assert 'chmod 600 "${ENV_FILE}"' in text
+    assert 'if [[ ! -w "${DATA_ROOT}" ]]' in text
+    assert "pre-create it as the current non-root user" in text
+
+
+def test_bootstrap_downloads_wheels_with_the_pinned_worker_python() -> None:
+    text = SCRIPTS["bootstrap_server.sh"].read_text(encoding="utf-8")
+
+    assert 'docker run --rm \\' in text
+    assert '--user "${HOST_UID}:${HOST_GID}"' in text
+    assert '"${PYTHON_BASE_IMAGE}@${PYTHON_BASE_DIGEST}"' in text
+    assert "python -m pip download" in text
+    assert "--only-binary=:all:" in text
+    assert "python3 -m pip download" not in text
+    assert "-name '*.whl' -delete" in text
+
+
 def test_preflight_generates_host_manifest_before_entering_worker() -> None:
     text = SCRIPTS["preflight_mem0.sh"].read_text(encoding="utf-8")
 
     assert "mem0_write_host_manifest" in text
     assert text.index("mem0_write_host_manifest") < text.index(
         "run --rm worker"
+    )
+
+
+def test_host_manifest_captures_gpu_identity_driver_and_compute_capability() -> None:
+    text = (ROOT / "scripts" / "lib" / "mem0_common.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "--query-gpu=index,name,uuid,memory.total,driver_version,compute_cap"
+        in text
     )
 
 

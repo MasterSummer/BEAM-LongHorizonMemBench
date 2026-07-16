@@ -638,6 +638,7 @@ retrieval_trace.jsonl
 interventions.jsonl
 api_usage.jsonl
 metrics.json
+metrics_by_cell.json
 summary.json
 scorecard.csv
 scorecard.md
@@ -736,13 +737,20 @@ Each SCEU records:
 - matched early-versus-late behavioral decay;
 - aggregate drift index with component counts reported separately.
 
+The conflict-resolution denominator includes scope conflicts, valid updates,
+and matched-branch checkpoints only after an invalidated alternative exists.
+The pre-update member of an early/late matched pair is a baseline, not a state
+conflict.
+
 ### 13.5 Behavior and baselines
 
 - programmatic behavior score;
 - workspace-only score;
 - oracle-current-state score;
-- Mem0 gain beyond workspace;
-- fraction of oracle gap closed;
+- controlled native-order, controlled common-rerank, and native-track Mem0
+  gain beyond workspace, reported separately;
+- fraction of oracle gap closed for the same three cells;
+- a clearly labeled macro-average across those three cells for overview only;
 - common-rerank behavior delta.
 
 ### 13.6 Cost and reliability

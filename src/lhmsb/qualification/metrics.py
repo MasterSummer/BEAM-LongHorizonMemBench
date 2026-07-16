@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
+from lhmsb.longhorizon.attribution import eligible_write_state_ids
 from lhmsb.longhorizon.replay import replay_plan
+from lhmsb.longhorizon.schema import ContinuationOpportunity
 from lhmsb.qualification.runner import (
     PolicyEvaluation,
     QualificationMatrixResult,
@@ -184,10 +186,9 @@ def compute_qualification_metrics(
                 for item in alignment.attributions
             }
             replay = replay_plan(spec.plan, write.session_index)
-            eligible = tuple(
-                event.target_state_id
-                for event in spec.plan.events
-                if event.session == write.session_index and event.type == "add"
+            eligible = eligible_write_state_ids(
+                spec.plan,
+                write.session_index,
             )
             new_memory_ids = {
                 event.memory_id
@@ -268,6 +269,10 @@ def compute_qualification_metrics(
                     for item in loo
                 )
                 opportunity = opportunity_by_id[row.opportunity_id]
+                checkpoint_replay = replay_plan(
+                    spec.plan,
+                    row.checkpoint_session,
+                )
                 behaviors.append(
                     BehaviorMetricInput(
                         policy_profile_id=task.policy_profile_id,
@@ -289,8 +294,10 @@ def compute_qualification_metrics(
                         drift_flags=row.normalized_drift_flags,
                         matched_group=row.matched_group,
                         checkpoint_session=row.checkpoint_session,
-                        is_conflict_opportunity=opportunity.challenge_type
-                        in {"scope-conflict", "valid-update", "matched-branch"},
+                        is_conflict_opportunity=_is_state_conflict_opportunity(
+                            opportunity,
+                            checkpoint_replay.invalidated,
+                        ),
                     )
                 )
 
@@ -307,11 +314,12 @@ def compute_qualification_metrics(
                     for item in alignment.attributions
                 } if alignment is not None else {}
                 gold = sceu_gold[row.sceu_id]
-                replay = replay_plan(spec.plan, row.checkpoint_session)
                 retrievals.append(
                     RetrievalMetricInput(
                         required_state_ids=gold.required_state_ids,
-                        stale_state_ids=tuple(sorted(replay.invalidated)),
+                        stale_state_ids=tuple(
+                            sorted(checkpoint_replay.invalidated)
+                        ),
                         candidate_memory_state_ids=tuple(
                             attribution_map.get(item.memory_id, ())
                             for item in trace.candidates
@@ -446,12 +454,20 @@ def _state_metrics(
         aligned_future,
         future_states,
     )
-    values["memory_write_count"] = (
+    values["memory_write_count"] = safe_ratio(
+        final_write_count,
+        final_checkpoints,
+    )
+    values["memory_write_count_total"] = (
         safe_ratio(final_write_count, 1)
         if final_checkpoints
         else safe_ratio(0, 0)
     )
-    values["live_memory_count"] = (
+    values["live_memory_count"] = safe_ratio(
+        final_live_count,
+        final_checkpoints,
+    )
+    values["live_memory_count_total"] = (
         safe_ratio(final_live_count, 1)
         if final_checkpoints
         else safe_ratio(0, 0)
@@ -633,6 +649,23 @@ def _behavior_metrics(
     _baseline_comparison_metrics(values, observations)
 
 
+def _is_state_conflict_opportunity(
+    opportunity: ContinuationOpportunity,
+    invalidated_state_ids: Collection[str],
+) -> bool:
+    if opportunity.challenge_type in {"scope-conflict", "valid-update"}:
+        return True
+    if opportunity.challenge_type != "matched-branch":
+        return False
+    invalidated = set(invalidated_state_ids)
+    valid_actions = set(opportunity.valid_action_ids)
+    return any(
+        action.action_id not in valid_actions
+        and bool(invalidated.intersection(action.satisfies_state_ids))
+        for action in opportunity.action_catalog
+    )
+
+
 def _baseline_comparison_metrics(
     values: dict[str, MetricValue],
     observations: Sequence[BehaviorMetricInput],
@@ -651,6 +684,29 @@ def _baseline_comparison_metrics(
     closures: list[float] = []
     rerank_deltas: list[float] = []
     policies = sorted({item.policy_profile_id for item in observations})
+    comparisons = (
+        (
+            "mem0_controlled_native",
+            "mem0_controlled",
+            "native",
+        ),
+        (
+            "mem0_controlled_common_rerank",
+            "mem0_controlled",
+            "common_rerank",
+        ),
+        (
+            "mem0_native",
+            "mem0_native",
+            "native",
+        ),
+    )
+    comparison_gains: dict[str, list[float]] = {
+        prefix: [] for prefix, _, _ in comparisons
+    }
+    comparison_closures: dict[str, list[float]] = {
+        prefix: [] for prefix, _, _ in comparisons
+    }
     for policy in policies:
         workspace = means.get((policy, "workspace_only", "none"))
         oracle = means.get((policy, "oracle_current_state", "none"))
@@ -673,6 +729,22 @@ def _baseline_comparison_metrics(
                         )
                     )
                 )
+        for prefix, condition, readout in comparisons:
+            score = means.get((policy, condition, readout))
+            if workspace is None or score is None:
+                continue
+            gain = _stable_difference(score, workspace)
+            comparison_gains[prefix].append(gain)
+            if oracle is not None and oracle != workspace:
+                comparison_closures[prefix].append(
+                    float(
+                        Decimal(str(gain))
+                        / (
+                            Decimal(str(oracle))
+                            - Decimal(str(workspace))
+                        )
+                    )
+                )
         native = means.get((policy, "mem0_controlled", "native"))
         common = means.get((policy, "mem0_controlled", "common_rerank"))
         if native is not None and common is not None:
@@ -685,6 +757,17 @@ def _baseline_comparison_metrics(
         sum(closures),
         len(closures),
     )
+    for prefix, _, _ in comparisons:
+        gains_for_comparison = comparison_gains[prefix]
+        closures_for_comparison = comparison_closures[prefix]
+        values[f"{prefix}_gain_beyond_workspace"] = safe_ratio(
+            sum(gains_for_comparison),
+            len(gains_for_comparison),
+        )
+        values[f"{prefix}_oracle_gap_closed"] = safe_ratio(
+            sum(closures_for_comparison),
+            len(closures_for_comparison),
+        )
     values["common_rerank_behavior_delta"] = safe_ratio(
         sum(rerank_deltas),
         len(rerank_deltas),

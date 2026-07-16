@@ -105,6 +105,20 @@ def test_report_emits_required_deterministic_hashed_artifacts(
     assert metrics["mean_behavior_score"]["value"] == 1.0
     assert metrics["qdrant_store_bytes"]["value"] == 4096
     assert metrics["history_store_bytes"]["value"] == 1024
+    metrics_by_cell = json.loads(
+        (tmp_path / "first" / "metrics_by_cell.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metrics_by_cell["schema_version"] == 2
+    assert metrics_by_cell["groups"] == [
+        {
+            "condition": "workspace_only",
+            "metrics": metrics,
+            "policy_profile_id": "policy-a",
+            "readout": "none",
+        }
+    ]
     scorecard = (tmp_path / "first" / "scorecard.csv").read_text(
         encoding="utf-8"
     )

@@ -4,6 +4,13 @@ A benchmark for AI memory-management systems over long, multi-session agentic ta
 
 Modern AI agents operate across days or weeks: a research agent updates a growing body of evidence, a coding agent maintains a codebase through evolving requirements, a personal assistant tracks user preferences across months. Memory management systems promise to give these agents persistent, evolvable recall beyond their context window. **LongHorizonMemSysBench (LHMSB) v1 answers a single deployment question**: does the memory system improve task performance, store selectively, and retrieve the right evidence across sessions?
 
+> **Current active qualification: Mem0 only.** The frozen Software
+> long-horizon experiment, A100 workflow, and formal result contract currently
+> enable only Mem0. Letta, Graphiti, Hindsight, MemOS, Cognee, and other systems
+> are deferred until Mem0 passes its independent qualification. Existing
+> adapter code is retained for legacy compatibility and does not place those
+> systems in the active matrix.
+
 The headline metric is **Memory ROI**, defined here as normalized task gain per recorded memory item. It is paired with Storage Efficiency and Retrieval Efficiency, measured on the same counterfactual replay episodes.
 
 ## What v1 Measures
@@ -20,9 +27,11 @@ v1 implements four dimensions with Memory ROI as the cross-cutting headline:
 
 **Memory ROI** is `mean(normalized_gain) / mean(recorded_memory_count)`, reported with bootstrap confidence intervals. `no_mem` is the counterfactual baseline and zero-memory systems are `N/A`, never infinite.
 
-## Systems Under Test
+## Legacy v1 adapter coverage (not active)
 
-Six leaderboard conditions plus two calibration-only sensitivity oracles:
+The original v1 harness contains six leaderboard adapters plus two
+calibration-only sensitivity oracles. This table documents preserved interfaces;
+it is not the current Mem0 qualification matrix.
 
 | Condition | Type | Description |
 |-----------|------|-------------|
@@ -83,7 +92,7 @@ Requires Python 3.11 or later. Clone the repository and install in editable mode
 pip install -e ".[dev]"
 ```
 
-Per-adapter extras (install only what you need):
+Legacy per-adapter extras (install only when maintaining those adapters):
 
 ```bash
 pip install -e ".[chroma]"       # ChromaDB vector baseline
@@ -97,7 +106,7 @@ pip install -e ".[metadata]"     # DuckDB for one-time Parquet metadata indexing
 
 Chain extras: `pip install -e ".[dev,chroma,tokenizers]"`.
 
-### Graphiti Prerequisites
+### Legacy Graphiti prerequisites
 
 Graphiti requires a running graph database (Neo4j or FalkorDB). A Docker Compose file is provided:
 
@@ -123,7 +132,9 @@ On a clean Linux server with Docker, the NVIDIA container runtime, and at least
 two visible A100 GPUs:
 
 ```bash
+sudo install -d -m 0750 -o "$(id -un)" -g "$(id -gn)" /data/lhmsb
 cp .env.example .env
+chmod 600 .env
 # Fill ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, and OPENAI_API_KEY.
 
 scripts/bootstrap_server.sh --data-root /data/lhmsb --env-file .env
@@ -155,9 +166,11 @@ Outputs land under `runs/smoke/native/`:
 | `pareto_*.png` | Pareto-frontier plots: native overall, per-family. |
 | `run_manifest.json` | Full reproducibility manifest: git SHA, config hash, dataset checksums, environment snapshot. |
 
-### Full Pilot Run
+### Legacy v1 full pilot (deferred)
 
-Runs all 6 leaderboard conditions at pilot scale (3 seeds, 20 episodes per family). Requires live backends and API keys for `mem0`, `letta`, `graphiti`, and `cognee`.
+This older command can run all six v1 adapters, but it is not part of the
+current experimental plan and must not be used for the Mem0 qualification.
+Cross-system execution remains deferred pending a new system-selection decision.
 
 ```bash
 # Native track (each system's own defaults)

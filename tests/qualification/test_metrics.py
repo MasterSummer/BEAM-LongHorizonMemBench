@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
+from lhmsb.longhorizon.replay import replay_plan
 from lhmsb.qualification.metrics import (
     BehaviorMetricInput,
     RetrievalMetricInput,
     StateCheckpointMetricInput,
     UsageMetricInput,
+    _is_state_conflict_opportunity,
     compute_metric_collection,
     safe_ratio,
 )
@@ -48,6 +51,42 @@ def test_write_state_maintenance_formulas_are_hand_computed() -> None:
     assert metrics["write_to_continuation_alignment"].value == 0.5
     assert metrics["memory_write_count"].value == 3
     assert metrics["live_memory_count"].value == 4
+
+
+def test_memory_counts_are_checkpoint_means_with_explicit_totals() -> None:
+    first = StateCheckpointMetricInput(
+        eligible_write_state_ids=(),
+        new_memory_state_ids=(),
+        current_state_ids=(),
+        future_needed_state_ids=(),
+        retired_state_ids=(),
+        live_memory_state_ids=(),
+        live_content_hashes=(),
+        n_write=3,
+        n_live=4,
+    )
+    second = StateCheckpointMetricInput(
+        eligible_write_state_ids=(),
+        new_memory_state_ids=(),
+        current_state_ids=(),
+        future_needed_state_ids=(),
+        retired_state_ids=(),
+        live_memory_state_ids=(),
+        live_content_hashes=(),
+        n_write=5,
+        n_live=6,
+    )
+
+    metrics = compute_metric_collection(state_checkpoints=(first, second))
+
+    assert metrics["memory_write_count"].numerator == 8
+    assert metrics["memory_write_count"].denominator == 2
+    assert metrics["memory_write_count"].value == 4
+    assert metrics["memory_write_count_total"].value == 8
+    assert metrics["live_memory_count"].numerator == 10
+    assert metrics["live_memory_count"].denominator == 2
+    assert metrics["live_memory_count"].value == 5
+    assert metrics["live_memory_count_total"].value == 10
 
 
 def test_retrieval_visibility_and_stale_formulas_are_hand_computed() -> None:
@@ -309,8 +348,52 @@ def test_workspace_gain_oracle_gap_and_common_rerank_delta() -> None:
             behavior_score=0.8,
             is_correct=True,
         ),
+        BehaviorMetricInput(
+            policy_profile_id="p1",
+            condition="mem0_native",
+            readout="native",
+            result_id="mem0-native",
+            behavior_score=0.4,
+            is_correct=True,
+        ),
     )
     metrics = compute_metric_collection(behaviors=behaviors)
-    assert metrics["mem0_gain_beyond_workspace"].value == 0.5
-    assert metrics["oracle_gap_closed"].value == 0.625
+    assert metrics["mem0_gain_beyond_workspace"].value == 0.4
+    assert metrics["oracle_gap_closed"].value == 0.5
+    assert metrics["mem0_controlled_native_gain_beyond_workspace"].value == 0.4
+    assert metrics["mem0_controlled_common_rerank_gain_beyond_workspace"].value == 0.6
+    assert metrics["mem0_native_gain_beyond_workspace"].value == 0.2
+    assert metrics["mem0_controlled_native_oracle_gap_closed"].value == 0.5
+    assert metrics["mem0_controlled_common_rerank_oracle_gap_closed"].value == 0.75
+    assert metrics["mem0_native_oracle_gap_closed"].value == 0.25
     assert metrics["common_rerank_behavior_delta"].value == 0.2
+
+
+def test_conflict_accuracy_excludes_the_pre_update_matched_baseline() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=16)
+    opportunities = {
+        item.opportunity_id: item for item in spec.plan.opportunities
+    }
+
+    early = opportunities["opp-early"]
+    late = opportunities["opp-late"]
+    assert not _is_state_conflict_opportunity(
+        early,
+        replay_plan(spec.plan, early.checkpoint_session).invalidated,
+    )
+    assert _is_state_conflict_opportunity(
+        late,
+        replay_plan(spec.plan, late.checkpoint_session).invalidated,
+    )
+    assert _is_state_conflict_opportunity(
+        opportunities["opp-local-only"],
+        (),
+    )
+    assert _is_state_conflict_opportunity(
+        opportunities["opp-valid-update"],
+        (),
+    )
+    assert not _is_state_conflict_opportunity(
+        opportunities["opp-fresh-reminder"],
+        (),
+    )

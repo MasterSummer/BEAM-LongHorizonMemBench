@@ -12,6 +12,8 @@ from lhmsb.qualification.config import (
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "configs" / "experiments" / "mem0_qualification.yaml"
+README = ROOT / "README.md"
+SERVER_WORKFLOW = ROOT / "docs" / "mem0-server-workflow.md"
 
 
 def test_repository_config_pins_models_and_retrieval_contract() -> None:
@@ -116,3 +118,13 @@ def test_only_mem0_is_enabled_in_system_lock() -> None:
     assert "mem0:" in lock
     for deferred in ("letta", "graphiti", "hindsight", "memos"):
         assert deferred not in lock.lower()
+
+
+def test_docs_declare_mem0_as_the_only_active_qualification_system() -> None:
+    readme = README.read_text(encoding="utf-8")
+    workflow = SERVER_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "Current active qualification: Mem0 only" in readme
+    assert "Legacy v1 adapter coverage (not active)" in readme
+    assert "下一 memory system 待定" in workflow
+    assert "依次为 Letta、Graphiti、Hindsight、MemOS" not in workflow

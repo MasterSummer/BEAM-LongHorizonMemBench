@@ -9,7 +9,7 @@ import json
 import os
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,7 @@ from lhmsb.qualification.runner import (
     SCEURunResult,
 )
 
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 REQUIRED_REPORT_ARTIFACTS: tuple[str, ...] = (
     "run_manifest.json",
     "tasks.jsonl",
@@ -35,6 +35,7 @@ REQUIRED_REPORT_ARTIFACTS: tuple[str, ...] = (
     "interventions.jsonl",
     "api_usage.jsonl",
     "metrics.json",
+    "metrics_by_cell.json",
     "summary.json",
     "scorecard.csv",
     "scorecard.md",
@@ -107,6 +108,15 @@ def write_qualification_report(
     _atomic_write(
         output_directory / "metrics.json",
         _json_bytes(metrics.to_dict()),
+    )
+    _atomic_write(
+        output_directory / "metrics_by_cell.json",
+        _json_bytes(
+            {
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "groups": _metrics_by_cell(matrix, specs),
+            }
+        ),
     )
     _atomic_write(
         output_directory / "summary.json",
@@ -573,6 +583,69 @@ def _scorecard_rows(
             }
         )
     return output
+
+
+def _metrics_by_cell(
+    matrix: QualificationMatrixResult,
+    specs: Mapping[str, SoftwareMem0VerticalSpec],
+) -> list[dict[str, object]]:
+    keys = sorted(
+        {
+            (
+                task.policy_profile_id,
+                condition.condition,
+                condition.readout,
+            )
+            for task in matrix.task_results
+            for condition in task.condition_results
+        }
+    )
+    groups: list[dict[str, object]] = []
+    for policy_profile_id, condition_name, readout in keys:
+        selected_tasks: list[QualificationTaskResult] = []
+        for task in matrix.task_results:
+            if (
+                task.policy_profile_id != policy_profile_id
+                or task.condition != condition_name
+            ):
+                continue
+            selected_conditions = tuple(
+                condition
+                for condition in task.condition_results
+                if condition.condition == condition_name
+                and condition.readout == readout
+            )
+            if not selected_conditions:
+                continue
+            traces = task.retrieval_traces
+            if readout != "common_rerank":
+                traces = tuple(
+                    replace(trace, rerank_result=None)
+                    for trace in traces
+                )
+            selected_tasks.append(
+                replace(
+                    task,
+                    condition_results=selected_conditions,
+                    retrieval_traces=traces,
+                )
+            )
+        selected_matrix = QualificationMatrixResult(
+            run_identity=matrix.run_identity,
+            task_results=tuple(selected_tasks),
+        )
+        groups.append(
+            {
+                "policy_profile_id": policy_profile_id,
+                "condition": condition_name,
+                "readout": readout,
+                "metrics": compute_qualification_metrics(
+                    selected_matrix,
+                    specs,
+                ).to_dict(),
+            }
+        )
+    return groups
 
 
 def _aggregate_status(statuses: Sequence[str] | Any) -> str:

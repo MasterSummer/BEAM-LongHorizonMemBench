@@ -35,6 +35,7 @@ from lhmsb.qualification.preflight import (
     PreflightContext,
     PreflightError,
     current_repository_snapshot,
+    default_preflight_gates,
     load_mem0_specs,
     require_live_gate,
     run_preflight,
@@ -64,7 +65,7 @@ from lhmsb.qualification.storage import (
 from lhmsb.qualification.tei import RerankerClient
 from lhmsb.qualification.validate import validate_qualification_artifacts
 
-QUALIFICATION_RUN_SCHEMA_VERSION = 2
+QUALIFICATION_RUN_SCHEMA_VERSION = 3
 _PROG = "python -m lhmsb.qualification"
 
 
@@ -84,6 +85,7 @@ class QualificationRunManifest:
     dataset_manifest_sha256: str
     config_path: str
     config_hash: str
+    effective_policy_profiles_hash: str
     dependency_lock_sha256: str
     data_root: str
     image_digests_hash: str
@@ -120,6 +122,10 @@ class QualificationRunManifest:
             ),
             config_path=_text(data.get("config_path"), "config_path"),
             config_hash=_text(data.get("config_hash"), "config_hash"),
+            effective_policy_profiles_hash=_text(
+                data.get("effective_policy_profiles_hash"),
+                "effective_policy_profiles_hash",
+            ),
             dependency_lock_sha256=_text(
                 data.get("dependency_lock_sha256"),
                 "dependency_lock_sha256",
@@ -211,12 +217,17 @@ def plan_qualification_run(
         environment=dict(os.environ),
         required=os.environ.get("LHMSB_LIVE_QUALIFICATION") == "1",
     )
+    effective_policy_profiles_hash = _effective_policy_profiles_hash(
+        config,
+        dict(os.environ),
+    )
     identity_payload = {
         "schema_version": QUALIFICATION_RUN_SCHEMA_VERSION,
         "code_commit": snapshot.commit,
         "code_dirty": snapshot.dirty,
         "dataset_manifest_sha256": dataset_manifest_sha256,
         "config_hash": config.config_hash,
+        "effective_policy_profiles_hash": effective_policy_profiles_hash,
         "dependency_lock_sha256": dependency_lock_sha256,
         "data_root": runtime.data_root.as_posix(),
         "image_digests_hash": runtime.image_digests_hash,
@@ -240,6 +251,7 @@ def plan_qualification_run(
         dataset_manifest_sha256=dataset_manifest_sha256,
         config_path=str(config_path.resolve()),
         config_hash=config.config_hash,
+        effective_policy_profiles_hash=effective_policy_profiles_hash,
         dependency_lock_sha256=dependency_lock_sha256,
         data_root=runtime.data_root.as_posix(),
         image_digests_hash=runtime.image_digests_hash,
@@ -731,6 +743,13 @@ def _load_run_contract(
         raise QualificationCliError(
             "configuration hash does not match the planned run identity"
         )
+    if (
+        _effective_policy_profiles_hash(config, dict(os.environ))
+        != manifest.effective_policy_profiles_hash
+    ):
+        raise QualificationCliError(
+            "effective provider request profiles changed after planning"
+        )
     if _sha256(Path(manifest.dataset_path) / "MANIFEST.json") != (
         manifest.dataset_manifest_sha256
     ):
@@ -1036,6 +1055,13 @@ def _runtime_identity(
         hardware_hash = "unavailable"
     else:
         data = _read_json(preflight_report)
+        if required and (
+            data.get("ok") is not True
+            or data.get("repository_only") is not False
+        ):
+            raise QualificationCliError(
+                "live qualification requires a successful full preflight"
+            )
         checks = data.get("checks")
         if not isinstance(checks, Sequence) or isinstance(
             checks,
@@ -1044,6 +1070,22 @@ def _runtime_identity(
             raise QualificationCliError(
                 "preflight report checks must be an array"
             )
+        if required:
+            statuses = {
+                str(raw_check.get("name")): raw_check.get("status")
+                for raw_check in checks
+                if isinstance(raw_check, Mapping)
+            }
+            incomplete = [
+                gate.name
+                for gate in default_preflight_gates()
+                if statuses.get(gate.name) != "pass"
+            ]
+            if incomplete:
+                raise QualificationCliError(
+                    "live qualification requires a successful full preflight; "
+                    f"incomplete gates: {incomplete}"
+                )
         host_details: Mapping[str, object] | None = None
         for raw_check in checks:
             if not isinstance(raw_check, Mapping):
@@ -1114,6 +1156,18 @@ def _effective_policy(
         else None
     )
     return replace(profile, endpoint=override or profile.endpoint)
+
+
+def _effective_policy_profiles_hash(
+    config: QualificationConfig,
+    environment: Mapping[str, str],
+) -> str:
+    return canonical_hash(
+        [
+            asdict(_effective_policy(profile, environment))
+            for profile in config.policy_profiles
+        ]
+    )
 
 
 def _write_task_result(

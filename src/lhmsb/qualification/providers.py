@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
+from urllib.parse import urlparse
 
 import httpx
 
@@ -96,7 +97,7 @@ _ACTION_SCHEMA: dict[str, object] = {
         "optional_patch": {"type": ["string", "null"]},
         "concise_rationale": {"type": "string"},
     },
-    "required": ["action_id", "concise_rationale"],
+    "required": ["action_id", "optional_patch", "concise_rationale"],
     "additionalProperties": False,
 }
 
@@ -273,11 +274,7 @@ class HttpPolicyClient:
 
     def _post(self, body: dict[str, object]) -> tuple[dict[str, object], int]:
         retries = 0
-        path = {
-            "anthropic": "/v1/messages",
-            "deepseek": "/v1/chat/completions",
-            "openai": "/v1/responses",
-        }[self.profile.provider]
+        path = _provider_request_path(self.profile)
         for attempt in range(self.profile.max_retries + 1):
             try:
                 response = self._client.post(path, json=body)
@@ -345,7 +342,12 @@ class HttpPolicyClient:
 
     def _validate_model(self, raw: dict[str, object]) -> None:
         returned = raw.get("model")
-        if isinstance(returned, str) and returned != self.profile.model_id:
+        if not isinstance(returned, str) or not returned:
+            raise PolicyCallError(
+                "provider_model_unavailable",
+                f"provider omitted model identity for requested {self.profile.model_id!r}",
+            )
+        if returned != self.profile.model_id:
             raise PolicyCallError(
                 "provider_model_unavailable",
                 f"requested {self.profile.model_id!r}, provider returned {returned!r}",
@@ -432,11 +434,16 @@ class HttpPolicyClient:
                 ),
             )
         if self.profile.provider == "deepseek":
+            completion_details = usage.get("completion_tokens_details")
             return PolicyUsage(
                 input_tokens=_optional_int(usage.get("prompt_tokens")),
                 output_tokens=_optional_int(usage.get("completion_tokens")),
                 cached_tokens=_optional_int(usage.get("prompt_cache_hit_tokens")),
-                reasoning_tokens=_optional_int(usage.get("reasoning_tokens")),
+                reasoning_tokens=(
+                    _optional_int(completion_details.get("reasoning_tokens"))
+                    if isinstance(completion_details, dict)
+                    else None
+                ),
             )
         input_details = usage.get("input_tokens_details")
         output_details = usage.get("output_tokens_details")
@@ -465,6 +472,16 @@ def _canonical_hash(value: object) -> str:
         default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _provider_request_path(profile: PolicyProfile) -> str:
+    endpoint_path = urlparse(profile.endpoint).path.rstrip("/")
+    endpoint_has_version = endpoint_path.endswith("/v1")
+    if profile.provider == "anthropic":
+        return "messages" if endpoint_has_version else "v1/messages"
+    if profile.provider == "deepseek":
+        return "chat/completions"
+    return "responses" if endpoint_has_version else "v1/responses"
 
 
 def _optional_int(value: object) -> int | None:

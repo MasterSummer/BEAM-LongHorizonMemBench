@@ -7,6 +7,7 @@ from lhmsb.longhorizon.attribution import (
     FactSignature,
     attribute_memory,
     build_software_fact_signatures,
+    eligible_write_state_ids,
     normalize_fact_text,
 )
 
@@ -173,3 +174,12 @@ def test_software_signature_catalog_covers_every_latent_state_with_provenance() 
     assert p2.version == 1
     assert p2.scope == "pipeline"
     assert p2.authority == "engineering-lead"
+
+
+def test_write_eligibility_includes_current_updates_and_excludes_retirements() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=16)
+
+    assert eligible_write_state_ids(spec.plan, 0) == ("C1", "C2", "G0", "P1")
+    assert eligible_write_state_ids(spec.plan, 5) == ("P1",)
+    assert eligible_write_state_ids(spec.plan, 6) == ("P2",)
+    assert eligible_write_state_ids(spec.plan, 8) == ("L1",)
