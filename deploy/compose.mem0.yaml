@@ -1,0 +1,145 @@
+name: lhmsb-mem0
+
+services:
+  qdrant:
+    image: "${QDRANT_IMAGE:-qdrant/qdrant}@${QDRANT_IMAGE_DIGEST:?set QDRANT_IMAGE_DIGEST}"
+    restart: unless-stopped
+    expose:
+      - "6333"
+      - "6334"
+    volumes:
+      - "${LHMSB_DATA_ROOT:-/data/lhmsb}/qdrant:/qdrant/storage"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/6333'"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - backend
+
+  embedding:
+    image: "${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference}@${TEI_IMAGE_DIGEST:?set TEI_IMAGE_DIGEST}"
+    restart: unless-stopped
+    command:
+      - --model-id
+      - /data/lhmsb/models/bge-m3
+      - --dtype
+      - float16
+      - --port
+      - "80"
+      - --max-client-batch-size
+      - "32"
+    expose:
+      - "80"
+    volumes:
+      - "${LHMSB_DATA_ROOT:-/data/lhmsb}:/data/lhmsb:ro"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids:
+                - "${LHMSB_EMBEDDING_GPU_ID:-0}"
+              capabilities:
+                - gpu
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - http://localhost:80/health
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+    networks:
+      - backend
+
+  reranker:
+    image: "${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference}@${TEI_IMAGE_DIGEST:?set TEI_IMAGE_DIGEST}"
+    restart: unless-stopped
+    command:
+      - --model-id
+      - /data/lhmsb/models/bge-reranker-v2-m3
+      - --dtype
+      - float16
+      - --port
+      - "80"
+      - --max-client-batch-size
+      - "32"
+    expose:
+      - "80"
+    volumes:
+      - "${LHMSB_DATA_ROOT:-/data/lhmsb}:/data/lhmsb:ro"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids:
+                - "${LHMSB_RERANKER_GPU_ID:-1}"
+              capabilities:
+                - gpu
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - http://localhost:80/health
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+    networks:
+      - backend
+
+  worker:
+    image: "${LHMSB_WORKER_IMAGE:-lhmsb-mem0-worker}@${LHMSB_WORKER_IMAGE_DIGEST:?set LHMSB_WORKER_IMAGE_DIGEST}"
+    init: true
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      embedding:
+        condition: service_healthy
+      reranker:
+        condition: service_healthy
+    environment:
+      MEM0_TELEMETRY: "False"
+      LHMSB_DATA_ROOT: /data/lhmsb
+      LHMSB_QDRANT_URL: http://qdrant:6333
+      LHMSB_EMBEDDING_URL: http://embedding:80
+      LHMSB_RERANKER_URL: http://reranker:80
+      LHMSB_LIVE_PREFLIGHT: "${LHMSB_LIVE_PREFLIGHT:-0}"
+      LHMSB_LIVE_QUALIFICATION: "${LHMSB_LIVE_QUALIFICATION:-0}"
+      LHMSB_MEM0_WHEEL: /data/lhmsb/wheelhouse/mem0ai-2.0.12-py3-none-any.whl
+      LHMSB_IMAGE_DIGEST_MANIFEST: /data/lhmsb/manifests/images.json
+      LHMSB_MODEL_FILE_MANIFEST: /data/lhmsb/manifests/models.json
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      DEEPSEEK_BASE_URL: "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com}"
+    volumes:
+      - "${LHMSB_DATA_ROOT:-/data/lhmsb}:/data/lhmsb"
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -m
+        - lhmsb.qualification
+        - --help
+      interval: 30s
+      timeout: 15s
+      retries: 3
+    networks:
+      - backend
+      - provider_egress
+
+networks:
+  backend:
+    internal: true
+  provider_egress: {}
