@@ -10,14 +10,26 @@ from lhmsb.experiments.vertical_config import (
     canonical_json,
     load_vertical_offline_config,
 )
+from lhmsb.experiments.vertical_runner import (
+    VerticalRunManifest,
+    current_git_snapshot,
+    plan_vertical_run,
+    read_vertical_tasks,
+    run_vertical_task,
+)
 
 __all__ = [
     "GitSnapshot",
     "VerticalExperimentError",
     "VerticalOfflineConfig",
+    "VerticalRunManifest",
     "VerticalTask",
     "build_vertical_tasks",
     "canonical_hash",
     "canonical_json",
+    "current_git_snapshot",
     "load_vertical_offline_config",
+    "plan_vertical_run",
+    "read_vertical_tasks",
+    "run_vertical_task",
 ]
