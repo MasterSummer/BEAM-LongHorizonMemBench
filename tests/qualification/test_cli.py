@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,7 +30,24 @@ from lhmsb.qualification.validate import validate_qualification_artifacts
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "configs" / "experiments" / "mem0_qualification.yaml"
-DATASET = ROOT / "runs" / "vertical" / "software_mem0_v2"
+DATASET_RELEASE = (
+    ROOT
+    / "datasets"
+    / "releases"
+    / "software-vertical-mem0-v0.2.0"
+    / "software_mem0_v2.tar.gz"
+)
+
+
+@pytest.fixture(scope="session")
+def qualification_dataset(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    release_root = tmp_path_factory.mktemp("mem0-qualification-dataset")
+    with tarfile.open(DATASET_RELEASE, "r:gz") as archive:
+        if hasattr(tarfile, "data_filter"):
+            archive.extractall(release_root, filter="data")
+        else:  # pragma: no cover - extraction filters predate supported CI images
+            archive.extractall(release_root)
+    return release_root / "software_mem0_v2"
 
 
 def test_module_help_lists_all_qualification_commands() -> None:
@@ -59,6 +77,7 @@ def test_module_help_lists_all_qualification_commands() -> None:
 def test_plan_writes_redacted_identity_bound_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    qualification_dataset: Path,
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-written")
     data_root = tmp_path / "data"
@@ -101,7 +120,7 @@ def test_plan_writes_redacted_identity_bound_contract(
         [
             "plan",
             "--dataset",
-            str(DATASET),
+            str(qualification_dataset),
             "--config",
             str(CONFIG),
             "--out",
@@ -137,6 +156,7 @@ def test_run_task_dry_run_needs_no_credentials_but_live_execution_is_gated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    qualification_dataset: Path,
 ) -> None:
     run_dir = tmp_path / "run"
     assert (
@@ -144,7 +164,7 @@ def test_run_task_dry_run_needs_no_credentials_but_live_execution_is_gated(
             [
                 "plan",
                 "--dataset",
-                str(DATASET),
+                str(qualification_dataset),
                 "--config",
                 str(CONFIG),
                 "--out",
@@ -187,6 +207,7 @@ def test_run_task_dry_run_needs_no_credentials_but_live_execution_is_gated(
 def test_run_contract_identity_mismatch_is_rejected(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    qualification_dataset: Path,
 ) -> None:
     run_dir = tmp_path / "run"
     assert (
@@ -194,7 +215,7 @@ def test_run_contract_identity_mismatch_is_rejected(
             [
                 "plan",
                 "--dataset",
-                str(DATASET),
+                str(qualification_dataset),
                 "--config",
                 str(CONFIG),
                 "--out",
@@ -227,6 +248,7 @@ def test_run_contract_identity_mismatch_is_rejected(
 def test_run_identity_changes_when_the_persistent_data_root_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    qualification_dataset: Path,
 ) -> None:
     identities: list[str] = []
     for index in range(2):
@@ -240,7 +262,7 @@ def test_run_identity_changes_when_the_persistent_data_root_changes(
                 [
                     "plan",
                     "--dataset",
-                    str(DATASET),
+                    str(qualification_dataset),
                     "--config",
                     str(CONFIG),
                     "--out",
