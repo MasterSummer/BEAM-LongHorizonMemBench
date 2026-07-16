@@ -17,6 +17,21 @@ Public pipeline API (spec/04-datasets.md §3-§5):
 
 from __future__ import annotations
 
+from lhmsb.datasets.mem0_stateful_pipeline import (
+    MEM0_STATEFUL_GENERATOR_VERSION,
+    MEM0_STATEFUL_RELEASE_ID,
+    MEM0_STATEFUL_SCHEMA_VERSION,
+    Mem0StatefulDatasetError,
+    Mem0StatefulGenerated,
+    Mem0StatefulManifest,
+    Mem0StatefulRegenReport,
+    Mem0StatefulVerifyReport,
+    build_mem0_release_archive,
+    freeze_mem0_stateful,
+    generate_mem0_stateful_to_staging,
+    regen_check_mem0_stateful,
+    verify_mem0_stateful,
+)
 from lhmsb.datasets.pipeline import (
     DatasetError,
     DatasetValidationError,
@@ -71,4 +86,17 @@ __all__ = [
     "regen_check_stateful",
     "verify_stateful",
     "load_software_vertical_specs",
+    "MEM0_STATEFUL_GENERATOR_VERSION",
+    "MEM0_STATEFUL_RELEASE_ID",
+    "MEM0_STATEFUL_SCHEMA_VERSION",
+    "Mem0StatefulDatasetError",
+    "Mem0StatefulGenerated",
+    "Mem0StatefulManifest",
+    "Mem0StatefulRegenReport",
+    "Mem0StatefulVerifyReport",
+    "build_mem0_release_archive",
+    "freeze_mem0_stateful",
+    "generate_mem0_stateful_to_staging",
+    "regen_check_mem0_stateful",
+    "verify_mem0_stateful",
 ]

@@ -18,6 +18,15 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
+from lhmsb.datasets.mem0_stateful_pipeline import (
+    Mem0StatefulDatasetError,
+    Mem0StatefulRegenReport,
+    Mem0StatefulVerifyReport,
+    freeze_mem0_stateful,
+    generate_mem0_stateful_to_staging,
+    regen_check_mem0_stateful,
+    verify_mem0_stateful,
+)
 from lhmsb.datasets.pipeline import (
     DatasetError,
     RegenReport,
@@ -55,6 +64,7 @@ _PROG = "python -m lhmsb.datasets"
 # Generation failures that should surface as a clean exit code (not a traceback).
 _GENERATION_ERRORS = (
     DatasetError,
+    Mem0StatefulDatasetError,
     StatefulDatasetError,
     RenderValidationError,
     RealEntityLeakError,
@@ -197,6 +207,34 @@ def _build_parser() -> argparse.ArgumentParser:
         "regen-check-stateful", help="regenerate a state-first dataset from stored seeds"
     )
     stateful_regen.add_argument("--frozen", required=True, type=Path)
+
+    mem0_stateful_gen = sub.add_parser(
+        "generate-mem0-stateful",
+        help="build the leak-free Software Mem0 qualification staging tree",
+    )
+    mem0_stateful_gen.add_argument("--seeds", required=True, nargs="+", type=int)
+    mem0_stateful_gen.add_argument("--n-episodes", type=int, default=1)
+    mem0_stateful_gen.add_argument("--n-sessions", type=int, default=16)
+    mem0_stateful_gen.add_argument("--out", required=True, type=Path)
+
+    mem0_stateful_freeze = sub.add_parser(
+        "freeze-mem0-stateful",
+        help="seal a leak-free Software Mem0 qualification dataset",
+    )
+    mem0_stateful_freeze.add_argument("--src", required=True, type=Path)
+    mem0_stateful_freeze.add_argument("--out", required=True, type=Path)
+
+    mem0_stateful_verify = sub.add_parser(
+        "verify-mem0-stateful",
+        help="verify a frozen Software Mem0 qualification dataset",
+    )
+    mem0_stateful_verify.add_argument("--frozen", required=True, type=Path)
+
+    mem0_stateful_regen = sub.add_parser(
+        "regen-check-mem0-stateful",
+        help="regenerate Software Mem0 qualification hashes from seeds",
+    )
+    mem0_stateful_regen.add_argument("--frozen", required=True, type=Path)
     return parser
 
 
@@ -437,6 +475,76 @@ def _cmd_regen_check_stateful(args: argparse.Namespace) -> int:
     return _report_stateful_regen(report, args.frozen)
 
 
+def _cmd_generate_mem0_stateful(args: argparse.Namespace) -> int:
+    try:
+        generated = generate_mem0_stateful_to_staging(
+            args.out,
+            seeds=args.seeds,
+            n_episodes=args.n_episodes,
+            n_sessions=args.n_sessions,
+        )
+    except _GENERATION_ERRORS as exc:
+        print(f"generate-mem0-stateful FAILED: {type(exc).__name__}: {exc}")
+        return 1
+    print(f"generated {len(generated)} Mem0 stateful episode(s) -> {args.out}")
+    return 0
+
+
+def _cmd_freeze_mem0_stateful(args: argparse.Namespace) -> int:
+    try:
+        manifest = freeze_mem0_stateful(args.src, args.out)
+    except _GENERATION_ERRORS as exc:
+        print(f"freeze-mem0-stateful FAILED: {type(exc).__name__}: {exc}")
+        return 1
+    print(
+        f"froze {manifest.n_episodes} Mem0 stateful episode(s) -> {args.out} "
+        f"({len(manifest.files)} files checksummed)"
+    )
+    return 0
+
+
+def _report_mem0_verify(report: Mem0StatefulVerifyReport, frozen: Path) -> int:
+    if report.ok:
+        print(f"verify-mem0-stateful OK: {report.n_checked} file(s) match {frozen}")
+        return 0
+    print(f"verify-mem0-stateful FAILED for {frozen}:")
+    for relative, expected, actual in report.mismatches:
+        print(f"  checksum mismatch: {relative}\n    expected {expected}\n    actual   {actual}")
+    for relative in report.missing:
+        print(f"  missing file: {relative}")
+    return 1
+
+
+def _cmd_verify_mem0_stateful(args: argparse.Namespace) -> int:
+    try:
+        report = verify_mem0_stateful(args.frozen)
+    except Mem0StatefulDatasetError as exc:
+        print(f"verify-mem0-stateful FAILED: {exc}")
+        return 1
+    return _report_mem0_verify(report, args.frozen)
+
+
+def _report_mem0_regen(report: Mem0StatefulRegenReport, frozen: Path) -> int:
+    if report.ok:
+        print(
+            f"regen-check-mem0-stateful OK: {report.checked} episode(s) regenerated in {frozen}"
+        )
+        return 0
+    print(f"regen-check-mem0-stateful FAILED for {frozen}:")
+    for episode_id, reason in report.mismatches:
+        print(f"  {episode_id}: {reason}")
+    return 1
+
+
+def _cmd_regen_check_mem0_stateful(args: argparse.Namespace) -> int:
+    try:
+        report = regen_check_mem0_stateful(args.frozen)
+    except (Mem0StatefulDatasetError, KeyError, TypeError, ValueError) as exc:
+        print(f"regen-check-mem0-stateful FAILED: {type(exc).__name__}: {exc}")
+        return 1
+    return _report_mem0_regen(report, args.frozen)
+
+
 _DISPATCH = {
     "generate": _cmd_generate,
     "import-wide": _cmd_import_wide,
@@ -451,6 +559,10 @@ _DISPATCH = {
     "freeze-stateful": _cmd_freeze_stateful,
     "verify-stateful": _cmd_verify_stateful,
     "regen-check-stateful": _cmd_regen_check_stateful,
+    "generate-mem0-stateful": _cmd_generate_mem0_stateful,
+    "freeze-mem0-stateful": _cmd_freeze_mem0_stateful,
+    "verify-mem0-stateful": _cmd_verify_mem0_stateful,
+    "regen-check-mem0-stateful": _cmd_regen_check_mem0_stateful,
 }
 
 
