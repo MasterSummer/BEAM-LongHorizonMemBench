@@ -156,15 +156,21 @@ class EvaluatorContinuation:
 
 def canonical_public_json(value: object) -> str:
     """Serialize a public dataclass/payload with stable JSON rules."""
-    payload: object
+    payload = _public_jsonable(value)
+    return json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+
+
+def _public_jsonable(value: object) -> object:
     to_dict = getattr(value, "to_dict", None)
     if callable(to_dict):
-        payload = to_dict()
-    elif is_dataclass(value) and not isinstance(value, type):
-        payload = asdict(cast(Any, value))
-    else:
-        payload = value
-    return json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        return _public_jsonable(to_dict())
+    if is_dataclass(value) and not isinstance(value, type):
+        return _public_jsonable(asdict(cast(Any, value)))
+    if isinstance(value, Mapping):
+        return {str(key): _public_jsonable(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_public_jsonable(child) for child in value]
+    return value
 
 
 def public_surface_hash(value: object) -> str:
@@ -213,7 +219,7 @@ def strip_python_evaluator_hints(source: str) -> str:
 
 def _matches_identifier(text: str, identifier: str) -> bool:
     pattern = rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])"
-    return re.search(pattern, text, flags=re.IGNORECASE) is not None
+    return re.search(pattern, text) is not None
 
 
 def validate_public_payload(

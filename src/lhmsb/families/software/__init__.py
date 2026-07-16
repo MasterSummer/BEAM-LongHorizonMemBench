@@ -14,6 +14,10 @@ from lhmsb.families.software.generator import (
     SoftwareScale,
     SoftwareSpec,
 )
+from lhmsb.families.software.mem0_vertical import (
+    SoftwareMem0VerticalFamily,
+    SoftwareMem0VerticalSpec,
+)
 from lhmsb.families.software.sandbox import TestResult, run_tests_sandboxed
 from lhmsb.families.software.vertical import (
     SoftwareVerticalFamily,
@@ -27,6 +31,8 @@ __all__ = [
     "SoftwareFamily",
     "SoftwareScale",
     "SoftwareSpec",
+    "SoftwareMem0VerticalFamily",
+    "SoftwareMem0VerticalSpec",
     "TestResult",
     "run_tests_sandboxed",
     "SoftwareVerticalFamily",
