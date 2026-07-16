@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,6 +12,16 @@ import pytest
 from lhmsb.experiments import vertical_runner
 from lhmsb.experiments.vertical import main
 from lhmsb.experiments.vertical_config import GitSnapshot
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _tree_hashes(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
 
 
 def test_cli_plan_run_task_and_partial_aggregate(
@@ -164,3 +178,53 @@ def test_cli_force_replaces_successful_atomic_task(
         == 0
     )
     assert result.stat().st_mtime_ns >= first_mtime
+
+
+def test_module_entrypoint_runs_resumes_and_preserves_frozen_dataset(
+    frozen_vertical: Path,
+    offline_config: Path,
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "pilot"
+    command = [
+        sys.executable,
+        "-m",
+        "lhmsb.experiments.vertical",
+        "run",
+        "--dataset",
+        str(frozen_vertical),
+        "--config",
+        str(offline_config),
+        "--out",
+        str(run_dir),
+        "--allow-dirty",
+    ]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(PROJECT_ROOT / "src")
+    frozen_hashes = _tree_hashes(frozen_vertical)
+
+    first = subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    aggregates = {
+        name: (run_dir / name).read_bytes()
+        for name in ("task_results.jsonl", "sceu_results.jsonl", "summary.json")
+    }
+
+    second = subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr
+    assert aggregates == {name: (run_dir / name).read_bytes() for name in aggregates}
+    assert _tree_hashes(frozen_vertical) == frozen_hashes
