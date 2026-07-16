@@ -31,6 +31,7 @@ from lhmsb.datasets.pipeline import (
     regen_check,
     verify_dataset,
 )
+from lhmsb.datasets.stateful_loader import load_software_vertical_specs
 from lhmsb.datasets.stateful_pipeline import (
     STATEFUL_GENERATOR_VERSION,
     STATEFUL_SCHEMA_VERSION,
@@ -69,4 +70,5 @@ __all__ = [
     "generate_stateful_to_staging",
     "regen_check_stateful",
     "verify_stateful",
+    "load_software_vertical_specs",
 ]
