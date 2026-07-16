@@ -4,6 +4,16 @@ This package is additive: the original v1 episode protocol remains available
 under :mod:`lhmsb.types` and is not changed by the vertical slice.
 """
 
+from lhmsb.longhorizon.public_surface import (
+    EvaluatorContinuation,
+    PublicActionOption,
+    PublicContinuation,
+    SurfaceLeakError,
+    SurfaceLeakPolicy,
+    public_surface_hash,
+    render_public_continuation,
+    validate_public_payload,
+)
 from lhmsb.longhorizon.render import render_surfaces, surfaces_hash
 from lhmsb.longhorizon.replay import ReplayResult, StateReplayError, plan_hash, replay_plan
 from lhmsb.longhorizon.schema import (
@@ -27,6 +37,9 @@ __all__ = [
     "ControlKind",
     "ContinuationOpportunity",
     "EpisodePlan",
+    "EvaluatorContinuation",
+    "PublicActionOption",
+    "PublicContinuation",
     "ReplayResult",
     "SCEU",
     "SessionSurface",
@@ -34,12 +47,17 @@ __all__ = [
     "StateEventKind",
     "StateKind",
     "StateReplayError",
+    "SurfaceLeakError",
+    "SurfaceLeakPolicy",
     "StateUnit",
     "WorkspaceArtifact",
     "WorkspaceSnapshot",
     "WorkspaceRecoverability",
     "plan_hash",
+    "public_surface_hash",
     "replay_plan",
     "render_surfaces",
+    "render_public_continuation",
     "surfaces_hash",
+    "validate_public_payload",
 ]
