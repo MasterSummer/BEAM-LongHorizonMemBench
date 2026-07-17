@@ -228,3 +228,48 @@ def test_official_reader_uses_registered_openai_embedding_provider(monkeypatch) 
     embedder = config["embedder"]
     assert isinstance(embedder, dict)
     assert embedder["config"]["provider"] == "openai"
+
+
+def test_official_reader_uses_local_tokenizer_when_configured(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeReader:
+        def __init__(self, config: object) -> None:
+            captured["config"] = config
+
+    class FakeConfig:
+        @classmethod
+        def model_validate(cls, value: object) -> object:
+            return dict(value) if isinstance(value, dict) else value
+
+    import lhmsb.adapters.memos_qualification as adapter_module
+
+    original_import = adapter_module.importlib.import_module
+
+    def fake_import(name: str) -> object:
+        if name == "memos.configs.mem_reader":
+            return SimpleNamespace(SimpleStructMemReaderConfig=FakeConfig)
+        return original_import(name)
+
+    monkeypatch.setattr(adapter_module.importlib, "import_module", fake_import)
+    monkeypatch.setenv("LHMSB_MEMOS_TOKENIZER_PATH", "/offline/models/bge-m3")
+    component = MemOSLLMConfig(
+        component="reader",
+        model_id="deepseek-v4-pro",
+        endpoint="https://api.deepseek.com",
+        api_key="secret",
+    )
+    _build_official_reader(
+        SimpleNamespace(SimpleStructMemReader=FakeReader),
+        component,
+        embedding=object(),
+        embedding_model="BAAI/bge-m3",
+        embedding_base_url="http://127.0.0.1:18080",
+    )
+    config = captured["config"]
+    assert isinstance(config, dict)
+    chunker = config["chunker"]
+    assert isinstance(chunker, dict)
+    chunker_config = chunker["config"]
+    assert isinstance(chunker_config, dict)
+    assert chunker_config["tokenizer_or_token_counter"] == "/offline/models/bge-m3"

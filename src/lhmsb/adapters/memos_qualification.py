@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import os
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -1056,7 +1057,20 @@ def _build_official_reader(
                 "base_url": embedding_base_url,
             },
         },
-        "chunker": {"backend": "sentence", "config": {"chunk_size": 2048, "chunk_overlap": 128}},
+        "chunker": {
+            "backend": "sentence",
+            "config": {
+                "chunk_size": 2048,
+                "chunk_overlap": 128,
+                # Chonkie defaults to the remote ``gpt2`` tokenizer.  The
+                # controlled server run is offline, so prefer an explicitly
+                # configured local tokenizer and otherwise reuse the local
+                # embedding model path.
+                "tokenizer_or_token_counter": os.environ.get(
+                    "LHMSB_MEMOS_TOKENIZER_PATH", embedding_model
+                ),
+            },
+        },
     }
     config_obj: object = config
     for method_name in ("model_validate", "from_dict", "from_json"):
