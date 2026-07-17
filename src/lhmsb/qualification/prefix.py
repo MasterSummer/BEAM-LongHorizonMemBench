@@ -19,6 +19,7 @@ from typing import Any, cast
 from lhmsb.qualification.memory_runtime import (
     CandidateSearch,
     InventorySnapshot,
+    MemoryMutationEvent,
     RetrievalCandidate,
     StorageFootprint,
     WriteSessionResult,
@@ -37,9 +38,9 @@ class MemoryPrefixCheckpoint:
 
     checkpoint_session: int
     surface_hash: str
-    writes: tuple[WriteSessionResult, ...] = ()
+    writes: tuple[object, ...] = ()
     inventory: InventorySnapshot | None = None
-    retrievals: tuple[CandidateSearch, ...] = ()
+    retrievals: tuple[object, ...] = ()
     common_reranks: tuple[Any, ...] = ()
     graph_diagnostics: tuple[tuple[str, object], ...] = ()
     storage_footprints: tuple[StorageFootprint, ...] = ()
@@ -48,12 +49,22 @@ class MemoryPrefixCheckpoint:
         if isinstance(self.checkpoint_session, bool) or self.checkpoint_session < 0:
             raise PrefixArtifactError("checkpoint_session must be a non-negative integer")
         _require_hash(self.surface_hash, "surface_hash")
-        if any(not isinstance(item, WriteSessionResult) for item in self.writes):
-            raise PrefixArtifactError("writes must contain WriteSessionResult records")
+        if any(
+            not isinstance(item, (WriteSessionResult, MemoryMutationEvent))
+            for item in self.writes
+        ):
+            raise PrefixArtifactError(
+                "writes must contain WriteSessionResult or MemoryMutationEvent records"
+            )
         if self.inventory is not None and not isinstance(self.inventory, InventorySnapshot):
             raise PrefixArtifactError("inventory must be an InventorySnapshot or null")
-        if any(not isinstance(item, CandidateSearch) for item in self.retrievals):
-            raise PrefixArtifactError("retrievals must contain CandidateSearch records")
+        if any(
+            not isinstance(item, (CandidateSearch, RetrievalCandidate))
+            for item in self.retrievals
+        ):
+            raise PrefixArtifactError(
+                "retrievals must contain CandidateSearch or RetrievalCandidate records"
+            )
         if any(not isinstance(item, StorageFootprint) for item in self.storage_footprints):
             raise PrefixArtifactError("storage_footprints must contain StorageFootprint records")
         _validate_pairs(self.graph_diagnostics, "graph_diagnostics")
@@ -63,7 +74,10 @@ class MemoryPrefixCheckpoint:
         ):
             raise PrefixArtifactError("inventory checkpoint does not match prefix checkpoint")
         for search in self.retrievals:
-            if search.checkpoint_session != self.checkpoint_session:
+            if (
+                isinstance(search, CandidateSearch)
+                and search.checkpoint_session != self.checkpoint_session
+            ):
                 raise PrefixArtifactError("retrieval checkpoint does not match prefix checkpoint")
 
     @property
@@ -81,8 +95,7 @@ class MemoryPrefixCheckpoint:
             checkpoint_session=_integer(data.get("checkpoint_session"), "checkpoint_session"),
             surface_hash=_string(data.get("surface_hash"), "surface_hash"),
             writes=tuple(
-                WriteSessionResult.from_dict(_mapping(item, "write"))
-                for item in _sequence(data.get("writes", ()), "writes")
+                _decode_write(item) for item in _sequence(data.get("writes", ()), "writes")
             ),
             inventory=(
                 None
@@ -90,7 +103,7 @@ class MemoryPrefixCheckpoint:
                 else InventorySnapshot.from_dict(_mapping(data.get("inventory"), "inventory"))
             ),
             retrievals=tuple(
-                CandidateSearch.from_dict(_mapping(item, "retrieval"))
+                _decode_retrieval(item)
                 for item in _sequence(data.get("retrievals", ()), "retrievals")
             ),
             common_reranks=tuple(
@@ -122,6 +135,8 @@ class MemoryPrefixArtifact:
     writer_profile_id: str | None
     embedding_profile_id: str
     reranker_profile_id: str
+    source_commit: str | None = None
+    model_files_hash: str | None = None
     checkpoints: tuple[MemoryPrefixCheckpoint, ...] = ()
     graph_diagnostics: tuple[tuple[str, object], ...] = ()
     storage_footprints: tuple[StorageFootprint, ...] = ()
@@ -145,6 +160,10 @@ class MemoryPrefixArtifact:
             _require_hash(value, field)
         if self.writer_profile_id is not None and not self.writer_profile_id:
             raise PrefixArtifactError("writer_profile_id must be null or non-empty")
+        if self.source_commit is not None and not self.source_commit:
+            raise PrefixArtifactError("source_commit must be null or non-empty")
+        if self.model_files_hash is not None:
+            _require_hash(self.model_files_hash, "model_files_hash")
         if any(not isinstance(item, MemoryPrefixCheckpoint) for item in self.checkpoints):
             raise PrefixArtifactError("checkpoints must contain MemoryPrefixCheckpoint records")
         if any(not isinstance(item, StorageFootprint) for item in self.storage_footprints):
@@ -187,6 +206,12 @@ class MemoryPrefixArtifact:
             ),
             reranker_profile_id=_string(
                 data.get("reranker_profile_id"), "reranker_profile_id"
+            ),
+            source_commit=_optional_string(data.get("source_commit")),
+            model_files_hash=(
+                None
+                if data.get("model_files_hash") is None
+                else _string(data.get("model_files_hash"), "model_files_hash")
             ),
             checkpoints=tuple(
                 MemoryPrefixCheckpoint.from_dict(_mapping(item, "checkpoint"))
@@ -233,6 +258,8 @@ def _artifact_payload(value: MemoryPrefixArtifact) -> dict[str, object]:
         "writer_profile_id": value.writer_profile_id,
         "embedding_profile_id": value.embedding_profile_id,
         "reranker_profile_id": value.reranker_profile_id,
+        "source_commit": value.source_commit,
+        "model_files_hash": value.model_files_hash,
         "checkpoints": [item.to_dict() for item in value.checkpoints],
         "graph_diagnostics": [[key, item] for key, item in value.graph_diagnostics],
         "storage_footprints": [item.to_dict() for item in value.storage_footprints],
@@ -243,9 +270,9 @@ def _checkpoint_payload(value: MemoryPrefixCheckpoint) -> dict[str, object]:
     return {
         "checkpoint_session": value.checkpoint_session,
         "surface_hash": value.surface_hash,
-        "writes": [item.to_dict() for item in value.writes],
+        "writes": [_to_jsonable(item) for item in value.writes],
         "inventory": None if value.inventory is None else value.inventory.to_dict(),
-        "retrievals": [item.to_dict() for item in value.retrievals],
+        "retrievals": [_to_jsonable(item) for item in value.retrievals],
         "common_reranks": [_to_jsonable(item) for item in value.common_reranks],
         "graph_diagnostics": [[key, item] for key, item in value.graph_diagnostics],
         "storage_footprints": [item.to_dict() for item in value.storage_footprints],
@@ -260,6 +287,20 @@ def _decode_common_rerank(value: object) -> object:
     if "memory_id" in value and "content_hash" in value:
         return RetrievalCandidate.from_dict(cast(Mapping[str, object], value))
     return dict(value)
+
+
+def _decode_write(value: object) -> object:
+    data = _mapping(value, "write")
+    if "events" in data and "inventory" in data:
+        return WriteSessionResult.from_dict(data)
+    return MemoryMutationEvent.from_dict(data)
+
+
+def _decode_retrieval(value: object) -> object:
+    data = _mapping(value, "retrieval")
+    if "candidates" in data and "query" in data:
+        return CandidateSearch.from_dict(data)
+    return RetrievalCandidate.from_dict(data)
 
 
 def _to_jsonable(value: object) -> object:

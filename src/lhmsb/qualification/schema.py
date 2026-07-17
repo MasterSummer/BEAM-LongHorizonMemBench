@@ -117,6 +117,18 @@ class Mem0Profile:
     prompt_source: str
     telemetry_enabled: bool
 
+    @property
+    def backend(self) -> str:
+        return "mem0"
+
+    @property
+    def kind(self) -> str:
+        return "managed_memory"
+
+    @property
+    def system_id(self) -> str:
+        return self.profile_id
+
 
 @dataclass(frozen=True)
 class CausalSamplingProfile:
@@ -288,6 +300,12 @@ class MemOSTreeProfile:
 
 
 SystemProfile = FlatRetrievalProfile | AMemProfile | MemOSTreeProfile | Mem0Profile
+# Spelling aliases keep the public API tolerant of acronym capitalization used
+# by downstream adapter code.
+AMEMProfile = AMemProfile
+MemOSProfile = MemOSTreeProfile
+FlatProfile = FlatRetrievalProfile
+SamplingProfile = CausalSamplingProfile
 
 
 @dataclass(frozen=True)
@@ -306,6 +324,17 @@ class PreparationTask:
     def system_profile_id(self) -> str:
         return self.profile_id
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_index": self.task_index,
+            "task_id": self.task_id,
+            "episode_id": self.episode_id,
+            "backend": self.backend,
+            "profile_id": self.profile_id,
+            "run_identity": self.run_identity,
+            "task_payload_hash": self.task_payload_hash,
+        }
+
 
 @dataclass(frozen=True)
 class EvaluationTaskTemplate:
@@ -322,6 +351,28 @@ class EvaluationTaskTemplate:
     prefix_backend: SystemBackend | None
     prefix_artifact_hash: str = "NO_PREFIX_ARTIFACT"
     executable: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_index": self.task_index,
+            "task_id": self.task_id,
+            "episode_id": self.episode_id,
+            "policy_profile_id": self.policy_profile_id,
+            "condition": self.condition,
+            "run_identity": self.run_identity,
+            "task_payload_hash": self.task_payload_hash,
+            "scored_conditions": [
+                {
+                    "result_id": item.result_id,
+                    "condition": item.condition,
+                    "readout": item.readout,
+                }
+                for item in self.scored_conditions
+            ],
+            "prefix_backend": self.prefix_backend,
+            "prefix_artifact_hash": self.prefix_artifact_hash,
+            "executable": self.executable,
+        }
 
 
 @dataclass(frozen=True)
@@ -345,6 +396,28 @@ class EvaluationTask:
             raise ValueError("EvaluationTask must be executable")
         if not self.prefix_artifact_hash:
             raise ValueError("evaluation task requires a prefix marker or artifact hash")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_index": self.task_index,
+            "task_id": self.task_id,
+            "episode_id": self.episode_id,
+            "policy_profile_id": self.policy_profile_id,
+            "condition": self.condition,
+            "prefix_artifact_hash": self.prefix_artifact_hash,
+            "run_identity": self.run_identity,
+            "task_payload_hash": self.task_payload_hash,
+            "scored_conditions": [
+                {
+                    "result_id": item.result_id,
+                    "condition": item.condition,
+                    "readout": item.readout,
+                }
+                for item in self.scored_conditions
+            ],
+            "prefix_backend": self.prefix_backend,
+            "executable": self.executable,
+        }
 
 
 @dataclass(frozen=True)
@@ -453,14 +526,25 @@ class SystemsQualificationConfig:
         return self.system_profiles
 
     @property
+    def writer(self) -> PolicyProfile:
+        return self.writer_profile
+
+    @property
+    def writer_profile_id(self) -> str:
+        return self.writer_profile.profile_id
+
+    def to_dict(self) -> dict[str, object]:
+        from dataclasses import asdict
+
+        return asdict(self)
+
+    @property
     def config_hash(self) -> str:
         # Local import avoids a schema/config import cycle.
         import hashlib
         import json
-        from dataclasses import asdict
-
         payload = json.dumps(
-            asdict(self),
+            self.to_dict(),
             sort_keys=True,
             ensure_ascii=True,
             separators=(",", ":"),
