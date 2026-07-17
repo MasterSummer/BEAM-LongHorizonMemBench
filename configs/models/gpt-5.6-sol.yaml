@@ -1,6 +1,7 @@
 profile_id: gpt_5_6_sol
 provider: openai
 model_id: gpt-5.6-sol
+route_id: openai_direct
 api_key_env: OPENAI_API_KEY
 endpoint: https://api.openai.com
 endpoint_override_env: OPENAI_BASE_URL

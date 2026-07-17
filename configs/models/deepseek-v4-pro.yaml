@@ -1,6 +1,7 @@
 profile_id: deepseek_v4_pro
 provider: deepseek
 model_id: deepseek-v4-pro
+route_id: deepseek_direct
 api_key_env: DEEPSEEK_API_KEY
 endpoint: https://api.deepseek.com
 endpoint_override_env: DEEPSEEK_BASE_URL

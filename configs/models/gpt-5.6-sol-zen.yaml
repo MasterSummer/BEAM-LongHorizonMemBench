@@ -1,0 +1,11 @@
+profile_id: gpt_5_6_sol_zen
+provider: openai
+model_id: gpt-5.6-sol
+route_id: opencode_zen
+api_key_env: OPENCODE_ZEN_API_KEY
+endpoint: https://opencode.ai/zen
+endpoint_override_env: OPENCODE_ZEN_BASE_URL
+request_api: responses
+timeout_seconds: 180
+max_retries: 2
+format_repair_attempts: 1

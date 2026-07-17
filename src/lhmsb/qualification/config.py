@@ -25,12 +25,13 @@ from lhmsb.qualification.schema import (
 )
 
 QUALIFICATION_CONFIG_SCHEMA_VERSION = 1
-_CONDITIONS: tuple[QualificationCondition, ...] = (
+_DEFAULT_CONDITIONS: tuple[QualificationCondition, ...] = (
     "workspace_only",
     "oracle_current_state",
     "mem0_controlled",
     "mem0_native",
 )
+_SUPPORTED_CONDITIONS = frozenset(_DEFAULT_CONDITIONS)
 
 
 class QualificationConfigError(ValueError):
@@ -44,6 +45,7 @@ class QualificationConfig:
     dataset_release: str
     data_root_env: str
     policy_profiles: tuple[PolicyProfile, ...]
+    conditions: tuple[QualificationCondition, ...]
     retrieval: RetrievalProfile
     controlled_mem0: Mem0Profile
     native_mem0: Mem0Profile
@@ -60,14 +62,30 @@ class QualificationConfig:
             raise QualificationConfigError("policy profile IDs must be non-empty and unique")
         if len(model_ids) != len(set(model_ids)):
             raise QualificationConfigError("policy model IDs must be unique")
+        if not self.conditions:
+            raise QualificationConfigError("conditions must be non-empty")
+        if len(self.conditions) != len(set(self.conditions)):
+            raise QualificationConfigError("conditions must be unique")
+        unsupported_conditions = set(self.conditions) - _SUPPORTED_CONDITIONS
+        if unsupported_conditions:
+            raise QualificationConfigError(
+                "conditions contain unsupported values: "
+                f"{sorted(unsupported_conditions)}"
+            )
         if self.controlled_mem0.track != "controlled":
             raise QualificationConfigError("controlled_mem0 must use track=controlled")
         if self.native_mem0.track != "native":
             raise QualificationConfigError("native_mem0 must use track=native")
         if self.retrieval.candidate_k < self.retrieval.visible_k:
             raise QualificationConfigError("candidate_k must be >= visible_k")
-        if len(self.required_secret_env) != len(set(self.required_secret_env)):
-            raise QualificationConfigError("required secret environment names must be unique")
+        policy_secret_env = tuple(
+            dict.fromkeys(profile.api_key_env for profile in self.policy_profiles)
+        )
+        if self.required_secret_env != policy_secret_env:
+            raise QualificationConfigError(
+                "required_secret_env must equal the ordered unique api_key_env "
+                "values from policy_profiles"
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -76,6 +94,7 @@ class QualificationConfig:
             "dataset_release": self.dataset_release,
             "data_root_env": self.data_root_env,
             "policy_profiles": [asdict(profile) for profile in self.policy_profiles],
+            "conditions": list(self.conditions),
             "retrieval": asdict(self.retrieval),
             "controlled_mem0": asdict(self.controlled_mem0),
             "native_mem0": asdict(self.native_mem0),
@@ -121,6 +140,7 @@ def load_qualification_config(path: Path) -> QualificationConfig:
     data_root_env = _string(raw.get("data_root_env"), "data_root_env")
     policy_paths = _string_sequence(raw.get("policy_profiles"), "policy_profiles")
     policies = tuple(_load_policy(_resolve(path, item)) for item in policy_paths)
+    conditions = _load_conditions(raw.get("conditions", _DEFAULT_CONDITIONS))
     embedding = _load_yaml(
         _resolve(path, _string(raw.get("embedding_profile"), "embedding_profile"))
     )
@@ -154,6 +174,7 @@ def load_qualification_config(path: Path) -> QualificationConfig:
         dataset_release=dataset_release,
         data_root_env=data_root_env,
         policy_profiles=policies,
+        conditions=conditions,
         retrieval=retrieval,
         controlled_mem0=controlled,
         native_mem0=native,
@@ -167,13 +188,13 @@ def build_qualification_tasks(
     episode_ids: Sequence[str],
     run_identity: str,
 ) -> tuple[QualificationTask, ...]:
-    """Expand episodes × three policies × four conditions into atomic tasks."""
+    """Expand episodes, policies, and configured conditions into atomic tasks."""
     tasks: list[QualificationTask] = []
     seen_results: set[str] = set()
     seen_namespaces: set[str] = set()
     for episode_id in episode_ids:
         for policy in config.policy_profiles:
-            for condition in _CONDITIONS:
+            for condition in config.conditions:
                 task_index = len(tasks)
                 prefix = f"{_slug(episode_id)}--{policy.profile_id}--{condition}"
                 task_id = f"{task_index:05d}--{prefix}"
@@ -258,6 +279,7 @@ def _load_policy(path: Path) -> PolicyProfile:
         profile_id=_string(data.get("profile_id"), "profile_id"),
         provider=cast(PolicyProvider, provider),
         model_id=_string(data.get("model_id"), "model_id"),
+        route_id=_string(data.get("route_id"), "route_id"),
         api_key_env=_string(data.get("api_key_env"), "api_key_env"),
         endpoint=_string(data.get("endpoint"), "endpoint"),
         endpoint_override_env=endpoint_override,
@@ -347,6 +369,20 @@ def _string_sequence(value: object, label: str) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise QualificationConfigError(f"{label} must be a string array")
     return tuple(_string(item, label) for item in value)
+
+
+def _load_conditions(value: object) -> tuple[QualificationCondition, ...]:
+    conditions = _string_sequence(value, "conditions")
+    if not conditions:
+        raise QualificationConfigError("conditions must be non-empty")
+    if len(conditions) != len(set(conditions)):
+        raise QualificationConfigError("conditions must be unique")
+    unsupported = set(conditions) - _SUPPORTED_CONDITIONS
+    if unsupported:
+        raise QualificationConfigError(
+            f"conditions contain unsupported values: {sorted(unsupported)}"
+        )
+    return cast(tuple[QualificationCondition, ...], conditions)
 
 
 def _slug(value: str) -> str:

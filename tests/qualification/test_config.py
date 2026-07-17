@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from lhmsb.qualification.config import (
     QualificationConfigError,
@@ -12,8 +14,35 @@ from lhmsb.qualification.config import (
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "configs" / "experiments" / "mem0_qualification.yaml"
+CONTROLLED_ZEN_CONFIG = (
+    ROOT / "configs" / "experiments" / "mem0_controlled_zen.yaml"
+)
 README = ROOT / "README.md"
 SERVER_WORKFLOW = ROOT / "docs" / "mem0-server-workflow.md"
+
+
+def _copied_config(
+    tmp_path: Path,
+    *,
+    conditions: object,
+) -> Path:
+    copied_configs = tmp_path / "repo" / "configs"
+    shutil.copytree(ROOT / "configs", copied_configs)
+    path = copied_configs / "experiments" / "mem0_qualification.yaml"
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(raw, dict)
+    if conditions is _MISSING:
+        raw.pop("conditions", None)
+    else:
+        raw["conditions"] = conditions
+    path.write_text(
+        yaml.safe_dump(raw, sort_keys=False),
+        encoding="utf-8",
+    )
+    return path
+
+
+_MISSING = object()
 
 
 def test_repository_config_pins_models_and_retrieval_contract() -> None:
@@ -36,6 +65,107 @@ def test_repository_config_pins_models_and_retrieval_contract() -> None:
     )
     assert config.retrieval.candidate_k == 20
     assert config.retrieval.visible_k == 5
+
+
+def test_controlled_zen_config_has_three_routes_and_three_conditions() -> None:
+    config = load_qualification_config(CONTROLLED_ZEN_CONFIG)
+
+    assert config.conditions == (
+        "workspace_only",
+        "oracle_current_state",
+        "mem0_controlled",
+    )
+    assert [profile.route_id for profile in config.policy_profiles] == [
+        "opencode_zen",
+        "deepseek_direct",
+        "opencode_zen",
+    ]
+    assert config.required_secret_env == (
+        "OPENCODE_ZEN_API_KEY",
+        "DEEPSEEK_API_KEY",
+    )
+
+
+def test_controlled_zen_matrix_has_nine_tasks_and_twelve_result_cells() -> None:
+    config = load_qualification_config(CONTROLLED_ZEN_CONFIG)
+    tasks = build_qualification_tasks(
+        config,
+        episode_ids=("software-mem0-42",),
+        run_identity="run-hash",
+    )
+
+    assert len(tasks) == 9
+    assert len(
+        [result for task in tasks for result in task.scored_conditions]
+    ) == 12
+    assert {task.condition for task in tasks} == {
+        "workspace_only",
+        "oracle_current_state",
+        "mem0_controlled",
+    }
+
+
+def test_repository_full_config_declares_all_conditions_explicitly() -> None:
+    config = load_qualification_config(CONFIG)
+
+    assert config.conditions == (
+        "workspace_only",
+        "oracle_current_state",
+        "mem0_controlled",
+        "mem0_native",
+    )
+
+
+def test_schema_v1_without_conditions_uses_legacy_full_matrix(
+    tmp_path: Path,
+) -> None:
+    compatibility = _copied_config(tmp_path, conditions=_MISSING)
+
+    assert load_qualification_config(compatibility).conditions == (
+        "workspace_only",
+        "oracle_current_state",
+        "mem0_controlled",
+        "mem0_native",
+    )
+
+
+@pytest.mark.parametrize(
+    "conditions",
+    (
+        [],
+        ["workspace_only", "workspace_only"],
+        ["workspace_only", "unsupported_condition"],
+    ),
+)
+def test_invalid_condition_matrices_are_rejected(
+    tmp_path: Path,
+    conditions: list[str],
+) -> None:
+    broken = _copied_config(tmp_path, conditions=conditions)
+
+    with pytest.raises(QualificationConfigError, match="conditions"):
+        load_qualification_config(broken)
+
+
+def test_required_secret_names_match_ordered_policy_credentials(
+    tmp_path: Path,
+) -> None:
+    path = _copied_config(
+        tmp_path,
+        conditions=[
+            "workspace_only",
+            "oracle_current_state",
+            "mem0_controlled",
+            "mem0_native",
+        ],
+    )
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(raw, dict)
+    raw["required_secret_env"] = ["DEEPSEEK_API_KEY"]
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(QualificationConfigError, match="required_secret_env"):
+        load_qualification_config(path)
 
 
 def test_tracks_are_explicit_and_separate() -> None:

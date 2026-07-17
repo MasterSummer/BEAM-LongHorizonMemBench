@@ -27,6 +27,7 @@ def _profile(provider: str) -> PolicyProfile:
         profile_id=profile_id,
         provider=provider,  # type: ignore[arg-type]
         model_id=model_id,
+        route_id=f"{provider}_direct",
         api_key_env=f"{provider.upper()}_API_KEY",
         endpoint=f"https://{provider}.example",
         endpoint_override_env=None,

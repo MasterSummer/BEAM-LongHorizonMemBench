@@ -21,6 +21,7 @@ class PolicyProfile:
     profile_id: str
     provider: PolicyProvider
     model_id: str
+    route_id: str
     api_key_env: str
     endpoint: str
     endpoint_override_env: str | None

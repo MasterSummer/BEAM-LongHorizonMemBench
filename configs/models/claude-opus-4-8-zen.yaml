@@ -1,0 +1,11 @@
+profile_id: opus_4_8_zen
+provider: anthropic
+model_id: claude-opus-4-8
+route_id: opencode_zen
+api_key_env: OPENCODE_ZEN_API_KEY
+endpoint: https://opencode.ai/zen
+endpoint_override_env: OPENCODE_ZEN_BASE_URL
+request_api: messages
+timeout_seconds: 180
+max_retries: 2
+format_repair_attempts: 1

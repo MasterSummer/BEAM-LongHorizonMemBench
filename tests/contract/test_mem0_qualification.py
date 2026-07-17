@@ -54,6 +54,7 @@ def _policy(provider: str = "openai") -> PolicyProfile:
         profile_id=provider,
         provider=provider,  # type: ignore[arg-type]
         model_id=model,
+        route_id=f"{provider}_direct",
         api_key_env=f"{provider.upper()}_API_KEY",
         endpoint=f"https://{provider}.example",
         endpoint_override_env=None,
