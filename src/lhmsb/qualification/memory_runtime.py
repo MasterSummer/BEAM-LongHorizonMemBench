@@ -89,10 +89,8 @@ def _freeze_json(value: object) -> object:
         return _FrozenDict(
             (str(key), _freeze_json(child)) for key, child in value.items()
         )
-    if isinstance(value, list):
+    if isinstance(value, list | tuple):
         return _FrozenList(_freeze_json(child) for child in value)
-    if isinstance(value, tuple):
-        return tuple(_freeze_json(child) for child in value)
     return value
 
 

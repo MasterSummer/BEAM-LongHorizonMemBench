@@ -135,6 +135,27 @@ def test_generic_trace_round_trip_preserves_native_and_graph_metadata() -> None:
     assert result_data["events"][0]["native_event"] == "UPDATE"
 
 
+def test_nested_tuple_metadata_round_trip_uses_one_immutable_json_array_shape() -> None:
+    item = MemoryObject(
+        memory_id="memory-tuple",
+        content="tuple metadata",
+        content_hash=sha256_text("tuple metadata"),
+        metadata=(("coordinates", ("x", ("y", "z"))),),
+        created_at="t0",
+        updated_at="t1",
+        history_length=1,
+    )
+
+    encoded = json.loads(json.dumps(item.to_dict(), sort_keys=True))
+    restored = MemoryObject.from_dict(encoded)
+
+    assert restored == item
+    coordinates = cast(list[object], dict(item.metadata)["coordinates"])
+    assert coordinates == ["x", ["y", "z"]]
+    with pytest.raises(TypeError):
+        coordinates.append("cannot mutate")
+
+
 def test_nested_metadata_is_defensively_frozen_without_changing_json_shape() -> None:
     provenance = {"source_sessions": [1, 2]}
     graph = {
