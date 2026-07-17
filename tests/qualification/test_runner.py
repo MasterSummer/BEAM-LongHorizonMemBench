@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -519,6 +520,31 @@ def test_task_result_has_a_portable_lossless_json_round_trip(
     restored = qualification_task_result_from_dict(asdict(result))
 
     assert restored == result
+
+
+def test_task_result_rejects_string_boolean_in_cached_candidate_trace(
+    tmp_path: Path,
+) -> None:
+    spec, tasks = _fixture()
+    task = next(task for task in tasks if task.condition == "mem0_controlled")
+    factory = FakeFactory(spec)
+    storage = QualificationStorage(tmp_path / "run", run_identity="run-identity")
+    result = run_qualification_task(
+        task,
+        spec,
+        components=factory(
+            task,
+            TaskIsolation.for_task(task, storage.task_directory(task)),
+        ),
+        storage=storage,
+    )
+    corrupted = deepcopy(asdict(result))
+    corrupted["retrieval_traces"][0]["candidate_shortfall"] = "false"
+
+    with pytest.raises(QualificationStorageError) as caught:
+        qualification_task_result_from_dict(corrupted)
+
+    assert caught.value.error_class == "trace_incomplete"
 
 
 def test_reranker_failure_does_not_invalidate_native_readout(

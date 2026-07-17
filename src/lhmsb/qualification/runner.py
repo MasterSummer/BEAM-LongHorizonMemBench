@@ -43,10 +43,9 @@ from lhmsb.longhorizon.schema import SCEU, ActionSpec, SessionSurface, StateUnit
 from lhmsb.qualification.config import canonical_hash
 from lhmsb.qualification.memory_runtime import (
     CandidateSearch,
-    InventoryItem,
     InventorySnapshot,
     MemoryRuntime,
-    NativeMemoryEvent,
+    MemoryTraceValidationError,
     ProviderUsageEvent,
     SearchCandidate,
     WriteSessionResult,
@@ -1715,9 +1714,7 @@ def _retrieval_trace_from_dict(
         common_reranked_memory_ids=_string_tuple(
             data.get("common_reranked_memory_ids")
         ),
-        candidate_shortfall=bool(
-            data.get("candidate_shortfall", False)
-        ),
+        candidate_shortfall=candidate_search.candidate_shortfall,
         search_latency_seconds=_number(
             data.get("search_latency_seconds")
         ),
@@ -1736,124 +1733,37 @@ def _retrieval_trace_from_dict(
 
 
 def _write_result_from_dict(data: Mapping[str, object]) -> WriteSessionResult:
-    inventory_data = _mapping(data.get("inventory"), "write inventory")
-    inventory = InventorySnapshot(
-        checkpoint_session=_integer(inventory_data.get("checkpoint_session")),
-        n_write=_integer(inventory_data.get("n_write")),
-        n_live=_integer(inventory_data.get("n_live")),
-        items=tuple(
-            _inventory_item_from_dict(item)
-            for item in _mapping_sequence(inventory_data.get("items"))
-        ),
-        store_hash=str(inventory_data["store_hash"]),
-        backend_count=_optional_integer(inventory_data.get("backend_count")),
-    )
-    return WriteSessionResult(
-        session_index=_integer(data.get("session_index")),
-        events=tuple(
-            NativeMemoryEvent(
-                operation_id=str(item["operation_id"]),
-                session_index=_integer(item.get("session_index")),
-                native_event=str(item["native_event"]),
-                memory_id=str(item["memory_id"]),
-                memory_text=str(item.get("memory_text", "")),
-                old_content_hash=_optional_string(
-                    item.get("old_content_hash")
-                ),
-                new_content_hash=_optional_string(
-                    item.get("new_content_hash")
-                ),
-                source=str(item.get("source", "")),
-                latency_seconds=_number(item.get("latency_seconds")),
-            )
-            for item in _mapping_sequence(data.get("events"))
-        ),
-        inventory=inventory,
-        n_write=_integer(data.get("n_write")),
-        latency_seconds=_number(data.get("latency_seconds")),
-        usage_events=tuple(
-            _provider_usage_event_from_dict(item)
-            for item in _mapping_sequence(data.get("usage_events", ()))
-        ),
-    )
-
-
-def _inventory_item_from_dict(
-    data: Mapping[str, object],
-) -> InventoryItem:
-    return InventoryItem(
-        memory_id=str(data["memory_id"]),
-        content=str(data.get("content", "")),
-        content_hash=str(data["content_hash"]),
-        metadata=tuple(
-            (str(pair[0]), pair[1])
-            for pair in _pair_sequence(data.get("metadata"))
-        ),
-        created_at=str(data.get("created_at", "")),
-        updated_at=str(data.get("updated_at", "")),
-        history_length=_integer(data.get("history_length")),
-    )
+    try:
+        return WriteSessionResult.from_dict(data)
+    except MemoryTraceValidationError as exc:
+        raise QualificationStorageError(
+            "trace_incomplete",
+            f"invalid persisted write result: {exc}",
+        ) from exc
 
 
 def _candidate_search_from_dict(
     data: Mapping[str, object],
 ) -> CandidateSearch:
-    return CandidateSearch(
-        checkpoint_session=_integer(data.get("checkpoint_session")),
-        query=str(data.get("query", "")),
-        query_hash=str(data.get("query_hash", "")),
-        candidates=tuple(
-            SearchCandidate(
-                memory_id=str(item["memory_id"]),
-                content=str(item.get("content", "")),
-                content_hash=str(item.get("content_hash", "")),
-                native_rank=_integer(item.get("native_rank")),
-                score=_optional_number(item.get("score")),
-                score_details=tuple(
-                    (str(pair[0]), _number(pair[1]))
-                    for pair in _pair_sequence(item.get("score_details"))
-                ),
-                metadata=tuple(
-                    (str(pair[0]), pair[1])
-                    for pair in _pair_sequence(item.get("metadata"))
-                ),
-                created_at=str(item.get("created_at", "")),
-                updated_at=str(item.get("updated_at", "")),
-            )
-            for item in _mapping_sequence(data.get("candidates"))
-        ),
-        candidate_shortfall=bool(data.get("candidate_shortfall", False)),
-        latency_seconds=_number(data.get("latency_seconds")),
-        usage_events=tuple(
-            _provider_usage_event_from_dict(item)
-            for item in _mapping_sequence(data.get("usage_events", ()))
-        ),
-    )
+    try:
+        return CandidateSearch.from_dict(data)
+    except MemoryTraceValidationError as exc:
+        raise QualificationStorageError(
+            "trace_incomplete",
+            f"invalid persisted candidate search: {exc}",
+        ) from exc
 
 
 def _provider_usage_event_from_dict(
     data: Mapping[str, object],
 ) -> ProviderUsageEvent:
-    return ProviderUsageEvent(
-        call_id=str(data.get("call_id", "")),
-        component=str(data.get("component", "")),
-        provider=str(data.get("provider", "")),
-        model_id=str(data.get("model_id", "")),
-        endpoint_identity=str(data.get("endpoint_identity", "")),
-        request_hash=str(data.get("request_hash", "")),
-        response_hash=str(data.get("response_hash", "")),
-        input_tokens=_optional_integer(data.get("input_tokens")),
-        output_tokens=_optional_integer(data.get("output_tokens")),
-        cached_tokens=_optional_integer(data.get("cached_tokens")),
-        reasoning_tokens=_optional_integer(data.get("reasoning_tokens")),
-        usage_observed=bool(data.get("usage_observed", False)),
-        input_count=_integer(data.get("input_count")),
-        latency_seconds=_number(data.get("latency_seconds")),
-        retry_count=_optional_integer(data.get("retry_count")),
-        error_class=_optional_string(data.get("error_class")),
-        started_at_utc=str(data.get("started_at_utc", "")),
-        ended_at_utc=str(data.get("ended_at_utc", "")),
-    )
+    try:
+        return ProviderUsageEvent.from_dict(data)
+    except MemoryTraceValidationError as exc:
+        raise QualificationStorageError(
+            "trace_incomplete",
+            f"invalid persisted provider usage event: {exc}",
+        ) from exc
 
 
 def _rerank_result_from_dict(data: Mapping[str, object]) -> RerankResult:
@@ -1959,10 +1869,6 @@ def _number(value: object) -> float:
             f"expected number, got {value!r}",
         )
     return float(value)
-
-
-def _optional_number(value: object) -> float | None:
-    return None if value is None else _number(value)
 
 
 def _optional_string(value: object) -> str | None:

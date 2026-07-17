@@ -1,0 +1,21 @@
+profile_id: amem_controlled
+backend: amem
+kind: amem
+package: agentic-memory
+version: source
+source_url: https://github.com/agiresearch/A-mem
+source_commit: ceffb860f0712bbae97b184d440df62bc910ca8d
+writer_profile_id: deepseek_v4_pro_writer
+embedding_profile_id: bge_m3
+embedding_model: BAAI/bge-m3
+embedding_revision: 5617a9f61b028005a4858fdac845db406aefb181
+reranker_profile_id: bge_reranker_v2_m3
+reranker_model: BAAI/bge-reranker-v2-m3
+reranker_revision: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
+candidate_k: 20
+visible_k: 5
+readouts:
+  - native
+  - common_rerank
+vector_store: chroma
+allow_fallback: false

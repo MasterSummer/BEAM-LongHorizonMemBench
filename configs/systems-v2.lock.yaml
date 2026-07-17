@@ -1,0 +1,23 @@
+schema_version: 2
+systems:
+  flat_retrieval:
+    enabled: true
+    package: lhmsb
+    version: schema-v2
+    source_commit: repository
+  mem0:
+    enabled: true
+    package: mem0ai
+    version: 2.0.12
+    source_commit: 42cf18c4e6adb448e981aa1c7b55c1602b0cb670
+    wheel_sha256: 6b7e1afa466f6e14dd34b5e9222c159a69fad38f8d787e73adbf91dbb29e73e2
+  amem:
+    enabled: true
+    package: agentic-memory
+    version: source
+    source_commit: ceffb860f0712bbae97b184d440df62bc910ca8d
+  memos:
+    enabled: true
+    package: memos
+    version: 2.0.23
+    source_commit: 583b07b998afc4debb6c5078439b0b3896f5b097

@@ -1,0 +1,17 @@
+profile_id: flat_controlled
+backend: flat_retrieval
+kind: flat_retrieval
+package: lhmsb
+version: schema-v2
+source_commit: repository
+embedding_profile_id: bge_m3
+embedding_model: BAAI/bge-m3
+embedding_revision: 5617a9f61b028005a4858fdac845db406aefb181
+reranker_profile_id: bge_reranker_v2_m3
+reranker_model: BAAI/bge-reranker-v2-m3
+reranker_revision: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
+candidate_k: 20
+visible_k: 5
+readouts:
+  - common_rerank
+allow_fallback: false

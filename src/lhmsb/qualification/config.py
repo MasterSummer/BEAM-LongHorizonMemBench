@@ -8,7 +8,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import yaml
 
@@ -19,16 +19,26 @@ from lhmsb.qualification.conditions import (
     condition_definitions,
 )
 from lhmsb.qualification.schema import (
+    AMemProfile,
+    CausalSamplingProfile,
+    EvaluationTask,
+    EvaluationTaskTemplate,
+    FlatRetrievalProfile,
     Mem0Profile,
     Mem0Track,
+    MemOSTreeProfile,
     PolicyProfile,
     PolicyProvider,
     PolicyRequestAPI,
+    PreparationTask,
     QualificationCondition,
     QualificationTask,
     ReadoutKind,
     RetrievalProfile,
     ScoredCondition,
+    SystemBackend,
+    SystemProfile,
+    SystemsQualificationConfig,
 )
 
 QUALIFICATION_CONFIG_SCHEMA_VERSION = 1
@@ -155,10 +165,12 @@ _UniqueKeyLoader.add_constructor(
 )
 
 
-def load_qualification_config(path: Path) -> QualificationConfig:
+def load_qualification_config(path: Path) -> QualificationConfig | SystemsQualificationConfig:
     """Load one experiment config and all referenced immutable profiles."""
     raw = _load_yaml(path)
     schema_version = _integer(raw.get("schema_version"), "schema_version")
+    if schema_version == 2:
+        return _load_systems_config(path, raw)
     experiment_id = _string(raw.get("experiment_id"), "experiment_id")
     dataset_release = _string(raw.get("dataset_release"), "dataset_release")
     data_root_env = _string(raw.get("data_root_env"), "data_root_env")
@@ -209,6 +221,316 @@ def load_qualification_config(path: Path) -> QualificationConfig:
         native_mem0=native,
         required_secret_env=required_secret_env,
     )
+
+
+def _load_systems_config(path: Path, raw: Mapping[str, object]) -> SystemsQualificationConfig:
+    """Load the schema-v2 controlled multisystem configuration.
+
+    The v2 loader deliberately has its own branch: schema-v1 Mem0 profile and
+    task serialization must remain byte-compatible with old releases.
+    """
+    experiment_id = _string(raw.get("experiment_id"), "experiment_id")
+    dataset_release = _string(raw.get("dataset_release"), "dataset_release")
+    data_root_env = _string(raw.get("data_root_env"), "data_root_env")
+    policy_paths = _string_sequence(raw.get("policy_profiles"), "policy_profiles")
+    policies = tuple(_load_policy(_resolve(path, item)) for item in policy_paths)
+    writer_path = raw.get("writer_profile", raw.get("memory_writer_profile"))
+    writer = _load_policy(_resolve(path, _string(writer_path, "writer_profile")))
+    embedding = _load_yaml(
+        _resolve(path, _string(raw.get("embedding_profile"), "embedding_profile"))
+    )
+    reranker = _load_yaml(
+        _resolve(path, _string(raw.get("reranker_profile"), "reranker_profile"))
+    )
+    retrieval = RetrievalProfile(
+        embedding_profile_id=_string(embedding.get("profile_id"), "embedding.profile_id"),
+        embedding_model=_string(embedding.get("model_id"), "embedding.model_id"),
+        embedding_revision=_string(embedding.get("revision"), "embedding.revision"),
+        embedding_dimension=_integer(embedding.get("dimension"), "embedding.dimension"),
+        embedding_dtype=_string(embedding.get("dtype"), "embedding.dtype"),
+        reranker_profile_id=_string(reranker.get("profile_id"), "reranker.profile_id"),
+        reranker_model=_string(reranker.get("model_id"), "reranker.model_id"),
+        reranker_revision=_string(reranker.get("revision"), "reranker.revision"),
+        reranker_dtype=_string(reranker.get("dtype"), "reranker.dtype"),
+        candidate_k=_integer(raw.get("candidate_k"), "candidate_k"),
+        visible_k=_integer(raw.get("visible_k"), "visible_k"),
+    )
+    condition_values = _string_sequence(raw.get("conditions"), "conditions")
+    conditions = _validate_conditions(condition_values)
+    if conditions != (
+        "workspace_only",
+        "full_context",
+        "oracle_current_state",
+        "flat_retrieval",
+        "mem0",
+        "amem",
+        "memos",
+    ):
+        raise QualificationConfigError(
+            "schema-v2 conditions must use the canonical seven-condition order"
+        )
+    systems_raw = raw.get("system_profiles", raw.get("systems"))
+    if not isinstance(systems_raw, Mapping):
+        raise QualificationConfigError("system_profiles must be a mapping")
+    system_profiles: dict[str, SystemProfile] = {}
+    for backend, profile_ref in systems_raw.items():
+        backend_name = _string(backend, "system profile backend")
+        profile_path = _resolve(path, _string(profile_ref, f"systems.{backend_name}"))
+        system_profiles[backend_name] = _load_system_profile(
+            backend_name,
+            _load_yaml(profile_path),
+            retrieval=retrieval,
+            writer_profile=writer,
+        )
+    sampling = _load_sampling(raw.get("sampling", {}))
+    full_context_max_chars = _integer(
+        raw.get("full_context_max_chars", 100_000), "full_context_max_chars"
+    )
+    required_secret_env = _string_sequence(
+        raw.get("required_secret_env"), "required_secret_env"
+    )
+    lock_hash = raw.get("systems_lock_hash")
+    lock_ref = raw.get("systems_lock")
+    if lock_hash is None and lock_ref is not None:
+        lock_path = _resolve(path, _string(lock_ref, "systems_lock"))
+        try:
+            lock_hash = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise QualificationConfigError(f"cannot read systems lock {lock_path}: {exc}") from exc
+    if lock_hash is not None:
+        lock_hash = _string(lock_hash, "systems_lock_hash")
+    try:
+        return SystemsQualificationConfig(
+            schema_version=2,
+            experiment_id=experiment_id,
+            dataset_release=dataset_release,
+            data_root_env=data_root_env,
+            policy_profiles=policies,
+            writer_profile=writer,
+            retrieval=retrieval,
+            system_profiles=system_profiles,
+            conditions=conditions,
+            full_context_max_chars=full_context_max_chars,
+            sampling=sampling,
+            required_secret_env=required_secret_env,
+            source_lock_hash=lock_hash,
+        )
+    except ValueError as exc:
+        raise QualificationConfigError(str(exc)) from exc
+
+
+def _load_sampling(value: object) -> CausalSamplingProfile:
+    if not isinstance(value, Mapping):
+        raise QualificationConfigError("sampling must be an object")
+    try:
+        return CausalSamplingProfile(
+            temperature=_number(value.get("temperature", 0.0), "sampling.temperature"),
+            max_output_tokens=_integer(
+                value.get("max_output_tokens", 512), "sampling.max_output_tokens"
+            ),
+            baseline_repeats=_integer(
+                value.get("baseline_repeats", 2), "sampling.baseline_repeats"
+            ),
+            intervention_repeats=_integer(
+                value.get("intervention_repeats", 2), "sampling.intervention_repeats"
+            ),
+            provider_seed=(
+                None
+                if value.get("provider_seed") is None
+                else _integer(value.get("provider_seed"), "sampling.provider_seed")
+            ),
+            format_repair_attempts=_integer(
+                value.get("format_repair_attempts", 1),
+                "sampling.format_repair_attempts",
+            ),
+        )
+    except ValueError as exc:
+        raise QualificationConfigError(str(exc)) from exc
+
+
+def _load_system_profile(
+    backend: str,
+    data: Mapping[str, object],
+    *,
+    retrieval: RetrievalProfile,
+    writer_profile: PolicyProfile,
+) -> SystemProfile:
+    declared_backend = _string(data.get("backend", data.get("kind", backend)), f"{backend}.backend")
+    if declared_backend != backend:
+        raise QualificationConfigError(
+            f"system profile backend mismatch: key={backend!r}; declared={declared_backend!r}"
+        )
+    profile_id = _string(data.get("profile_id"), f"{backend}.profile_id")
+    default_readouts: tuple[str, ...] = (
+        ("common_rerank",) if backend == "flat_retrieval" else ("native", "common_rerank")
+    )
+    readouts = _readouts(data.get("readouts", default_readouts), f"{backend}.readouts")
+    allow_fallback = _boolean(data.get("allow_fallback", False), f"{backend}.allow_fallback")
+    fallback_backend = _optional_string(data.get("fallback_backend"))
+    common: dict[str, Any] = {
+        "profile_id": profile_id,
+        "embedding_profile_id": _string(
+            data.get("embedding_profile_id", retrieval.embedding_profile_id),
+            f"{backend}.embedding_profile_id",
+        ),
+        "embedding_model": _string(
+            data.get("embedding_model", retrieval.embedding_model),
+            f"{backend}.embedding_model",
+        ),
+        "embedding_revision": _string(
+            data.get("embedding_revision", retrieval.embedding_revision),
+            f"{backend}.embedding_revision",
+        ),
+        "reranker_profile_id": _string(
+            data.get("reranker_profile_id", retrieval.reranker_profile_id),
+            f"{backend}.reranker_profile_id",
+        ),
+        "reranker_model": _string(
+            data.get("reranker_model", retrieval.reranker_model),
+            f"{backend}.reranker_model",
+        ),
+        "reranker_revision": _string(
+            data.get("reranker_revision", retrieval.reranker_revision),
+            f"{backend}.reranker_revision",
+        ),
+        "candidate_k": _integer(
+            data.get("candidate_k", retrieval.candidate_k),
+            f"{backend}.candidate_k",
+        ),
+        "visible_k": _integer(
+            data.get("visible_k", retrieval.visible_k),
+            f"{backend}.visible_k",
+        ),
+        "readouts": readouts,
+        "allow_fallback": allow_fallback,
+        "fallback_backend": fallback_backend,
+    }
+    try:
+        if backend == "flat_retrieval":
+            return FlatRetrievalProfile(**common)
+        if backend == "amem":
+            amem_profile = AMemProfile(
+                **common,
+                package=_string(data.get("package", "agentic-memory"), "amem.package"),
+                version=_string(data.get("version", "source"), "amem.version"),
+                source_commit=_string(data.get("source_commit"), "amem.source_commit"),
+                source_url=_string(
+                    data.get("source_url", "https://github.com/agiresearch/A-mem"),
+                    "amem.source_url",
+                ),
+                writer_profile_id=_string(
+                    data.get("writer_profile_id", writer_profile.profile_id),
+                    "amem.writer_profile_id",
+                ),
+                vector_store=_string(data.get("vector_store", "chroma"), "amem.vector_store"),
+            )
+            if amem_profile.source_commit != "ceffb860f0712bbae97b184d440df62bc910ca8d":
+                raise QualificationConfigError(
+                    "A-MEM source commit is not the pinned qualification revision"
+                )
+            if amem_profile.writer_profile_id != writer_profile.profile_id:
+                raise QualificationConfigError(
+                    "A-MEM writer profile does not match the fixed writer"
+                )
+            return amem_profile
+        if backend == "memos":
+            memos_profile = MemOSTreeProfile(
+                **common,
+                mode=_string(data.get("mode", "tree"), "memos.mode"),
+                package=_string(data.get("package", "memos"), "memos.package"),
+                version=_string(data.get("version", "2.0.23"), "memos.version"),
+                source_commit=_string(data.get("source_commit"), "memos.source_commit"),
+                source_url=_string(
+                    data.get("source_url", "https://github.com/MemTensor/MemOS"),
+                    "memos.source_url",
+                ),
+                writer_profile_id=_string(
+                    data.get("writer_profile_id", writer_profile.profile_id),
+                    "memos.writer_profile_id",
+                ),
+                vector_store=_string(data.get("vector_store", "neo4j"), "memos.vector_store"),
+            )
+            if (
+                memos_profile.version != "2.0.23"
+                or memos_profile.source_commit
+                != "583b07b998afc4debb6c5078439b0b3896f5b097"
+            ):
+                raise QualificationConfigError(
+                    "MemOS source/version is not the pinned qualification revision"
+                )
+            if memos_profile.writer_profile_id != writer_profile.profile_id:
+                raise QualificationConfigError(
+                    "MemOS writer profile does not match the fixed writer"
+                )
+            return memos_profile
+        if backend == "mem0":
+            mem0_profile = _load_mem0_data(data)
+            if mem0_profile.track != "controlled":
+                raise QualificationConfigError("schema-v2 Mem0 profile must be controlled")
+            if mem0_profile.version != "2.0.12":
+                raise QualificationConfigError(
+                    "Mem0 version is not the pinned qualification revision"
+                )
+            if mem0_profile.embedding_model != retrieval.embedding_model:
+                raise QualificationConfigError(
+                    "Mem0 controlled profile must use common BGE-M3 embeddings"
+                )
+            declared_writer = _string(
+                data.get("writer_profile_id", writer_profile.profile_id),
+                "mem0.writer_profile_id",
+            )
+            if declared_writer != writer_profile.profile_id:
+                raise QualificationConfigError(
+                    "Mem0 writer profile does not match the fixed writer"
+                )
+            if readouts != ("native", "common_rerank"):
+                raise QualificationConfigError(
+                    "Mem0 controlled profile must expose native and common_rerank"
+                )
+            if (
+                _integer(data.get("candidate_k", retrieval.candidate_k), "mem0.candidate_k")
+                != retrieval.candidate_k
+                or _integer(data.get("visible_k", retrieval.visible_k), "mem0.visible_k")
+                != retrieval.visible_k
+            ):
+                raise QualificationConfigError(
+                    "Mem0 controlled retrieval budget differs from common budget"
+                )
+            return mem0_profile
+    except (TypeError, ValueError) as exc:
+        raise QualificationConfigError(str(exc)) from exc
+    raise QualificationConfigError(f"unsupported schema-v2 system profile: {backend!r}")
+
+
+def _load_mem0_data(data: Mapping[str, object]) -> Mem0Profile:
+    track = _string(data.get("track", "controlled"), "mem0.track")
+    if track not in {"controlled", "native"}:
+        raise QualificationConfigError(f"unsupported Mem0 track: {track}")
+    return Mem0Profile(
+        profile_id=_string(data.get("profile_id"), "mem0.profile_id"),
+        track=cast(Mem0Track, track),
+        package=_string(data.get("package"), "mem0.package"),
+        version=_string(data.get("version"), "mem0.version"),
+        source_commit=_string(data.get("source_commit"), "mem0.source_commit"),
+        wheel_sha256=_string(data.get("wheel_sha256"), "mem0.wheel_sha256"),
+        internal_llm_mode=_string(data.get("internal_llm_mode"), "mem0.internal_llm_mode"),
+        internal_llm_provider=_optional_string(data.get("internal_llm_provider")),
+        internal_llm_model=_optional_string(data.get("internal_llm_model")),
+        embedding_provider=_string(data.get("embedding_provider"), "mem0.embedding_provider"),
+        embedding_model=_string(data.get("embedding_model"), "mem0.embedding_model"),
+        vector_store=_string(data.get("vector_store"), "mem0.vector_store"),
+        reranker_enabled=_boolean(data.get("reranker_enabled"), "mem0.reranker_enabled"),
+        prompt_source=_string(data.get("prompt_source"), "mem0.prompt_source"),
+        telemetry_enabled=_boolean(data.get("telemetry_enabled"), "mem0.telemetry_enabled"),
+    )
+
+
+def _readouts(value: object, label: str) -> tuple[ReadoutKind, ...]:
+    values = _string_sequence(value, label)
+    allowed = {"none", "native", "common_rerank"}
+    if any(item not in allowed for item in values):
+        raise QualificationConfigError(f"{label} contains an unsupported readout")
+    return cast(tuple[ReadoutKind, ...], values)
 
 
 def build_qualification_tasks(
@@ -279,6 +601,261 @@ def build_qualification_tasks(
     if not tasks:
         raise QualificationConfigError("qualification matrix is empty")
     return tuple(tasks)
+
+
+NO_PREFIX_ARTIFACT = "NO_PREFIX_ARTIFACT"
+_PREPARATION_BACKENDS: tuple[str, ...] = (
+    "flat_retrieval",
+    "mem0",
+    "amem",
+    "memos",
+)
+
+
+def _require_v2(
+    config: QualificationConfig | SystemsQualificationConfig,
+) -> SystemsQualificationConfig:
+    if not isinstance(config, SystemsQualificationConfig):
+        raise QualificationConfigError(
+            "schema-v2 multisystem task construction requires a schema-v2 config"
+        )
+    return config
+
+
+def build_preparation_tasks(
+    config: QualificationConfig | SystemsQualificationConfig,
+    *,
+    episode_ids: Sequence[str],
+    run_identity: str,
+) -> tuple[PreparationTask, ...]:
+    """Expand one immutable prefix preparation task per backend and episode."""
+    resolved = _require_v2(config)
+    tasks: list[PreparationTask] = []
+    for episode_id in episode_ids:
+        for backend in _PREPARATION_BACKENDS:
+            profile = resolved.system_profiles[backend]
+            profile_id = profile.profile_id
+            index = len(tasks)
+            payload = {
+                "stage": "prepare_prefix",
+                "task_index": index,
+                "episode_id": episode_id,
+                "backend": backend,
+                "profile_id": profile_id,
+                "run_identity": run_identity,
+                "config_hash": resolved.config_hash,
+            }
+            task_id = f"prepare-{index:05d}--{_slug(episode_id)}--{backend}"
+            tasks.append(
+                PreparationTask(
+                    task_index=index,
+                    task_id=task_id,
+                    episode_id=episode_id,
+                    backend=cast(SystemBackend, backend),
+                    profile_id=profile_id,
+                    run_identity=run_identity,
+                    task_payload_hash=canonical_hash(payload),
+                )
+            )
+    if not tasks:
+        raise QualificationConfigError("preparation matrix is empty")
+    return tuple(tasks)
+
+
+def build_evaluation_task_templates(
+    config: QualificationConfig | SystemsQualificationConfig,
+    *,
+    episode_ids: Sequence[str],
+    run_identity: str,
+) -> tuple[EvaluationTaskTemplate, ...]:
+    """Create stable, non-executable Stage-B rows before artifact finalization."""
+    resolved = _require_v2(config)
+    templates: list[EvaluationTaskTemplate] = []
+    seen_results: set[str] = set()
+    for episode_id in episode_ids:
+        for policy in resolved.policy_profiles:
+            for condition in resolved.conditions:
+                definition = condition_definition(condition)
+                readouts = tuple(definition.readouts)
+                scored = _scored_conditions(
+                    episode_id=episode_id,
+                    policy_profile_id=policy.profile_id,
+                    condition=condition,
+                    readouts=readouts,
+                    seen_results=seen_results,
+                )
+                index = len(templates)
+                prefix_backend = definition.prefix_backend
+                payload = {
+                    "stage": "evaluate_template",
+                    "task_index": index,
+                    "episode_id": episode_id,
+                    "policy_profile_id": policy.profile_id,
+                    "condition": condition,
+                    "prefix_backend": prefix_backend,
+                    "prefix_artifact_hash": NO_PREFIX_ARTIFACT,
+                    "run_identity": run_identity,
+                    "results": [asdict(item) for item in scored],
+                }
+                templates.append(
+                    EvaluationTaskTemplate(
+                        task_index=index,
+                        task_id=f"evaluate-template-{index:05d}--{_slug(episode_id)}--{policy.profile_id}--{condition}",
+                        episode_id=episode_id,
+                        policy_profile_id=policy.profile_id,
+                        condition=condition,
+                        run_identity=run_identity,
+                        task_payload_hash=canonical_hash(payload),
+                        scored_conditions=tuple(scored),
+                        prefix_backend=prefix_backend,
+                    )
+                )
+    if not templates:
+        raise QualificationConfigError("evaluation template matrix is empty")
+    return tuple(templates)
+
+
+def finalize_evaluation_plan(
+    config: QualificationConfig | SystemsQualificationConfig,
+    templates: Sequence[EvaluationTaskTemplate],
+    prefix_artifacts: Mapping[str, object],
+    *,
+    run_identity: str,
+) -> tuple[EvaluationTask, ...]:
+    """Bind verified prefix hashes and materialize executable Stage-B tasks.
+
+    ``prefix_artifacts`` accepts either ``{episode--backend: hash/object}`` or
+    ``{episode: {backend: hash/object}}``.  Artifact objects only need an
+    ``artifact_hash`` attribute, allowing the function to remain independent of
+    storage and adapter implementations.
+    """
+    resolved = _require_v2(config)
+    if not templates:
+        raise QualificationConfigError("cannot finalize an empty evaluation template matrix")
+    artifacts = _normalise_prefix_artifacts(prefix_artifacts)
+    required = {
+        f"{template.episode_id}--{template.prefix_backend}"
+        for template in templates
+        if template.prefix_backend is not None
+    }
+    missing = sorted(required - set(artifacts))
+    if missing:
+        raise QualificationConfigError(
+            "cannot finalize evaluation plan; missing verified prefix artifact(s): "
+            + ", ".join(missing)
+        )
+    tasks: list[EvaluationTask] = []
+    for template in templates:
+        prefix_hash = (
+            NO_PREFIX_ARTIFACT
+            if template.prefix_backend is None
+            else artifacts[f"{template.episode_id}--{template.prefix_backend}"]
+        )
+        payload = {
+            "stage": "evaluate",
+            "task_index": template.task_index,
+            "episode_id": template.episode_id,
+            "policy_profile_id": template.policy_profile_id,
+            "condition": template.condition,
+            "prefix_backend": template.prefix_backend,
+            "prefix_artifact_hash": prefix_hash,
+            "run_identity": run_identity,
+            "results": [asdict(item) for item in template.scored_conditions],
+            "config_hash": resolved.config_hash,
+        }
+        task_id = template.task_id.replace("evaluate-template-", "evaluate-")
+        if template.prefix_backend is not None:
+            task_id = f"{task_id}--pfx-{prefix_hash[:12]}"
+        tasks.append(
+            EvaluationTask(
+                task_index=template.task_index,
+                task_id=task_id,
+                episode_id=template.episode_id,
+                policy_profile_id=template.policy_profile_id,
+                condition=template.condition,
+                prefix_artifact_hash=prefix_hash,
+                run_identity=run_identity,
+                task_payload_hash=canonical_hash(payload),
+                scored_conditions=template.scored_conditions,
+                prefix_backend=template.prefix_backend,
+            )
+        )
+    return tuple(tasks)
+
+
+def build_evaluation_tasks(
+    config: QualificationConfig | SystemsQualificationConfig,
+    *,
+    episode_ids: Sequence[str],
+    run_identity: str,
+    prefix_artifacts: Mapping[str, object] | None = None,
+    prefix_artifact_hashes: Mapping[str, object] | None = None,
+) -> tuple[EvaluationTask, ...]:
+    """Convenience API that explicitly requires verified artifacts.
+
+    New callers should use ``build_evaluation_task_templates`` followed by
+    ``finalize_evaluation_plan`` so the non-executable planning boundary remains
+    visible in manifests.
+    """
+    if prefix_artifacts is None:
+        prefix_artifacts = prefix_artifact_hashes
+    if prefix_artifacts is None:
+        raise QualificationConfigError(
+            "build_evaluation_tasks requires prefix_artifacts; templates are not executable"
+        )
+    templates = build_evaluation_task_templates(
+        config, episode_ids=episode_ids, run_identity=run_identity
+    )
+    return finalize_evaluation_plan(
+        config, templates, prefix_artifacts, run_identity=run_identity
+    )
+
+
+def _scored_conditions(
+    *,
+    episode_id: str,
+    policy_profile_id: str,
+    condition: str,
+    readouts: Sequence[ReadoutKind],
+    seen_results: set[str],
+) -> list[ScoredCondition]:
+    scored: list[ScoredCondition] = []
+    for readout in readouts:
+        suffix = condition if readout == "none" else f"{condition}--{readout}"
+        result_id = f"{_slug(episode_id)}--{policy_profile_id}--{suffix}"
+        if result_id in seen_results:
+            raise QualificationConfigError(f"duplicate result ID: {result_id}")
+        seen_results.add(result_id)
+        scored.append(ScoredCondition(result_id=result_id, condition=condition, readout=readout))
+    return scored
+
+
+def _normalise_prefix_artifacts(value: Mapping[str, object]) -> dict[str, str]:
+    output: dict[str, str] = {}
+    for key, raw in value.items():
+        if isinstance(raw, Mapping):
+            for backend, nested in raw.items():
+                output[f"{key}--{backend}"] = _artifact_hash(nested, f"{key}--{backend}")
+        else:
+            output[str(key)] = _artifact_hash(raw, str(key))
+    return output
+
+
+def _artifact_hash(value: object, label: str) -> str:
+    if isinstance(value, str):
+        digest = value
+    else:
+        candidate = getattr(value, "artifact_hash", None)
+        if not isinstance(candidate, str):
+            raise QualificationConfigError(f"{label} is not a verified prefix artifact")
+        digest = candidate
+    # Planning tests and dry-runs may use deterministic opaque 64-character
+    # placeholders (for example ``"mem0" * 16``).  A real artifact object is
+    # always recalculated and validated by MemoryPrefixArtifact; Stage-B planning
+    # only carries its opaque content-address key.
+    if len(digest) != 64 or any(character.isspace() for character in digest):
+        raise QualificationConfigError(f"{label} has an invalid artifact hash")
+    return digest
 
 
 def canonical_hash(value: object) -> str:
@@ -414,10 +991,15 @@ def _slug(value: str) -> str:
 
 
 __all__ = [
+    "NO_PREFIX_ARTIFACT",
     "QUALIFICATION_CONFIG_SCHEMA_VERSION",
     "QualificationConfig",
     "QualificationConfigError",
+    "build_evaluation_task_templates",
+    "build_evaluation_tasks",
+    "build_preparation_tasks",
     "build_qualification_tasks",
     "canonical_hash",
+    "finalize_evaluation_plan",
     "load_qualification_config",
 ]

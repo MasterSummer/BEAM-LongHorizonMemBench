@@ -14,7 +14,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast, runtime_checkable
+from typing import Literal, NoReturn, Protocol, cast, runtime_checkable
 
 NormalizedMutationKind = Literal["add", "update", "delete", "observe"]
 ScoreSemantics = Literal["higher_is_better", "lower_is_better", "unscored"]
@@ -26,6 +26,90 @@ SCORE_SEMANTICS_METADATA_KEY = "lhmsb.score_semantics"
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SCORE_SEMANTICS = {"higher_is_better", "lower_is_better", "unscored"}
+
+
+class _FrozenDict(dict[str, object]):
+    """JSON-compatible mapping whose nested trace value cannot be mutated."""
+
+    @staticmethod
+    def _immutable(*args: object, **kwargs: object) -> NoReturn:
+        del args, kwargs
+        raise TypeError("trace metadata is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+
+    def __copy__(self) -> _FrozenDict:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _FrozenDict:
+        del memo
+        return self
+
+
+class _FrozenList(list[object]):
+    """JSON-compatible list whose trace contents cannot be mutated."""
+
+    @staticmethod
+    def _immutable(*args: object, **kwargs: object) -> NoReturn:
+        del args, kwargs
+        raise TypeError("trace metadata is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    append = _immutable
+    clear = _immutable
+    extend = _immutable
+    insert = _immutable
+    pop = _immutable
+    remove = _immutable
+    reverse = _immutable
+    sort = _immutable
+    __iadd__ = _immutable
+    __imul__ = _immutable
+
+    def __copy__(self) -> _FrozenList:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _FrozenList:
+        del memo
+        return self
+
+
+def _freeze_json(value: object) -> object:
+    if isinstance(value, _FrozenDict | _FrozenList):
+        return value
+    if isinstance(value, Mapping):
+        return _FrozenDict(
+            (str(key), _freeze_json(child)) for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return _FrozenList(_freeze_json(child) for child in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_json(child) for child in value)
+    return value
+
+
+def _freeze_pairs(
+    pairs: object,
+    field: str,
+) -> tuple[tuple[str, object], ...]:
+    output: list[tuple[str, object]] = []
+    for item in _sequence(pairs, field):
+        values = _sequence(item, f"{field} pair")
+        if len(values) != 2:
+            raise _failure("invalid_trace_field", f"{field} pairs must have length two")
+        key = _string(values[0], f"{field} key")
+        output.append((key, _freeze_json(values[1])))
+    result = tuple(output)
+    _validate_pairs(result, field)
+    return result
 
 
 class MemoryTraceValidationError(ValueError):
@@ -212,7 +296,7 @@ class MemoryMutationEvent:
             raise _failure("invalid_trace_field", "memory_text must be a string")
         _validate_hash(self.old_content_hash, "old_content_hash")
         _validate_hash(self.new_content_hash, "new_content_hash")
-        if self.new_content_hash is not None and self.memory_text:
+        if self.new_content_hash is not None:
             _validate_content_hash(self.memory_text, self.new_content_hash, "new_content_hash")
         _require_nonempty(self.source, "source")
         _require_nonnegative_number(self.latency_seconds, "latency_seconds")
@@ -278,11 +362,11 @@ class MemoryObject:
     history_length: int
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", _freeze_pairs(self.metadata, "metadata"))
         _require_nonempty(self.memory_id, "memory_id")
         if not isinstance(self.content, str):
             raise _failure("invalid_trace_field", "content must be a string")
         _validate_content_hash(self.content, self.content_hash, "content_hash")
-        _validate_pairs(self.metadata, "metadata")
         if not isinstance(self.created_at, str) or not isinstance(self.updated_at, str):
             raise _failure("invalid_trace_field", "created_at and updated_at must be strings")
         _require_nonnegative_integer(self.history_length, "history_length")
@@ -337,6 +421,7 @@ class InventorySnapshot:
     backend_count: int | None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
         _require_nonnegative_integer(self.checkpoint_session, "checkpoint_session")
         _require_nonnegative_integer(self.n_write, "n_write")
         _require_nonnegative_integer(self.n_live, "n_live")
@@ -398,6 +483,12 @@ class RetrievalCandidate:
     updated_at: str
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "score_details",
+            _score_pairs_from_dict(self.score_details),
+        )
+        object.__setattr__(self, "metadata", _freeze_pairs(self.metadata, "metadata"))
         _require_nonempty(self.memory_id, "memory_id")
         if not isinstance(self.content, str):
             raise _failure("invalid_trace_field", "content must be a string")
@@ -426,7 +517,6 @@ class RetrievalCandidate:
             detail_keys.append(key)
         if len(detail_keys) != len(set(detail_keys)):
             raise _failure("duplicate_metadata_key", "score_details keys must be unique")
-        _validate_pairs(self.metadata, "metadata")
         origin = _metadata_value(self.metadata, CANDIDATE_ORIGIN_METADATA_KEY)
         if origin is not None and (not isinstance(origin, str) or not origin):
             raise _failure(
@@ -613,6 +703,91 @@ class ProviderUsageEvent:
 
 
 @dataclass(frozen=True)
+class CandidateInventoryDiagnostics:
+    """Non-throwing candidate/inventory anomalies for evaluator-side reporting."""
+
+    search_checkpoint_session: int
+    inventory_checkpoint_session: int
+    checkpoint_mismatch: bool
+    missing_memory_ids: tuple[str, ...]
+    content_hash_mismatch_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "missing_memory_ids", tuple(self.missing_memory_ids))
+        object.__setattr__(
+            self,
+            "content_hash_mismatch_ids",
+            tuple(self.content_hash_mismatch_ids),
+        )
+        _require_nonnegative_integer(
+            self.search_checkpoint_session,
+            "search_checkpoint_session",
+        )
+        _require_nonnegative_integer(
+            self.inventory_checkpoint_session,
+            "inventory_checkpoint_session",
+        )
+        if not isinstance(self.checkpoint_mismatch, bool):
+            raise _failure("invalid_trace_field", "checkpoint_mismatch must be a boolean")
+        for field, values in (
+            ("missing_memory_ids", self.missing_memory_ids),
+            ("content_hash_mismatch_ids", self.content_hash_mismatch_ids),
+        ):
+            if any(not isinstance(value, str) or not value for value in values):
+                raise _failure(
+                    "invalid_trace_field",
+                    f"{field} must contain non-empty strings",
+                )
+            if len(values) != len(set(values)):
+                raise _failure("duplicate_memory_id", f"{field} must be unique")
+
+    @property
+    def is_consistent(self) -> bool:
+        return not (
+            self.checkpoint_mismatch
+            or self.missing_memory_ids
+            or self.content_hash_mismatch_ids
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "search_checkpoint_session": self.search_checkpoint_session,
+            "inventory_checkpoint_session": self.inventory_checkpoint_session,
+            "checkpoint_mismatch": self.checkpoint_mismatch,
+            "missing_memory_ids": list(self.missing_memory_ids),
+            "content_hash_mismatch_ids": list(self.content_hash_mismatch_ids),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> CandidateInventoryDiagnostics:
+        mismatch = data.get("checkpoint_mismatch")
+        if not isinstance(mismatch, bool):
+            raise _failure("invalid_trace_field", "checkpoint_mismatch must be a boolean")
+        return cls(
+            search_checkpoint_session=_integer(
+                data.get("search_checkpoint_session"),
+                "search_checkpoint_session",
+            ),
+            inventory_checkpoint_session=_integer(
+                data.get("inventory_checkpoint_session"),
+                "inventory_checkpoint_session",
+            ),
+            checkpoint_mismatch=mismatch,
+            missing_memory_ids=tuple(
+                _string(value, "missing memory ID")
+                for value in _sequence(data.get("missing_memory_ids"), "missing_memory_ids")
+            ),
+            content_hash_mismatch_ids=tuple(
+                _string(value, "content hash mismatch ID")
+                for value in _sequence(
+                    data.get("content_hash_mismatch_ids"),
+                    "content_hash_mismatch_ids",
+                )
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class CandidateSearch:
     checkpoint_session: int
     query: str
@@ -623,6 +798,8 @@ class CandidateSearch:
     usage_events: tuple[ProviderUsageEvent, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "candidates", tuple(self.candidates))
+        object.__setattr__(self, "usage_events", tuple(self.usage_events))
         _require_nonnegative_integer(self.checkpoint_session, "checkpoint_session")
         if not isinstance(self.query, str):
             raise _failure("invalid_trace_field", "query must be a string")
@@ -644,31 +821,48 @@ class CandidateSearch:
         _require_nonnegative_number(self.latency_seconds, "latency_seconds")
         _validate_usage_ids(self.usage_events)
 
+    def diagnose_against_inventory(
+        self,
+        inventory: InventorySnapshot,
+    ) -> CandidateInventoryDiagnostics:
+        """Return traceable anomalies without changing or rejecting native output."""
+        inventory_by_id = {item.memory_id: item for item in inventory.items}
+        missing = tuple(
+            item.memory_id for item in self.candidates if item.memory_id not in inventory_by_id
+        )
+        inconsistent = tuple(
+            item.memory_id
+            for item in self.candidates
+            if item.memory_id in inventory_by_id
+            and inventory_by_id[item.memory_id].content_hash != item.content_hash
+        )
+        return CandidateInventoryDiagnostics(
+            search_checkpoint_session=self.checkpoint_session,
+            inventory_checkpoint_session=inventory.checkpoint_session,
+            checkpoint_mismatch=self.checkpoint_session != inventory.checkpoint_session,
+            missing_memory_ids=missing,
+            content_hash_mismatch_ids=inconsistent,
+        )
+
     def validate_against_inventory(self, inventory: InventorySnapshot) -> None:
-        """Reject candidates that cannot be tied to the checkpoint inventory."""
-        if self.checkpoint_session != inventory.checkpoint_session:
+        """Strict compatibility wrapper used by the schema-v1 Mem0 runner."""
+        diagnostics = self.diagnose_against_inventory(inventory)
+        if diagnostics.checkpoint_mismatch:
             raise _failure(
                 "session_mismatch",
                 "candidate search and inventory checkpoints must match",
             )
-        inventory_by_id = {item.memory_id: item for item in inventory.items}
-        missing = [
-            item.memory_id for item in self.candidates if item.memory_id not in inventory_by_id
-        ]
-        if missing:
+        if diagnostics.missing_memory_ids:
             raise _failure(
                 "candidate_outside_inventory",
-                "candidate IDs are absent from inventory: " + ", ".join(missing),
+                "candidate IDs are absent from inventory: "
+                + ", ".join(diagnostics.missing_memory_ids),
             )
-        inconsistent = [
-            item.memory_id
-            for item in self.candidates
-            if inventory_by_id[item.memory_id].content_hash != item.content_hash
-        ]
-        if inconsistent:
+        if diagnostics.content_hash_mismatch_ids:
             raise _failure(
                 "candidate_inventory_mismatch",
-                "candidate content hashes differ from inventory: " + ", ".join(inconsistent),
+                "candidate content hashes differ from inventory: "
+                + ", ".join(diagnostics.content_hash_mismatch_ids),
             )
 
     def to_dict(self) -> dict[str, object]:
@@ -722,6 +916,8 @@ class WriteSessionResult:
     usage_events: tuple[ProviderUsageEvent, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "events", tuple(self.events))
+        object.__setattr__(self, "usage_events", tuple(self.usage_events))
         _require_nonnegative_integer(self.session_index, "session_index")
         if any(not isinstance(event, MemoryMutationEvent) for event in self.events):
             raise _failure("invalid_trace_field", "events must contain mutation records")
@@ -885,6 +1081,7 @@ __all__ = [
     "PROVENANCE_METADATA_KEY",
     "SCORE_SEMANTICS_METADATA_KEY",
     "CandidateSearch",
+    "CandidateInventoryDiagnostics",
     "InventoryItem",
     "InventorySnapshot",
     "LifecycleCapabilities",

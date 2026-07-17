@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import asdict
+from typing import cast
 
 import pytest
 
 from lhmsb.adapters import mem0_qualification
 from lhmsb.qualification.memory_runtime import (
+    CandidateInventoryDiagnostics,
     CandidateSearch,
     InventorySnapshot,
     LifecycleCapabilities,
@@ -131,6 +133,83 @@ def test_generic_trace_round_trip_preserves_native_and_graph_metadata() -> None:
     result_data = result.to_dict()
     assert isinstance(result_data["events"], list)
     assert result_data["events"][0]["native_event"] == "UPDATE"
+
+
+def test_nested_metadata_is_defensively_frozen_without_changing_json_shape() -> None:
+    provenance = {"source_sessions": [1, 2]}
+    graph = {
+        "labels": ["TextualMemory"],
+        "path": [{"edge": "CHILD_OF", "source": "topic-1"}],
+    }
+    item = MemoryObject(
+        memory_id="memory-1",
+        content="current plan",
+        content_hash=sha256_text("current plan"),
+        metadata=(
+            ("lhmsb.provenance", provenance),
+            ("lhmsb.graph", graph),
+        ),
+        created_at="t0",
+        updated_at="t1",
+        history_length=1,
+    )
+    expected = {
+        "memory_id": "memory-1",
+        "content": "current plan",
+        "content_hash": sha256_text("current plan"),
+        "metadata": (
+            ("lhmsb.provenance", {"source_sessions": [1, 2]}),
+            (
+                "lhmsb.graph",
+                {
+                    "labels": ["TextualMemory"],
+                    "path": [{"edge": "CHILD_OF", "source": "topic-1"}],
+                },
+            ),
+        ),
+        "created_at": "t0",
+        "updated_at": "t1",
+        "history_length": 1,
+    }
+    expected_json = json.dumps(expected, sort_keys=True, separators=(",", ":"))
+
+    provenance["source_sessions"].append(99)
+    graph["labels"].append("mutated")
+    graph["path"][0]["edge"] = "MUTATED"
+
+    assert json.dumps(asdict(item), sort_keys=True, separators=(",", ":")) == expected_json
+    serialized_graph = dict(asdict(item)["metadata"])["lhmsb.graph"]
+    assert isinstance(serialized_graph, dict)
+    assert isinstance(serialized_graph["labels"], list | tuple)
+
+    exposed_graph = cast(dict[str, object], item.graph_metadata)
+    exposed_labels = cast(list[object], exposed_graph["labels"])
+    with pytest.raises(TypeError):
+        exposed_graph["new"] = "cannot mutate"
+    with pytest.raises((AttributeError, TypeError)):
+        exposed_labels.append("cannot mutate")
+
+
+def test_score_and_metadata_pair_containers_are_defensively_copied() -> None:
+    score_details = [("semantic", 0.8)]
+    metadata = [("lhmsb.candidate_origin", "native")]
+    candidate = RetrievalCandidate(
+        memory_id="memory-1",
+        content="current plan",
+        content_hash=sha256_text("current plan"),
+        native_rank=1,
+        score=0.8,
+        score_details=cast(tuple[tuple[str, float], ...], score_details),
+        metadata=cast(tuple[tuple[str, object], ...], metadata),
+        created_at="t0",
+        updated_at="t1",
+    )
+
+    score_details.append(("mutated", 0.1))
+    metadata.append(("lhmsb.score_semantics", "lower_is_better"))
+
+    assert candidate.score_details == (("semantic", 0.8),)
+    assert candidate.metadata == (("lhmsb.candidate_origin", "native"),)
 
 
 def test_retrieval_preserves_native_order_score_semantics_and_origin() -> None:
@@ -321,6 +400,36 @@ def test_candidate_search_rejects_ids_outside_known_inventory() -> None:
     assert "unknown" in str(caught.value)
 
 
+def test_candidate_inventory_diagnostics_record_anomalies_without_throwing() -> None:
+    inventory = _inventory(_memory_object(content="inventory content"))
+    search = CandidateSearch(
+        checkpoint_session=3,
+        query="query",
+        query_hash=sha256_text("query"),
+        candidates=(
+            _candidate("memory-1", "divergent content", rank=1),
+            _candidate("missing-memory", "missing content", rank=2),
+        ),
+        candidate_shortfall=True,
+        latency_seconds=0.0,
+    )
+
+    diagnostics = search.diagnose_against_inventory(inventory)
+
+    assert diagnostics == CandidateInventoryDiagnostics(
+        search_checkpoint_session=3,
+        inventory_checkpoint_session=3,
+        checkpoint_mismatch=False,
+        missing_memory_ids=("missing-memory",),
+        content_hash_mismatch_ids=("memory-1",),
+    )
+    assert not diagnostics.is_consistent
+    assert CandidateInventoryDiagnostics.from_dict(diagnostics.to_dict()) == diagnostics
+    with pytest.raises(MemoryTraceValidationError) as caught:
+        search.validate_against_inventory(inventory)
+    assert caught.value.error_class == "candidate_outside_inventory"
+
+
 def test_write_result_rejects_duplicate_operation_ids() -> None:
     inventory = _inventory(_memory_object())
     event = MemoryMutationEvent(
@@ -371,6 +480,35 @@ def test_write_result_rejects_event_session_mismatch() -> None:
         )
 
     assert caught.value.error_class == "session_mismatch"
+
+
+def test_mutation_event_validates_new_hash_for_empty_memory_text() -> None:
+    with pytest.raises(MemoryTraceValidationError) as caught:
+        MemoryMutationEvent(
+            operation_id="operation-empty",
+            session_index=0,
+            native_event="ADD",
+            memory_id="memory-empty",
+            memory_text="",
+            old_content_hash=None,
+            new_content_hash=sha256_text("not empty"),
+            source="native_response",
+            latency_seconds=0.0,
+        )
+
+    assert caught.value.error_class == "invalid_hash"
+    matching = MemoryMutationEvent(
+        operation_id="operation-empty-valid",
+        session_index=0,
+        native_event="ADD",
+        memory_id="memory-empty",
+        memory_text="",
+        old_content_hash=None,
+        new_content_hash=sha256_text(""),
+        source="native_response",
+        latency_seconds=0.0,
+    )
+    assert matching.new_content_hash == sha256_text("")
 
 
 @pytest.mark.parametrize(
