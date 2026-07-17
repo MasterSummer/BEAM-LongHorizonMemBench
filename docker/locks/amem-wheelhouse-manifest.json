@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "system": "amem",
+  "package": "agentic-memory",
+  "source_url": "https://github.com/agiresearch/A-mem",
+  "source_commit": "ceffb860f0712bbae97b184d440df62bc910ca8d",
+  "requirements_file": "docker/locks/amem-requirements.txt",
+  "require_hashes": true,
+  "wheelhouse_complete": false,
+  "artifacts": [],
+  "generated_by": "scripts/bootstrap_systems_server.sh",
+  "notes": "Bootstrap must replace this manifest with every wheel filename and SHA-256 before a live build."
+}

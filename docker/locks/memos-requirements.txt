@@ -1,0 +1,10 @@
+# Offline lock contract for the pinned MemOS TreeTextMemory source release.
+#
+# Bootstrap exports the complete transitive set into this file before a live
+# build.  The worker image only installs from the resulting wheelhouse with
+# --require-hashes and never resolves packages online.
+--require-hashes
+
+# source: https://github.com/MemTensor/MemOS
+# commit: 583b07b998afc4debb6c5078439b0b3896f5b097
+# package identity: memos==2.0.23; mode: TreeTextMemory only

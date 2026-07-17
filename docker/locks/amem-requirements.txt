@@ -1,0 +1,12 @@
+# Offline lock contract for the official A-MEM source checkout.
+#
+# The source package is installed from the commit recorded below.  The
+# wheelhouse is populated by bootstrap_systems_server.sh and every generated
+# wheel is verified with --require-hashes before it is copied into the image.
+# Keeping the source identity here makes an accidentally stale wheelhouse
+# fail closed instead of silently selecting the similarly named PyPI package.
+--require-hashes
+
+# source: https://github.com/agiresearch/A-mem
+# commit: ceffb860f0712bbae97b184d440df62bc910ca8d
+# package identity: agentic-memory (never a-mem)
