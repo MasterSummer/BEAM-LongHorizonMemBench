@@ -8,24 +8,33 @@ import sys
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
-from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
+import lhmsb.qualification.cli as cli_module
+from lhmsb.families.software.mem0_vertical import (
+    SoftwareMem0VerticalFamily,
+    SoftwareMem0VerticalSpec,
+)
 from lhmsb.longhorizon.interventions import ContinuationOutcome
 from lhmsb.qualification.cli import (
+    _live_components,
     _qdrant_collection_count,
     _qdrant_collection_snapshot_size,
     _sqlite_store_size,
     main,
 )
+from lhmsb.qualification.config import load_qualification_config
 from lhmsb.qualification.report import write_qualification_report
 from lhmsb.qualification.runner import (
     ConditionRunResult,
     QualificationMatrixResult,
     QualificationTaskResult,
     SCEURunResult,
+    TaskIsolation,
 )
+from lhmsb.qualification.schema import QualificationTask
 from lhmsb.qualification.validate import validate_qualification_artifacts
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +46,73 @@ DATASET_RELEASE = (
     / "software-vertical-mem0-v0.2.0"
     / "software_mem0_v2.tar.gz"
 )
+
+
+@pytest.mark.parametrize(
+    ("condition", "expected_request_api"),
+    (("mem0_controlled", "responses"), ("mem0_native", None)),
+)
+def test_live_components_routes_internal_llm_api_only_for_controlled_track(
+    condition: str,
+    expected_request_api: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str | None] = []
+
+    def fake_create_live(*args: object, **kwargs: object) -> object:
+        request_api = kwargs.get("internal_llm_request_api")
+        assert request_api is None or isinstance(request_api, str)
+        seen.append(request_api)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(
+        cli_module,
+        "HttpPolicyClient",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "build_mem0_live_config",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "lhmsb.qualification.cli.Mem0QualificationAdapter.create_live",
+        fake_create_live,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "RerankerClient",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+    config = load_qualification_config(CONFIG)
+    task = SimpleNamespace(
+        policy_profile_id="gpt_5_6_sol",
+        condition=condition,
+    )
+    isolation = SimpleNamespace(
+        history_db_path=tmp_path / "history.sqlite",
+        collection_name="collection",
+        user_id="user",
+        run_id="run",
+    )
+    spec = SimpleNamespace(
+        plan=None,
+        package_files=(),
+        hidden_tests=(),
+        actions=(),
+        surface_hash="surface",
+    )
+
+    _live_components(
+        cast(QualificationTask, task),
+        cast(TaskIsolation, isolation),
+        spec=cast(SoftwareMem0VerticalSpec, spec),
+        config=config,
+        environment={"OPENAI_API_KEY": "not-a-real-secret"},
+    )
+
+    assert seen == [expected_request_api]
 
 
 @pytest.fixture(scope="session")

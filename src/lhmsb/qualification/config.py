@@ -17,6 +17,7 @@ from lhmsb.qualification.schema import (
     Mem0Track,
     PolicyProfile,
     PolicyProvider,
+    PolicyRequestAPI,
     QualificationCondition,
     QualificationTask,
     ReadoutKind,
@@ -289,22 +290,32 @@ def _load_policy(path: Path) -> PolicyProfile:
     endpoint_override = data.get("endpoint_override_env")
     if endpoint_override is not None and not isinstance(endpoint_override, str):
         raise QualificationConfigError("endpoint_override_env must be a string or null")
-    return PolicyProfile(
-        profile_id=_string(data.get("profile_id"), "profile_id"),
-        provider=cast(PolicyProvider, provider),
-        model_id=_string(data.get("model_id"), "model_id"),
-        route_id=_string(data.get("route_id"), "route_id"),
-        api_key_env=_string(data.get("api_key_env"), "api_key_env"),
-        endpoint=_string(data.get("endpoint"), "endpoint"),
-        endpoint_override_env=endpoint_override,
-        request_api=_string(data.get("request_api"), "request_api"),
-        timeout_seconds=_number(data.get("timeout_seconds"), "timeout_seconds"),
-        max_retries=_integer(data.get("max_retries"), "max_retries"),
-        format_repair_attempts=_integer(
-            data.get("format_repair_attempts"),
-            "format_repair_attempts",
-        ),
-    )
+    request_api = _string(data.get("request_api"), "request_api")
+    if request_api not in {"messages", "responses", "chat_completions"}:
+        raise QualificationConfigError(
+            f"unsupported policy request_api: {request_api}"
+        )
+    try:
+        return PolicyProfile(
+            profile_id=_string(data.get("profile_id"), "profile_id"),
+            provider=cast(PolicyProvider, provider),
+            model_id=_string(data.get("model_id"), "model_id"),
+            route_id=_string(data.get("route_id"), "route_id"),
+            api_key_env=_string(data.get("api_key_env"), "api_key_env"),
+            endpoint=_string(data.get("endpoint"), "endpoint"),
+            endpoint_override_env=endpoint_override,
+            request_api=cast(PolicyRequestAPI, request_api),
+            timeout_seconds=_number(
+                data.get("timeout_seconds"), "timeout_seconds"
+            ),
+            max_retries=_integer(data.get("max_retries"), "max_retries"),
+            format_repair_attempts=_integer(
+                data.get("format_repair_attempts"),
+                "format_repair_attempts",
+            ),
+        )
+    except ValueError as exc:
+        raise QualificationConfigError(str(exc)) from exc
 
 
 def _load_mem0(path: Path) -> Mem0Profile:

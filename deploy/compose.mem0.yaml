@@ -2,13 +2,14 @@ name: lhmsb-mem0
 
 services:
   qdrant:
-    image: "${QDRANT_IMAGE:-qdrant/qdrant}@${QDRANT_IMAGE_DIGEST:?set QDRANT_IMAGE_DIGEST}"
+    image: "${QDRANT_RUNTIME_IMAGE_ID:?set QDRANT_RUNTIME_IMAGE_ID}"
+    pull_policy: never
     restart: unless-stopped
     expose:
       - "6333"
       - "6334"
     volumes:
-      - "${LHMSB_DATA_ROOT:-/data/lhmsb}/qdrant:/qdrant/storage"
+      - "${LHMSB_DATA_ROOT:-/data/lhmsb}/qdrant/${LHMSB_QDRANT_NAMESPACE:-shared}:/qdrant/storage"
     healthcheck:
       test:
         - CMD-SHELL
@@ -21,7 +22,8 @@ services:
       - backend
 
   embedding:
-    image: "${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference}@${TEI_IMAGE_DIGEST:?set TEI_IMAGE_DIGEST}"
+    image: "${TEI_RUNTIME_IMAGE_ID:?set TEI_RUNTIME_IMAGE_ID}"
+    pull_policy: never
     restart: unless-stopped
     command:
       - --model-id
@@ -59,7 +61,8 @@ services:
       - backend
 
   reranker:
-    image: "${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference}@${TEI_IMAGE_DIGEST:?set TEI_IMAGE_DIGEST}"
+    image: "${TEI_RUNTIME_IMAGE_ID:?set TEI_RUNTIME_IMAGE_ID}"
+    pull_policy: never
     restart: unless-stopped
     command:
       - --model-id
@@ -98,6 +101,7 @@ services:
 
   worker:
     image: "${LHMSB_WORKER_IMAGE_DIGEST:?set LHMSB_WORKER_IMAGE_DIGEST}"
+    pull_policy: never
     user: "${LHMSB_WORKER_UID:?set LHMSB_WORKER_UID}:${LHMSB_WORKER_GID:?set LHMSB_WORKER_GID}"
     init: true
     depends_on:

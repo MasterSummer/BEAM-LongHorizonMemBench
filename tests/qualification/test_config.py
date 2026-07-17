@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,11 @@ from lhmsb.qualification.config import (
     QualificationConfigError,
     build_qualification_tasks,
     load_qualification_config,
+)
+from lhmsb.qualification.schema import (
+    PolicyProfile,
+    PolicyProvider,
+    PolicyRequestAPI,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +49,57 @@ def _copied_config(
 
 
 _MISSING = object()
+
+
+@pytest.mark.parametrize(
+    ("provider", "request_api"),
+    (
+        ("anthropic", "responses"),
+        ("openai", "messages"),
+        ("deepseek", "responses"),
+        ("openai", "unknown"),
+    ),
+)
+def test_policy_profile_rejects_provider_request_api_mismatch(
+    provider: PolicyProvider,
+    request_api: PolicyRequestAPI,
+) -> None:
+    valid = PolicyProfile(
+        profile_id="valid",
+        provider="openai",
+        model_id="gpt-5.6-sol",
+        route_id="opencode_zen",
+        api_key_env="OPENCODE_ZEN_API_KEY",
+        endpoint="https://opencode.ai/zen",
+        endpoint_override_env="OPENCODE_ZEN_BASE_URL",
+        request_api="responses",
+        timeout_seconds=180,
+        max_retries=2,
+        format_repair_attempts=1,
+    )
+
+    with pytest.raises(ValueError, match="request_api"):
+        replace(valid, provider=provider, request_api=request_api)
+
+
+def test_yaml_policy_rejects_provider_request_api_mismatch(
+    tmp_path: Path,
+) -> None:
+    copied_configs = tmp_path / "repo" / "configs"
+    shutil.copytree(ROOT / "configs", copied_configs)
+    policy_path = copied_configs / "models" / "gpt-5.6-sol.yaml"
+    raw = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    assert isinstance(raw, dict)
+    raw["request_api"] = "messages"
+    policy_path.write_text(
+        yaml.safe_dump(raw, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(QualificationConfigError, match="request_api"):
+        load_qualification_config(
+            copied_configs / "experiments" / "mem0_qualification.yaml"
+        )
 
 
 @pytest.mark.parametrize(

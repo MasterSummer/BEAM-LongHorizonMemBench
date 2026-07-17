@@ -60,8 +60,10 @@ export LHMSB_DATA_ROOT="${DATA_ROOT}"
 export LHMSB_LIVE_PREFLIGHT=1
 
 if [[ "${DRY_RUN}" == "1" ]]; then
+  mem0_print_command mem0_restore_archived_images "${DATA_ROOT}"
   mem0_print_command mem0_write_host_manifest "${DATA_ROOT}"
 else
+  mem0_restore_archived_images "${DATA_ROOT}"
   mem0_write_host_manifest "${DATA_ROOT}"
 fi
 

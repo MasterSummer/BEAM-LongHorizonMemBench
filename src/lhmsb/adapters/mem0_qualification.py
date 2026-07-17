@@ -62,6 +62,110 @@ class _ProviderCreateBoundary(Protocol):
     create: Callable[..., object]
 
 
+class _ResponsesClient(Protocol):
+    responses: _ProviderCreateBoundary
+
+
+class _OpenAIResponsesBridge:
+    """Adapt Mem0's chat-shaped LLM interface to OpenAI Responses."""
+
+    def __init__(self, original: object) -> None:
+        client = getattr(original, "client", None)
+        config = getattr(original, "config", None)
+        responses = getattr(client, "responses", None)
+        if not callable(getattr(responses, "create", None)):
+            raise Mem0QualificationError(
+                "responses_bridge_failure",
+                "Mem0 OpenAI client does not expose responses.create",
+            )
+        if config is None:
+            raise Mem0QualificationError(
+                "responses_bridge_failure",
+                "Mem0 OpenAI LLM config is unavailable",
+            )
+        self.client = cast(_ResponsesClient, client)
+        self.config = config
+
+    def generate_response(
+        self,
+        messages: list[dict[str, str]],
+        response_format: object | None = None,
+        tools: list[dict[str, object]] | None = None,
+        tool_choice: object = "auto",
+        **kwargs: object,
+    ) -> str:
+        """Call Responses while preserving Mem0's extraction contract."""
+        if tools:
+            raise Mem0QualificationError(
+                "responses_bridge_failure",
+                "Mem0 Responses bridge does not support tools",
+            )
+        if tool_choice != "auto":
+            raise Mem0QualificationError(
+                "responses_bridge_failure",
+                "Mem0 Responses bridge requires tool_choice='auto'",
+            )
+        if kwargs:
+            raise Mem0QualificationError(
+                "responses_bridge_failure",
+                "Mem0 Responses bridge received unsupported arguments: "
+                + ", ".join(sorted(kwargs)),
+            )
+        model = getattr(self.config, "model", None)
+        if not isinstance(model, str) or not model:
+            raise Mem0QualificationError(
+                "responses_bridge_failure",
+                "Mem0 Responses model is unavailable",
+            )
+        instructions = "\n".join(
+            message["content"]
+            for message in messages
+            if message.get("role") == "system"
+        )
+        input_messages = [
+            dict(message)
+            for message in messages
+            if message.get("role") != "system"
+        ]
+        params: dict[str, object] = {
+            "model": model,
+            "input": input_messages,
+        }
+        if instructions:
+            params["instructions"] = instructions
+        max_tokens = getattr(self.config, "max_tokens", None)
+        if isinstance(max_tokens, int) and not isinstance(max_tokens, bool):
+            params["max_output_tokens"] = max_tokens
+        for name in ("temperature", "top_p"):
+            value = getattr(self.config, name, None)
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                params[name] = value
+        if response_format is not None:
+            if not isinstance(response_format, Mapping):
+                raise Mem0QualificationError(
+                    "responses_bridge_failure",
+                    "Mem0 Responses response_format must be a mapping",
+                )
+            params["text"] = {"format": dict(response_format)}
+        response = self.client.responses.create(**params)
+        returned_model = getattr(response, "model", None)
+        if returned_model != model:
+            raise Mem0QualificationError(
+                "provider_model_unavailable",
+                f"requested {model!r}, provider returned {returned_model!r}",
+            )
+        callback = getattr(self.config, "response_callback", None)
+        if callable(callback):
+            callback(self, response, params)
+        output_text = getattr(response, "output_text", None)
+        if not isinstance(output_text, str):
+            raise Mem0QualificationError(
+                "responses_bridge_failure",
+                "Responses result does not expose output_text",
+            )
+        return output_text
+
+
 @dataclass(frozen=True)
 class NativeMemoryEvent:
     operation_id: str
@@ -232,18 +336,29 @@ class Mem0QualificationAdapter:
         candidate_k: int = 20,
         inventory_limit: int = 10000,
         collection_count: Callable[[], int] | None = None,
+        internal_llm_request_api: str | None = None,
     ) -> Mem0QualificationAdapter:
         """Lazily import Mem0 after disabling product telemetry."""
+        llm = _config_section(config, "llm")
+        llm_provider = _text(llm.get("provider"))
+        _validate_internal_llm_request_api(
+            llm_provider,
+            internal_llm_request_api,
+        )
         _disable_mem0_telemetry()
         module = _load_mem0()
         memory_class = module.Memory
         backend = memory_class.from_config(config)
+        if internal_llm_request_api == "responses":
+            original_llm = getattr(backend, "llm", None)
+            backend.llm = _OpenAIResponsesBridge(original_llm)
         usage_events: list[ProviderUsageEvent] = []
         _install_usage_instrumentation(
             backend,
             config,
             usage_events,
             call_prefix=f"{user_id}:{run_id}",
+            internal_llm_request_api=internal_llm_request_api,
         )
         return cls(
             backend,
@@ -557,8 +672,10 @@ def _openai_sdk_base_url(value: str) -> str:
     parsed = urlparse(value)
     if not parsed.scheme or not parsed.netloc:
         raise ValueError("OpenAI base URL must be absolute")
-    if parsed.path.rstrip("/") == "":
-        parsed = parsed._replace(path="/v1")
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/v1"):
+        path = f"{path}/v1" if path else "/v1"
+        parsed = parsed._replace(path=path)
     return parsed.geturl().rstrip("/")
 
 
@@ -602,12 +719,38 @@ def _native_events(
     return tuple(events)
 
 
+def _validate_internal_llm_request_api(
+    provider: str,
+    request_api: str | None,
+) -> None:
+    if request_api is None:
+        return
+    supported = {"messages", "responses", "chat_completions"}
+    if request_api not in supported:
+        raise Mem0QualificationError(
+            "unsupported_request_api",
+            f"unsupported Mem0 internal request API: {request_api!r}",
+        )
+    compatible = {
+        "anthropic": {"messages"},
+        "deepseek": {"chat_completions"},
+        "openai": {"responses", "chat_completions"},
+    }
+    if request_api not in compatible.get(provider, set()):
+        raise Mem0QualificationError(
+            "unsupported_request_api",
+            "Mem0 internal request API does not match provider: "
+            f"provider={provider!r}; request_api={request_api!r}",
+        )
+
+
 def _install_usage_instrumentation(
     backend: object,
     config: Mapping[str, object],
     sink: list[ProviderUsageEvent],
     *,
     call_prefix: str,
+    internal_llm_request_api: str | None,
 ) -> None:
     llm = _config_section(config, "llm")
     llm_provider = _text(llm.get("provider"))
@@ -623,11 +766,13 @@ def _install_usage_instrumentation(
             else "https://api.openai.com"
         ),
     )
-    llm_path = (
-        ("llm", "client", "messages")
-        if llm_provider == "anthropic"
-        else ("llm", "client", "chat", "completions")
-    )
+    llm_path: tuple[str, ...]
+    if internal_llm_request_api == "responses":
+        llm_path = ("llm", "client", "responses")
+    elif llm_provider == "anthropic":
+        llm_path = ("llm", "client", "messages")
+    else:
+        llm_path = ("llm", "client", "chat", "completions")
     _wrap_provider_create(
         backend,
         llm_path,
@@ -828,7 +973,11 @@ def _provider_token_usage(
         ("completion_tokens", "output_tokens"),
     )
     prompt_details = getattr(usage, "prompt_tokens_details", None)
+    if prompt_details is None:
+        prompt_details = getattr(usage, "input_tokens_details", None)
     completion_details = getattr(usage, "completion_tokens_details", None)
+    if completion_details is None:
+        completion_details = getattr(usage, "output_tokens_details", None)
     cached_tokens = _first_integer_attribute(
         prompt_details,
         ("cached_tokens",),

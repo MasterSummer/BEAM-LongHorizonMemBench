@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from lhmsb.qualification.preflight import (
     PreflightError,
     PreflightGate,
     _gate_controlled_mem0_lifecycle,
+    _gate_host_runtime,
     _host_runtime_inventory,
     current_repository_snapshot,
     default_preflight_gates,
@@ -185,7 +187,71 @@ def test_containerized_preflight_reads_host_runtime_manifest(
 
     assert inventory["docker"] == "Docker version 28.0.0"
     assert inventory["compose"] == "Docker Compose version v2.35.0"
-    assert len(inventory["gpus"]) == 2
+    gpus = inventory["gpus"]
+    assert isinstance(gpus, list)
+    assert len(gpus) == 2
+
+
+@pytest.mark.parametrize(
+    ("gpu_lines", "environment", "match"),
+    (
+        (
+            [
+                "0, NVIDIA A100-SXM4-80GB, GPU-a, 81920 MiB",
+                "1, NVIDIA H100 80GB HBM3, GPU-b, 81920 MiB",
+            ],
+            {},
+            "A100",
+        ),
+        (
+            [
+                "0, NVIDIA A100-SXM4-80GB, GPU-a, 81920 MiB",
+                "1, NVIDIA A100-SXM4-80GB, GPU-b, 81920 MiB",
+            ],
+            {
+                "LHMSB_EMBEDDING_GPU_ID": "0",
+                "LHMSB_RERANKER_GPU_ID": "GPU-a",
+            },
+            "distinct",
+        ),
+    ),
+)
+def test_host_runtime_rejects_invalid_selected_a100_pair(
+    gpu_lines: list[str],
+    environment: dict[str, str],
+    match: str,
+    tmp_path: Path,
+) -> None:
+    host_manifest = tmp_path / "data" / "manifests" / "host.json"
+    host_manifest.parent.mkdir(parents=True)
+    host_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "docker": "Docker version 28.0.0",
+                "compose": "Docker Compose version v2.35.0",
+                "gpus": gpu_lines,
+            }
+        ),
+        encoding="utf-8",
+    )
+    context = PreflightContext(
+        repository_root=tmp_path,
+        dataset_root=tmp_path / "dataset",
+        config_path=tmp_path / "config.yaml",
+        data_root=tmp_path / "data",
+        allow_dirty=False,
+        repository_only=False,
+        environment={
+            "LHMSB_CONTAINERIZED": "1",
+            "LHMSB_HOST_MANIFEST": str(host_manifest),
+            "LHMSB_LIVE_PREFLIGHT": "1",
+            **environment,
+        },
+    )
+
+    with pytest.raises(PreflightError, match=match):
+        _gate_host_runtime(context)
 
 
 def test_live_preflight_includes_real_controlled_mem0_lifecycle_gate() -> None:
@@ -204,6 +270,7 @@ def test_controlled_mem0_lifecycle_checks_all_policy_profiles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     closed_profiles = 0
+    request_apis: list[str | None] = []
 
     class FakeQdrantClient:
         def __init__(self, **_: object) -> None:
@@ -245,19 +312,24 @@ def test_controlled_mem0_lifecycle_checks_all_policy_profiles(
                 usage_events=(SimpleNamespace(component="embedding"),),
             )
 
+    def fake_create_live(*args: object, **kwargs: object) -> FakeAdapter:
+        request_api = kwargs.get("internal_llm_request_api")
+        assert request_api is None or isinstance(request_api, str)
+        request_apis.append(request_api)
+        return FakeAdapter()
+
     monkeypatch.setattr(
         preflight_module,
         "build_mem0_live_config",
         lambda *args, **kwargs: {},
     )
     monkeypatch.setattr(
-        preflight_module.Mem0QualificationAdapter,
-        "create_live",
-        lambda *args, **kwargs: FakeAdapter(),
+        "lhmsb.qualification.preflight.Mem0QualificationAdapter.create_live",
+        fake_create_live,
     )
-    real_import = preflight_module.importlib.import_module
+    real_import = importlib.import_module
     monkeypatch.setattr(
-        preflight_module.importlib,
+        importlib,
         "import_module",
         lambda name: (
             SimpleNamespace(QdrantClient=FakeQdrantClient)
@@ -291,4 +363,5 @@ def test_controlled_mem0_lifecycle_checks_all_policy_profiles(
         "deepseek_v4_pro",
         "gpt_5_6_sol",
     ]
+    assert request_apis == ["messages", "chat_completions", "responses"]
     assert closed_profiles == 3

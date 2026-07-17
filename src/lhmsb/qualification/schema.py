@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 PolicyProvider = Literal["anthropic", "deepseek", "openai"]
+PolicyRequestAPI = Literal["messages", "responses", "chat_completions"]
 Mem0Track = Literal["controlled", "native"]
 QualificationCondition = Literal[
     "workspace_only",
@@ -25,10 +26,25 @@ class PolicyProfile:
     api_key_env: str
     endpoint: str
     endpoint_override_env: str | None
-    request_api: str
+    request_api: PolicyRequestAPI
     timeout_seconds: float
     max_retries: int
     format_repair_attempts: int
+
+    def __post_init__(self) -> None:
+        expected = {
+            "anthropic": "messages",
+            "deepseek": "chat_completions",
+            "openai": "responses",
+        }.get(self.provider)
+        if expected is None:
+            raise ValueError(f"unsupported policy provider: {self.provider!r}")
+        if self.request_api != expected:
+            raise ValueError(
+                "policy request_api does not match provider: "
+                f"provider={self.provider!r}; expected={expected!r}; "
+                f"received={self.request_api!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -102,6 +118,7 @@ __all__ = [
     "Mem0Track",
     "PolicyProfile",
     "PolicyProvider",
+    "PolicyRequestAPI",
     "QualificationCondition",
     "QualificationTask",
     "ReadoutKind",

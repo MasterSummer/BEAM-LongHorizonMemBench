@@ -142,14 +142,19 @@ deploy/compose.<system>.yaml
 在服务器上：
 
 ```bash
-git clone <repository-url> BEAM-LongHorizonMemBench
+read -r -p 'Repository URL: ' LHMSB_REPOSITORY_URL
+git clone "${LHMSB_REPOSITORY_URL}" BEAM-LongHorizonMemBench
 cd BEAM-LongHorizonMemBench
 git fetch --all --tags
-git checkout <pinned-commit-or-main>
+read -r -p 'Published release commit SHA: ' LHMSB_RELEASE_SHA
+test -n "${LHMSB_RELEASE_SHA}"
+git checkout --detach "${LHMSB_RELEASE_SHA}"
+test "$(git rev-parse HEAD)" = "${LHMSB_RELEASE_SHA}"
 git status --short
 ```
 
-正式运行要求 `git status --short` 为空。记录：
+不要以可移动的 `main` 名称直接启动正式实验。合并后先记录并发布精确 commit，
+再把它填入 `LHMSB_RELEASE_SHA`。正式运行要求 `git status --short` 为空。记录：
 
 ```bash
 git rev-parse HEAD
@@ -204,12 +209,14 @@ scripts/bootstrap_server.sh \
 3. 校验 Mem0 wheel；
 4. 下载两个固定 revision 的 BGE 模型并逐文件 hash；
 5. 拉取 Qdrant、TEI 和 Python 镜像并解析 OCI digest；
-6. 构建固定代码 commit 的非 root worker image；
+6. 为 Qdrant/TEI 建立确定性本地归档别名，记录平台 image ID，并构建固定
+   代码 commit 的非 root worker image；
 7. 保存镜像归档和 image/model/wheel manifests；
 8. 使用 `configs/experiments/mem0_controlled_zen.yaml` 运行不产生 provider
    调用的 repository-only preflight。
 
-bootstrap 完成后，`.env` 中的 image digest 字段会被写入解析后的值。
+bootstrap 完成后，`.env` 中的 registry digest 与 runtime image ID 字段会被
+写入解析后的值。
 脚本会把 `.env` 权限固定为 `0600`。host manifest 同时记录 GPU UUID、
 显存、driver version 和 compute capability。
 
@@ -273,26 +280,54 @@ scripts/run_mem0_qualification.sh \
 
 ## 6. Slurm 工作流
 
-集群允许 compute node 运行 Docker 时：
+集群允许 compute node 运行 Docker 时，正式入口是单个 qualification job。
+它会在同一个 allocation 中依次执行 image restore、host/GPU manifest、完整
+live preflight、plan、matrix 和 validate，因此不会发生 preflight/qualification
+并发竞态，也不会复用其他节点的硬件身份。
+
+前提是仓库、`.env` 和 `/data/lhmsb` 对 compute node 可见，并且 5.3 的
+bootstrap 已在这个共享 data root 生成 `images/{qdrant,tei,worker}.tar`。
+job 会把这些归档加载到实际分配节点的 Docker daemon，校验加载后的 Qdrant、
+TEI 与 worker image ID，再以 `pull_policy: never` 启动；因此不依赖 RepoDigest
+能否被 `docker load` 恢复，也不会静默访问 registry。login node 与 compute
+node 不需要共用本地镜像缓存。每个 job 使用独立的 Compose project 和
+Qdrant namespace，并在退出时执行 `docker compose down`。共享的 host manifest
+与 preflight report 由 `/data/lhmsb/locks/mem0-slurm.lock` 串行保护；若已有
+另一个 Mem0 Slurm job，新的 job 会立即失败而不是并发污染状态。
 
 ```bash
 export LHMSB_DATA_ROOT=/data/lhmsb
 export LHMSB_ENV_FILE="$PWD/.env"
-
-sbatch deploy/slurm/mem0_preflight.sbatch
-
 export LHMSB_RUN_NAME=mem0-q1-$(git rev-parse --short HEAD)
-sbatch deploy/slurm/mem0_qualification.sbatch
+
+QUALIFICATION_JOB_ID="$(sbatch --parsable deploy/slurm/mem0_qualification.sbatch)"
+printf 'qualification job: %s\n' "${QUALIFICATION_JOB_ID}"
 ```
 
-默认资源是 `gpu:a100:2`。如果集群 GRES 名称不同：
+默认资源是 `gpu:a100:2`。脚本从 `SLURM_JOB_GPUS` 取得两个全局 GPU ID，
+分别传给 embedding 与 reranker；preflight 会拒绝重复 ID、未知 ID 或非 A100
+设备。如果集群 GRES 名称不同，在提交时覆盖：
 
 ```bash
-sbatch --gres=gpu:a100:2 deploy/slurm/mem0_preflight.sbatch
+export LHMSB_SLURM_GRES="gpu:a100"
+sbatch --gres="${LHMSB_SLURM_GRES}:2" \
+  deploy/slurm/mem0_qualification.sbatch
 ```
 
-Slurm 只负责调度；容器、数据集、task identity、worker CLI 和报告格式与
-Compose 路径完全相同。
+如果集群不导出可用的 `SLURM_JOB_GPUS`，必须同时显式导出
+`LHMSB_EMBEDDING_GPU_ID` 与 `LHMSB_RERANKER_GPU_ID`，且二者不同。独立的
+`mem0_preflight.sbatch` 仅用于诊断；不要再把它与 qualification 无依赖地
+并行提交。确需先单独诊断时，等待它成功后再提交 qualification：
+
+```bash
+PREFLIGHT_JOB_ID="$(sbatch --parsable deploy/slurm/mem0_preflight.sbatch)"
+sbatch --dependency="afterok:${PREFLIGHT_JOB_ID}" \
+  deploy/slurm/mem0_qualification.sbatch
+```
+
+qualification job 仍会在自己的节点重新执行一次完整 preflight，这是有意的
+节点身份校验。Slurm 只负责调度；数据集、task identity、worker CLI 和报告
+格式与 Compose 路径完全相同。
 
 ## 7. 恢复和重试
 

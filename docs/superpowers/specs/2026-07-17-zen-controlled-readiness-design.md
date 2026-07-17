@@ -2,8 +2,11 @@
 
 ## Status
 
-Approved direction from the 2026-07-17 credential and server-readiness
-discussion. This document fixes the implementation boundary before code changes.
+Superseded after the 2026-07-17 scope clarification. The implemented slice is
+limited to the Controlled track: Claude Opus 4.8 and GPT-5.6 Sol use OpenCode
+Zen, DeepSeek V4 Pro uses its official API, and live tests remain server-only.
+Result-schema route propagation, Native-track credential work, and the broader
+report changes below are deferred. This document is retained as design history.
 
 ## Goal
 

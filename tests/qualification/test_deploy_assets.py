@@ -57,15 +57,23 @@ def test_compose_has_isolated_worker_qdrant_and_two_tei_services() -> None:
 
 def test_compose_pins_images_gpus_and_shared_data_root() -> None:
     text = COMPOSE.read_text(encoding="utf-8")
-    assert "QDRANT_IMAGE_DIGEST:?" in text
-    assert "TEI_IMAGE_DIGEST:?" in text
+    assert "QDRANT_RUNTIME_IMAGE_ID:?" in text
+    assert "TEI_RUNTIME_IMAGE_ID:?" in text
     assert "LHMSB_WORKER_IMAGE_DIGEST:?" in text
     assert "LHMSB_EMBEDDING_GPU_ID:-0" in text
     assert "LHMSB_RERANKER_GPU_ID:-1" in text
+    assert "LHMSB_QDRANT_NAMESPACE:-shared" in text
     assert "${LHMSB_DATA_ROOT:-/data/lhmsb}:/data/lhmsb" in text
     assert "internal: true" in text
     assert "HTTP_PROXY" not in text
     assert "HTTPS_PROXY" not in text
+    compose = _compose()
+    services = compose["services"]
+    assert isinstance(services, dict)
+    for name in ("qdrant", "embedding", "reranker", "worker"):
+        service = services[name]
+        assert isinstance(service, dict)
+        assert service["pull_policy"] == "never"
 
 
 def test_compose_passes_controlled_zen_and_deepseek_provider_controls() -> None:
@@ -149,6 +157,12 @@ def test_slurm_uses_two_a100s_and_the_same_frozen_cli_contract() -> None:
         assert "/data/lhmsb" in text
         assert "candidate-k" not in text
         assert "visible-k" not in text
+        assert "mem0_acquire_slurm_lock" in text
+        assert "COMPOSE_PROJECT_NAME" in text
+        assert "LHMSB_QDRANT_NAMESPACE" in text
+        assert "--project-name" in text
+        assert "trap cleanup EXIT" in text
+        assert "down --remove-orphans" in text
     assert "preflight --dataset" in preflight
     assert "--repository-only" not in preflight
     assert "mem0_write_host_manifest" in preflight
@@ -156,6 +170,14 @@ def test_slurm_uses_two_a100s_and_the_same_frozen_cli_contract() -> None:
     assert "run-matrix --run-dir" in qualification
     assert "--keep-going" in qualification
     assert "validate --report" in qualification
+    assert "preflight --dataset" in qualification
+    assert qualification.index("preflight --dataset") < qualification.index(
+        "run-matrix --run-dir"
+    )
+    assert "mem0_restore_archived_images" in qualification
+    assert "mem0_configure_slurm_gpus" in qualification
+    assert "mem0_write_host_manifest" in qualification
+    assert "LHMSB_LIVE_PREFLIGHT=1" in qualification
     assert "LHMSB_LIVE_QUALIFICATION=1" in qualification
 
 
@@ -171,6 +193,8 @@ def test_env_example_declares_only_expected_provider_and_service_controls() -> N
         "LHMSB_RERANKER_URL=http://reranker:80",
         "LHMSB_WORKER_UID=",
         "LHMSB_WORKER_GID=",
+        "QDRANT_RUNTIME_IMAGE_ID=",
+        "TEI_RUNTIME_IMAGE_ID=",
     ):
         assert name in text
     current_provider_section = text.split(

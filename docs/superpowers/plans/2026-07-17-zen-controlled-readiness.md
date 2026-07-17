@@ -1,5 +1,11 @@
 # Zen-Controlled Qualification Readiness Implementation Plan
 
+> **Status (2026-07-17):** Superseded after Task 1 by the narrower
+> Controlled-only server-readiness scope. The implemented path uses OpenCode
+> Zen only for Claude Opus 4.8 and GPT-5.6 Sol, keeps DeepSeek V4 Pro direct,
+> and defers Native-track and result-schema/report expansion. The checklist
+> below is retained as implementation history, not as the current runbook.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the frozen Mem0 Software qualification runnable on the A100 server with Claude Opus 4.8 and GPT-5.6 Sol through OpenCode Zen, DeepSeek V4 Pro through the official DeepSeek API, and no standard OpenAI API dependency in the first Controlled-only run.

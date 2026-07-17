@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -62,6 +64,14 @@ def test_bootstrap_has_exact_release_model_wheel_and_image_manifests() -> None:
     assert "manifests/models.json" in text
     assert "manifests/wheels.json" in text
     assert "manifests/images.json" in text
+    assert 'QDRANT_RUNTIME_ALIAS="lhmsb/qdrant:qualification"' in text
+    assert 'TEI_RUNTIME_ALIAS="lhmsb/tei:qualification"' in text
+    assert 'docker tag "${QDRANT_IMAGE}@${QDRANT_IMAGE_DIGEST}"' in text
+    assert 'docker tag "${TEI_IMAGE}@${TEI_IMAGE_DIGEST}"' in text
+    assert '"qdrant_runtime": sys.argv[5]' in text
+    assert '"tei_runtime": sys.argv[6]' in text
+    assert '"QDRANT_RUNTIME_IMAGE_ID"' in text
+    assert '"TEI_RUNTIME_IMAGE_ID"' in text
     assert "preflight --repository-only" in text
 
 
@@ -244,6 +254,10 @@ def test_preflight_generates_host_manifest_before_entering_worker() -> None:
     assert text.index("mem0_write_host_manifest") < text.index(
         "run --rm worker"
     )
+    assert "mem0_restore_archived_images" in text
+    assert text.index("mem0_restore_archived_images") < text.index(
+        "run --rm worker"
+    )
 
 
 def test_host_manifest_captures_gpu_identity_driver_and_compute_capability() -> None:
@@ -254,6 +268,119 @@ def test_host_manifest_captures_gpu_identity_driver_and_compute_capability() -> 
     assert (
         "--query-gpu=index,name,uuid,memory.total,driver_version,compute_cap"
         in text
+    )
+    assert "mem0_configure_slurm_gpus" in text
+    assert "SLURM_JOB_GPUS" in text
+    assert "mem0_restore_archived_images" in text
+    for archive in ("qdrant.tar", "tei.tar", "worker.tar"):
+        assert archive in text
+    assert "mem0_verify_runtime_images" in text
+    assert "lhmsb/qdrant:qualification" in text
+    assert "lhmsb/tei:qualification" in text
+    assert "qdrant_runtime" in text
+    assert "tei_runtime" in text
+
+
+def test_slurm_gpu_helper_exports_two_allocated_global_ids() -> None:
+    environment = dict(os.environ)
+    environment["SLURM_JOB_GPUS"] = "3, GPU-abc"
+    environment["LHMSB_EMBEDDING_GPU_ID"] = "8"
+    environment["LHMSB_RERANKER_GPU_ID"] = "9"
+
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "source scripts/lib/mem0_common.sh; "
+                "mem0_configure_slurm_gpus; "
+                "printf '%s|%s\\n' \"${LHMSB_EMBEDDING_GPU_ID}\" "
+                '"${LHMSB_RERANKER_GPU_ID}"'
+            ),
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "3|GPU-abc\n"
+
+
+def test_slurm_helpers_lock_the_shared_state_and_restore_job_images() -> None:
+    text = (ROOT / "scripts" / "lib" / "mem0_common.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "mem0_acquire_slurm_lock" in text
+    assert "flock -n" in text
+    assert "another Mem0 Slurm job owns" in text
+
+
+def test_runtime_image_verifier_exports_manifest_image_ids(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    manifest = data_root / "manifests" / "images.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "python_base": "sha256:python",
+                "qdrant": "sha256:qdrant-registry",
+                "tei": "sha256:tei-registry",
+                "qdrant_runtime": "sha256:qdrant-runtime",
+                "tei_runtime": "sha256:tei-runtime",
+                "worker": "sha256:worker-runtime",
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "${5:-}" in
+  lhmsb/qdrant:qualification) printf 'sha256:qdrant-runtime\\n' ;;
+  lhmsb/tei:qualification) printf 'sha256:tei-runtime\\n' ;;
+  sha256:worker-runtime) printf 'sha256:worker-runtime\\n' ;;
+  *) exit 9 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    environment = dict(os.environ)
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    environment["TEST_DATA_ROOT"] = str(data_root)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "source scripts/lib/mem0_common.sh; "
+                'mem0_verify_runtime_images "${TEST_DATA_ROOT}"; '
+                "printf '%s|%s|%s\\n' \"${QDRANT_RUNTIME_IMAGE_ID}\" "
+                "\"${TEI_RUNTIME_IMAGE_ID}\" "
+                '"${LHMSB_WORKER_IMAGE_DIGEST}"'
+            ),
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == (
+        "sha256:qdrant-runtime|sha256:tei-runtime|"
+        "sha256:worker-runtime\n"
     )
 
 

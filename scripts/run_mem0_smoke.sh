@@ -60,6 +60,12 @@ done
 export LHMSB_DATA_ROOT="${DATA_ROOT}"
 export LHMSB_LIVE_QUALIFICATION=1
 
+if [[ "${DRY_RUN}" == "1" ]]; then
+  mem0_print_command mem0_verify_runtime_images "${DATA_ROOT}"
+else
+  mem0_verify_runtime_images "${DATA_ROOT}"
+fi
+
 mem0_compose "${REPO_ROOT}" "${ENV_FILE}" up --detach --wait \
   qdrant embedding reranker
 mem0_compose "${REPO_ROOT}" "${ENV_FILE}" run --rm \

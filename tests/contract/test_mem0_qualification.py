@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from anthropic import Anthropic
+from openai import OpenAI
 
 from lhmsb.adapters.mem0_qualification import (
     Mem0QualificationAdapter,
     Mem0QualificationError,
     ProviderUsageEvent,
+    _OpenAIResponsesBridge,
     _provider_token_usage,
     build_mem0_live_config,
 )
-from lhmsb.qualification.schema import Mem0Profile, PolicyProfile
+from lhmsb.qualification.schema import (
+    Mem0Profile,
+    PolicyProfile,
+    PolicyProvider,
+    PolicyRequestAPI,
+)
 
 
 class FakeMem0V2:
@@ -44,21 +55,22 @@ class FakeMem0V2:
         self.closed = True
 
 
-def _policy(provider: str = "openai") -> PolicyProfile:
-    model = {
-        "openai": "gpt-5.6-sol",
-        "anthropic": "claude-opus-4-8",
-        "deepseek": "deepseek-v4-pro",
-    }[provider]
+def _policy(provider: PolicyProvider = "openai") -> PolicyProfile:
+    values: dict[PolicyProvider, tuple[str, PolicyRequestAPI]] = {
+        "openai": ("gpt-5.6-sol", "responses"),
+        "anthropic": ("claude-opus-4-8", "messages"),
+        "deepseek": ("deepseek-v4-pro", "chat_completions"),
+    }
+    model, request_api = values[provider]
     return PolicyProfile(
         profile_id=provider,
-        provider=provider,  # type: ignore[arg-type]
+        provider=provider,
         model_id=model,
         route_id=f"{provider}_direct",
         api_key_env=f"{provider.upper()}_API_KEY",
         endpoint=f"https://{provider}.example",
         endpoint_override_env=None,
-        request_api="responses",
+        request_api=request_api,
         timeout_seconds=30,
         max_retries=1,
         format_repair_attempts=1,
@@ -311,6 +323,358 @@ def test_openai_mem0_clients_receive_v1_base_url(tmp_path: Path) -> None:
     )
 
 
+def test_zen_openai_mem0_client_receives_nested_v1_base_url(
+    tmp_path: Path,
+) -> None:
+    policy = _policy("openai")
+    policy = replace(
+        policy,
+        endpoint="https://opencode.ai/zen",
+        route_id="opencode_zen",
+    )
+    config = build_mem0_live_config(
+        _profile("controlled"),
+        policy=policy,
+        internal_llm_api_key="zen-secret",
+        native_openai_api_key="unused",
+        qdrant_url="http://qdrant:6333",
+        collection_name="controlled_zen_collection",
+        history_db_path=tmp_path / "controlled-zen.sqlite",
+        embedding_base_url="http://embedding:80",
+        embedding_dimension=1024,
+    )
+
+    assert config["llm"]["config"]["openai_base_url"] == (  # type: ignore[index]
+        "https://opencode.ai/zen/v1"
+    )
+
+
+def test_anthropic_sdk_posts_mem0_write_to_exact_zen_endpoint(
+    tmp_path: Path,
+) -> None:
+    policy = replace(
+        _policy("anthropic"),
+        endpoint="https://opencode.ai/zen",
+        route_id="opencode_zen",
+    )
+    config = build_mem0_live_config(
+        _profile("controlled"),
+        policy=policy,
+        internal_llm_api_key="zen-secret",
+        native_openai_api_key="unused",
+        qdrant_url="http://qdrant:6333",
+        collection_name="controlled_zen_anthropic_collection",
+        history_db_path=tmp_path / "controlled-zen-anthropic.sqlite",
+        embedding_base_url="http://embedding:80",
+        embedding_dimension=1024,
+    )
+    llm = config["llm"]
+    assert isinstance(llm, dict)
+    settings = llm["config"]
+    assert isinstance(settings, dict)
+    base_url = settings["anthropic_base_url"]
+    assert base_url == "https://opencode.ai/zen"
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [{"type": "text", "text": '{"memory": []}'}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 10, "output_tokens": 3},
+            },
+        )
+
+    client = Anthropic(
+        api_key="not-a-real-secret",
+        base_url=base_url,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=0,
+    )
+    try:
+        client.messages.create(
+            model="claude-opus-4-8",
+            max_tokens=321,
+            system="Extract durable memory.",
+            messages=[
+                {"role": "user", "content": "The current branch is v2."}
+            ],
+        )
+    finally:
+        client.close()
+
+    assert seen == ["https://opencode.ai/zen/v1/messages"]
+
+
+def test_openai_responses_bridge_posts_json_mode_to_exact_zen_endpoint() -> None:
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), json.loads(request.content)))
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "model": "gpt-5.6-sol",
+                "output": [
+                    {
+                        "id": "msg_1",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"memory": []}',
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "input_tokens_details": {
+                        "cached_tokens": 2,
+                        "cache_write_tokens": 0,
+                    },
+                    "output_tokens": 3,
+                    "output_tokens_details": {"reasoning_tokens": 1},
+                    "total_tokens": 13,
+                },
+            },
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = OpenAI(
+        api_key="not-a-real-secret",
+        base_url="https://opencode.ai/zen/v1",
+        http_client=http_client,
+    )
+    original = SimpleNamespace(
+        client=client,
+        config=SimpleNamespace(
+            model="gpt-5.6-sol",
+            max_tokens=321,
+            temperature=0.1,
+            top_p=0.1,
+            response_callback=None,
+        ),
+    )
+    bridge = _OpenAIResponsesBridge(original)
+    try:
+        output = bridge.generate_response(
+            messages=[
+                {"role": "system", "content": "Extract durable memory."},
+                {"role": "user", "content": "The current branch is v2."},
+            ],
+            response_format={"type": "json_object"},
+        )
+    finally:
+        client.close()
+
+    assert output == '{"memory": []}'
+    assert seen[0][0] == "https://opencode.ai/zen/v1/responses"
+    body = seen[0][1]
+    assert body["model"] == "gpt-5.6-sol"
+    assert body["instructions"] == "Extract durable memory."
+    assert body["input"] == [
+        {"role": "user", "content": "The current branch is v2."}
+    ]
+    assert body["max_output_tokens"] == 321
+    assert body["text"] == {"format": {"type": "json_object"}}
+
+
+def test_openai_responses_bridge_rejects_unimplemented_tool_translation() -> None:
+    original = SimpleNamespace(
+        client=SimpleNamespace(responses=SimpleNamespace(create=lambda **_: None)),
+        config=SimpleNamespace(
+            model="gpt-5.6-sol",
+            max_tokens=321,
+            temperature=0.1,
+            top_p=0.1,
+            response_callback=None,
+        ),
+    )
+
+    with pytest.raises(Mem0QualificationError, match="tools"):
+        _OpenAIResponsesBridge(original).generate_response(
+            messages=[{"role": "user", "content": "remember this"}],
+            tools=[{"type": "function", "function": {"name": "remember"}}],
+        )
+
+
+def test_live_adapter_bridges_and_traces_responses_internal_llm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    requested_urls: list[str] = []
+
+    def responses_handler(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_internal_1",
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "model": "gpt-5.6-sol",
+                "output": [
+                    {
+                        "id": "msg_internal_1",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"memory": []}',
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 11,
+                    "input_tokens_details": {
+                        "cached_tokens": 2,
+                        "cache_write_tokens": 0,
+                    },
+                    "output_tokens": 3,
+                    "output_tokens_details": {"reasoning_tokens": 1},
+                    "total_tokens": 14,
+                },
+            },
+        )
+
+    client = OpenAI(
+        api_key="not-a-real-secret",
+        base_url="https://opencode.ai/zen/v1",
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(responses_handler)
+        ),
+    )
+
+    class EmbeddingResource:
+        def create(self, **_: object) -> object:
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, total_tokens=1),
+                data=[SimpleNamespace(embedding=[0.0, 1.0])],
+            )
+
+    class LiveBackend(FakeMem0V2):
+        def __init__(self) -> None:
+            super().__init__()
+            self.llm = SimpleNamespace(
+                client=client,
+                config=SimpleNamespace(
+                    model="gpt-5.6-sol",
+                    max_tokens=321,
+                    temperature=0.1,
+                    top_p=0.1,
+                    response_callback=None,
+                ),
+            )
+            self.embedding_model = SimpleNamespace(
+                client=SimpleNamespace(embeddings=EmbeddingResource())
+            )
+
+        def add(self, messages: list[dict[str, str]], **kwargs: object) -> object:
+            self.llm.generate_response(
+                messages=messages,
+                response_format={"type": "json_object"},
+            )
+            self.embedding_model.client.embeddings.create(
+                model="bge-test",
+                input=["memory"],
+            )
+            return super().add(messages, **kwargs)
+
+    backend = LiveBackend()
+    monkeypatch.setattr(
+        "lhmsb.adapters.mem0_qualification._load_mem0",
+        lambda: SimpleNamespace(
+            Memory=SimpleNamespace(from_config=lambda _: backend)
+        ),
+    )
+    config = build_mem0_live_config(
+        _profile("controlled"),
+        policy=replace(
+            _policy("openai"),
+            endpoint="https://opencode.ai/zen",
+            route_id="opencode_zen",
+        ),
+        internal_llm_api_key="secret",
+        native_openai_api_key="unused",
+        qdrant_url="http://qdrant:6333",
+        collection_name="responses_usage_collection",
+        history_db_path=tmp_path / "responses-usage.sqlite",
+        embedding_base_url="http://embedding:80",
+        embedding_dimension=1024,
+    )
+    adapter = Mem0QualificationAdapter.create_live(
+        config,
+        user_id="user",
+        run_id="run",
+        internal_llm_request_api="responses",
+    )
+    try:
+        write = adapter.write_session(
+            [{"role": "user", "content": "remember this"}],
+            session_index=0,
+        )
+    finally:
+        adapter.close()
+
+    assert isinstance(backend.llm, _OpenAIResponsesBridge)
+    assert requested_urls == ["https://opencode.ai/zen/v1/responses"]
+    llm_usage = write.usage_events[0]
+    assert llm_usage.component == "memory_internal_llm"
+    assert (
+        llm_usage.input_tokens,
+        llm_usage.output_tokens,
+        llm_usage.cached_tokens,
+        llm_usage.reasoning_tokens,
+    ) == (11, 3, 2, 1)
+
+
+@pytest.mark.parametrize("request_api", ("responses", "unknown"))
+def test_live_adapter_rejects_incompatible_internal_request_api(
+    request_api: str,
+    tmp_path: Path,
+) -> None:
+    config = build_mem0_live_config(
+        _profile("controlled"),
+        policy=_policy("anthropic"),
+        internal_llm_api_key="secret",
+        native_openai_api_key="unused",
+        qdrant_url="http://qdrant:6333",
+        collection_name="invalid_request_api_collection",
+        history_db_path=tmp_path / "invalid-request-api.sqlite",
+        embedding_base_url="http://embedding:80",
+        embedding_dimension=1024,
+    )
+
+    with pytest.raises(Mem0QualificationError, match="request API"):
+        Mem0QualificationAdapter.create_live(
+            config,
+            user_id="user",
+            run_id="run",
+            internal_llm_request_api=request_api,
+        )
+
+
 def test_bare_list_responses_are_supported() -> None:
     backend = FakeMem0V2()
     backend.inventory = [{"id": "m1", "memory": "one"}]
@@ -430,6 +794,19 @@ def test_provider_usage_normalizes_deepseek_cache_and_reasoning_fields() -> None
             completion_tokens=8,
             prompt_cache_hit_tokens=5,
             completion_tokens_details=SimpleNamespace(reasoning_tokens=3),
+        )
+    )
+
+    assert _provider_token_usage(response) == (21, 8, 5, 3)
+
+
+def test_provider_usage_normalizes_responses_cache_and_reasoning_fields() -> None:
+    response = SimpleNamespace(
+        usage=SimpleNamespace(
+            input_tokens=21,
+            output_tokens=8,
+            input_tokens_details=SimpleNamespace(cached_tokens=5),
+            output_tokens_details=SimpleNamespace(reasoning_tokens=3),
         )
     )
 

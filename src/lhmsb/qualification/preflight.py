@@ -522,6 +522,28 @@ def _gate_host_runtime(context: PreflightContext) -> dict[str, object]:
             "preflight_failure",
             f"at least two NVIDIA GPUs are required, found {len(gpu_lines)}",
         )
+    embedding_gpu_id = context.environment.get(
+        "LHMSB_EMBEDDING_GPU_ID",
+        "0",
+    )
+    reranker_gpu_id = context.environment.get(
+        "LHMSB_RERANKER_GPU_ID",
+        "1",
+    )
+    if embedding_gpu_id == reranker_gpu_id:
+        raise PreflightError(
+            "preflight_failure",
+            "embedding and reranker GPU IDs must be distinct",
+        )
+    selected_gpu_lines = tuple(
+        _selected_a100_gpu(gpu_lines, gpu_id)
+        for gpu_id in (embedding_gpu_id, reranker_gpu_id)
+    )
+    if selected_gpu_lines[0] == selected_gpu_lines[1]:
+        raise PreflightError(
+            "preflight_failure",
+            "embedding and reranker must resolve to distinct physical GPUs",
+        )
     context.data_root.mkdir(parents=True, exist_ok=True)
     probe = context.data_root / ".lhmsb-write-probe"
     probe.write_text("ok\n", encoding="utf-8")
@@ -550,9 +572,35 @@ def _gate_host_runtime(context: PreflightContext) -> dict[str, object]:
         "docker": inventory["docker"],
         "compose": inventory["compose"],
         "gpus": gpu_lines,
+        "selected_gpus": selected_gpu_lines,
+        "embedding_gpu_id": embedding_gpu_id,
+        "reranker_gpu_id": reranker_gpu_id,
         "free_bytes": free_bytes,
         "mem0_wheel_sha256": expected,
     }
+
+
+def _selected_a100_gpu(
+    gpu_lines: tuple[str, ...],
+    gpu_id: str,
+) -> str:
+    for line in gpu_lines:
+        fields = tuple(part.strip() for part in line.split(","))
+        matches_index = bool(fields) and gpu_id == fields[0]
+        matches_uuid = len(fields) > 2 and gpu_id == fields[2]
+        if not (matches_index or matches_uuid):
+            continue
+        name = fields[1] if len(fields) > 1 else ""
+        if "A100" not in name.upper():
+            raise PreflightError(
+                "preflight_failure",
+                f"selected GPU {gpu_id!r} is not an NVIDIA A100: {name!r}",
+            )
+        return line
+    raise PreflightError(
+        "preflight_failure",
+        f"selected GPU {gpu_id!r} is absent from the host inventory",
+    )
 
 
 def _gate_image_digests(context: PreflightContext) -> dict[str, object]:
@@ -883,6 +931,7 @@ def _gate_controlled_mem0_lifecycle(
                     user_id=f"preflight-user-{profile.profile_id}",
                     run_id=f"preflight-run-{profile.profile_id}",
                     candidate_k=config.retrieval.candidate_k,
+                    internal_llm_request_api=effective.request_api,
                     collection_count=collection_count,
                 )
                 write = adapter.write_session(

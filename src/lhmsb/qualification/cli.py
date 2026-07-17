@@ -842,6 +842,11 @@ def _live_components(
             user_id=isolation.user_id,
             run_id=isolation.run_id,
             candidate_k=config.retrieval.candidate_k,
+            internal_llm_request_api=(
+                effective_policy.request_api
+                if task.condition == "mem0_controlled"
+                else None
+            ),
             collection_count=lambda: _qdrant_collection_count(
                 qdrant_url,
                 isolation.collection_name,

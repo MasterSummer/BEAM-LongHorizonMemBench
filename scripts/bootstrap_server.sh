@@ -156,6 +156,8 @@ QDRANT_IMAGE_TAG="${QDRANT_IMAGE_TAG:-v1.15.4}"
 TEI_IMAGE="${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference}"
 TEI_IMAGE_TAG="${TEI_IMAGE_TAG:-1.8.0}"
 LHMSB_WORKER_IMAGE="${LHMSB_WORKER_IMAGE:-lhmsb-mem0-worker}"
+QDRANT_RUNTIME_ALIAS="lhmsb/qdrant:qualification"
+TEI_RUNTIME_ALIAS="lhmsb/tei:qualification"
 
 mkdir -p \
   "${DATA_ROOT}/datasets" \
@@ -258,6 +260,14 @@ QDRANT_REFERENCE="${QDRANT_IMAGE}:${QDRANT_IMAGE_TAG}"
 QDRANT_IMAGE_DIGEST="$(resolve_repo_digest "${QDRANT_REFERENCE}")"
 TEI_REFERENCE="${TEI_IMAGE}:${TEI_IMAGE_TAG}"
 TEI_IMAGE_DIGEST="$(resolve_repo_digest "${TEI_REFERENCE}")"
+docker tag "${QDRANT_IMAGE}@${QDRANT_IMAGE_DIGEST}" \
+  "${QDRANT_RUNTIME_ALIAS}"
+docker tag "${TEI_IMAGE}@${TEI_IMAGE_DIGEST}" \
+  "${TEI_RUNTIME_ALIAS}"
+QDRANT_RUNTIME_IMAGE_ID="$(docker image inspect \
+  --format '{{.Id}}' "${QDRANT_RUNTIME_ALIAS}")"
+TEI_RUNTIME_IMAGE_ID="$(docker image inspect \
+  --format '{{.Id}}' "${TEI_RUNTIME_ALIAS}")"
 
 REQUIREMENTS_PATH="${DATA_ROOT}/manifests/qualification-requirements.txt"
 uv export --frozen --extra qualification --no-dev --no-emit-project \
@@ -332,9 +342,9 @@ LHMSB_WORKER_IMAGE_DIGEST="$(docker image inspect \
 docker save --output "${DATA_ROOT}/images/python-base.tar" \
   "${PYTHON_BASE_IMAGE}@${PYTHON_BASE_DIGEST}"
 docker save --output "${DATA_ROOT}/images/qdrant.tar" \
-  "${QDRANT_IMAGE}@${QDRANT_IMAGE_DIGEST}"
+  "${QDRANT_RUNTIME_ALIAS}"
 docker save --output "${DATA_ROOT}/images/tei.tar" \
-  "${TEI_IMAGE}@${TEI_IMAGE_DIGEST}"
+  "${TEI_RUNTIME_ALIAS}"
 docker save --output "${DATA_ROOT}/images/worker.tar" \
   "${LHMSB_WORKER_IMAGE}:qualification"
 
@@ -343,6 +353,8 @@ python3 - \
   "${PYTHON_BASE_DIGEST}" \
   "${QDRANT_IMAGE_DIGEST}" \
   "${TEI_IMAGE_DIGEST}" \
+  "${QDRANT_RUNTIME_IMAGE_ID}" \
+  "${TEI_RUNTIME_IMAGE_ID}" \
   "${LHMSB_WORKER_IMAGE_DIGEST}" <<'PY'
 import json
 import pathlib
@@ -352,7 +364,9 @@ payload = {
     "python_base": sys.argv[2],
     "qdrant": sys.argv[3],
     "tei": sys.argv[4],
-    "worker": sys.argv[5],
+    "qdrant_runtime": sys.argv[5],
+    "tei_runtime": sys.argv[6],
+    "worker": sys.argv[7],
 }
 pathlib.Path(sys.argv[1]).write_text(
     json.dumps(payload, sort_keys=True, indent=2) + "\n",
@@ -365,8 +379,10 @@ python3 - \
   "${PYTHON_BASE_DIGEST}" \
   "${QDRANT_IMAGE_TAG}" \
   "${QDRANT_IMAGE_DIGEST}" \
+  "${QDRANT_RUNTIME_IMAGE_ID}" \
   "${TEI_IMAGE_TAG}" \
   "${TEI_IMAGE_DIGEST}" \
+  "${TEI_RUNTIME_IMAGE_ID}" \
   "${LHMSB_WORKER_IMAGE_DIGEST}" \
   "${LHMSB_WORKER_UID}" \
   "${LHMSB_WORKER_GID}" <<'PY'
@@ -378,11 +394,13 @@ updates = {
     "PYTHON_BASE_DIGEST": sys.argv[2],
     "QDRANT_IMAGE_TAG": sys.argv[3],
     "QDRANT_IMAGE_DIGEST": sys.argv[4],
-    "TEI_IMAGE_TAG": sys.argv[5],
-    "TEI_IMAGE_DIGEST": sys.argv[6],
-    "LHMSB_WORKER_IMAGE_DIGEST": sys.argv[7],
-    "LHMSB_WORKER_UID": sys.argv[8],
-    "LHMSB_WORKER_GID": sys.argv[9],
+    "QDRANT_RUNTIME_IMAGE_ID": sys.argv[5],
+    "TEI_IMAGE_TAG": sys.argv[6],
+    "TEI_IMAGE_DIGEST": sys.argv[7],
+    "TEI_RUNTIME_IMAGE_ID": sys.argv[8],
+    "LHMSB_WORKER_IMAGE_DIGEST": sys.argv[9],
+    "LHMSB_WORKER_UID": sys.argv[10],
+    "LHMSB_WORKER_GID": sys.argv[11],
 }
 lines = path.read_text(encoding="utf-8").splitlines()
 seen = set()
@@ -399,6 +417,8 @@ for key, value in updates.items():
         rewritten.append(f"{key}={value}")
 path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
 PY
+
+mem0_verify_runtime_images "${DATA_ROOT}"
 
 PREFLIGHT_COMMAND=(
   uv run python -m lhmsb.qualification preflight --repository-only

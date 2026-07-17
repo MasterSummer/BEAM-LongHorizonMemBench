@@ -13,11 +13,11 @@ from lhmsb.qualification.providers import (
     PolicyMessage,
     PolicyRequest,
 )
-from lhmsb.qualification.schema import PolicyProfile
+from lhmsb.qualification.schema import PolicyProfile, PolicyProvider, PolicyRequestAPI
 
 
-def _profile(provider: str) -> PolicyProfile:
-    values = {
+def _profile(provider: PolicyProvider) -> PolicyProfile:
+    values: dict[PolicyProvider, tuple[str, str, PolicyRequestAPI]] = {
         "anthropic": ("opus", "claude-opus-4-8", "messages"),
         "deepseek": ("deepseek", "deepseek-v4-pro", "chat_completions"),
         "openai": ("gpt", "gpt-5.6-sol", "responses"),
@@ -25,7 +25,7 @@ def _profile(provider: str) -> PolicyProfile:
     profile_id, model_id, request_api = values[provider]
     return PolicyProfile(
         profile_id=profile_id,
-        provider=provider,  # type: ignore[arg-type]
+        provider=provider,
         model_id=model_id,
         route_id=f"{provider}_direct",
         api_key_env=f"{provider.upper()}_API_KEY",
@@ -194,7 +194,7 @@ def test_deepseek_uses_openai_compatible_chat_tools() -> None:
     ),
 )
 def test_versioned_provider_base_urls_do_not_duplicate_api_prefix(
-    provider: str,
+    provider: PolicyProvider,
     endpoint: str,
     expected_path: str,
 ) -> None:
