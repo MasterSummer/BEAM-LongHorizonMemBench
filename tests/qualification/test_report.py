@@ -5,7 +5,11 @@ from pathlib import Path
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.longhorizon.interventions import ContinuationOutcome
-from lhmsb.qualification.report import REQUIRED_REPORT_ARTIFACTS, write_qualification_report
+from lhmsb.qualification.report import (
+    REQUIRED_REPORT_ARTIFACTS,
+    _evaluation_trace_id,
+    write_qualification_report,
+)
 from lhmsb.qualification.runner import (
     ConditionRunResult,
     QualificationMatrixResult,
@@ -152,3 +156,14 @@ def test_report_jsonl_files_are_valid_and_deterministically_sorted(
             parsed,
             key=lambda item: json.dumps(item, sort_keys=True),
         )
+
+
+def test_native_evaluation_trace_id_is_distinct_when_row_has_no_trace() -> None:
+    assert (
+        _evaluation_trace_id("task-001", "sceu-00", "common_rerank", "trace-1")
+        == "trace-1"
+    )
+    assert (
+        _evaluation_trace_id("task-001", "sceu-00", "native", None)
+        == "task-001:sceu-00:native"
+    )

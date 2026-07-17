@@ -227,8 +227,21 @@ def _flatten_rows(
                     "dataset_release": artifact.dataset_release,
                     "surface_hash": artifact.surface_hash,
                     "source_commit": artifact.source_commit,
-                }
-            )
+                    }
+                )
+            # Schema-v2 evaluation results carry their immutable memory prefix
+            # outside the task result (rather than through legacy ``writes``).
+            # Export one inventory snapshot per checkpoint so the report keeps
+            # the stored-state side of the retrieval chain auditable.
+            if not getattr(task, "writes", ()):
+                for checkpoint in artifact.checkpoints:
+                    if checkpoint.inventory is not None:
+                        rows["memory_inventory.jsonl"].append(
+                            {
+                                **task_context,
+                                **_jsonable(asdict(checkpoint.inventory)),
+                            }
+                        )
             for checkpoint in artifact.checkpoints:
                 for key, value in checkpoint.graph_diagnostics:
                     rows["graph_diagnostics.jsonl"].append(
@@ -312,12 +325,19 @@ def _flatten_rows(
                 "condition_status": condition.status,
             }
             for row in condition.sceu_results:
-                rows["sceu_results.jsonl"].append(
-                    {
-                        **condition_context,
-                        **_jsonable(asdict(row)),
-                    }
+                trace_id = _evaluation_trace_id(
+                    task.task_id,
+                    row.sceu_id,
+                    condition.readout,
+                    row.retrieval_trace_id,
                 )
+                row_payload = {
+                    **condition_context,
+                    **_jsonable(asdict(row)),
+                }
+                if trace_id is not None:
+                    row_payload["retrieval_trace_id"] = trace_id
+                rows["sceu_results.jsonl"].append(row_payload)
                 for evaluation in row.baseline_evaluations:
                     _append_api_usage(
                         rows["api_usage.jsonl"],
@@ -360,7 +380,12 @@ def _flatten_rows(
                     rows["retrieval_trace.jsonl"].append(
                         {
                             **condition_context,
-                            "trace_id": row.retrieval_trace_id,
+                            "trace_id": _evaluation_trace_id(
+                                task.task_id,
+                                row.sceu_id,
+                                condition.readout,
+                                row.retrieval_trace_id,
+                            ),
                             "sceu_id": row.sceu_id,
                             "opportunity_id": row.opportunity_id,
                             "checkpoint_session": row.checkpoint_session,
@@ -532,6 +557,27 @@ def _task_context(task: QualificationTaskResult) -> dict[str, object]:
         "policy_profile_id": task.policy_profile_id,
         "condition": task.condition,
     }
+
+
+def _evaluation_trace_id(
+    task_id: str,
+    sceu_id: str,
+    readout: str,
+    existing: str | None,
+) -> str | None:
+    """Return a stable report trace ID for one schema-v2 SCEU/readout.
+
+    Common-rerank rows already carry the evaluator trace ID.  Native rows in
+    early schema-v2 result files intentionally left that field empty because
+    their order is directly inherited from the frozen candidate search.  The
+    report still needs a distinct trace record for validation and provenance,
+    so synthesize one without changing the original task result bytes.
+    """
+    if existing:
+        return existing
+    if readout == "native":
+        return f"{task_id}:{sceu_id}:native"
+    return None
 
 
 def _prefix_artifact_for_task(
