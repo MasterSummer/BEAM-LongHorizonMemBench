@@ -11,6 +11,8 @@ DOCKERIGNORE = ROOT / ".dockerignore"
 PREFLIGHT = ROOT / "deploy" / "slurm" / "mem0_preflight.sbatch"
 QUALIFICATION = ROOT / "deploy" / "slurm" / "mem0_qualification.sbatch"
 ENV_EXAMPLE = ROOT / ".env.example"
+README = ROOT / "README.md"
+SERVER_WORKFLOW = ROOT / "docs" / "mem0-server-workflow.md"
 
 
 def _compose() -> dict[str, object]:
@@ -64,6 +66,27 @@ def test_compose_pins_images_gpus_and_shared_data_root() -> None:
     assert "internal: true" in text
     assert "HTTP_PROXY" not in text
     assert "HTTPS_PROXY" not in text
+
+
+def test_compose_passes_controlled_zen_and_deepseek_provider_controls() -> None:
+    compose = _compose()
+    services = compose["services"]
+    assert isinstance(services, dict)
+    worker = services["worker"]
+    assert isinstance(worker, dict)
+    environment = worker["environment"]
+    assert isinstance(environment, dict)
+
+    assert environment["OPENCODE_ZEN_API_KEY"] == (
+        "${OPENCODE_ZEN_API_KEY:-}"
+    )
+    assert environment["OPENCODE_ZEN_BASE_URL"] == (
+        "${OPENCODE_ZEN_BASE_URL:-https://opencode.ai/zen}"
+    )
+    assert environment["DEEPSEEK_API_KEY"] == "${DEEPSEEK_API_KEY:-}"
+    assert environment["DEEPSEEK_BASE_URL"] == (
+        "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
+    )
 
 
 def test_worker_image_is_offline_locked_unprivileged_and_has_cli_entrypoint() -> None:
@@ -121,7 +144,8 @@ def test_slurm_uses_two_a100s_and_the_same_frozen_cli_contract() -> None:
     for text in (preflight, qualification):
         assert "#SBATCH --gres=gpu:a100:2" in text
         assert "deploy/compose.mem0.yaml" in text
-        assert "configs/experiments/mem0_qualification.yaml" in text
+        assert "/app/configs/experiments/mem0_controlled_zen.yaml" in text
+        assert "configs/experiments/mem0_qualification.yaml" not in text
         assert "/data/lhmsb" in text
         assert "candidate-k" not in text
         assert "visible-k" not in text
@@ -138,12 +162,10 @@ def test_slurm_uses_two_a100s_and_the_same_frozen_cli_contract() -> None:
 def test_env_example_declares_only_expected_provider_and_service_controls() -> None:
     text = ENV_EXAMPLE.read_text(encoding="utf-8")
     for name in (
-        "ANTHROPIC_API_KEY",
+        "OPENCODE_ZEN_API_KEY=",
+        "OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen",
         "DEEPSEEK_API_KEY",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_BASE_URL=https://api.anthropic.com",
         "DEEPSEEK_BASE_URL=https://api.deepseek.com",
-        "OPENAI_BASE_URL=https://api.openai.com",
         "LHMSB_QDRANT_URL=http://qdrant:6333",
         "LHMSB_EMBEDDING_URL=http://embedding:80",
         "LHMSB_RERANKER_URL=http://reranker:80",
@@ -151,6 +173,38 @@ def test_env_example_declares_only_expected_provider_and_service_controls() -> N
         "LHMSB_WORKER_GID=",
     ):
         assert name in text
+    current_provider_section = text.split(
+        "# Current Controlled-Zen provider controls.\n",
+        maxsplit=1,
+    )[1].split("\n# ", maxsplit=1)[0]
+    assert current_provider_section.strip().splitlines() == [
+        "OPENCODE_ZEN_API_KEY=",
+        "OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen",
+        "DEEPSEEK_API_KEY=",
+        "DEEPSEEK_BASE_URL=https://api.deepseek.com",
+    ]
     assert "AWS_" not in text
     assert "AZURE_" not in text
     assert "GOOGLE_" not in text
+
+
+def test_docs_name_the_current_controlled_zen_server_workflow() -> None:
+    readme = README.read_text(encoding="utf-8")
+    workflow = SERVER_WORKFLOW.read_text(encoding="utf-8")
+
+    for text in (readme, workflow):
+        assert "configs/experiments/mem0_controlled_zen.yaml" in text
+        assert "OPENCODE_ZEN_API_KEY" in text
+        assert "DEEPSEEK_API_KEY" in text
+        assert "workspace_only" in text
+        assert "oracle_current_state" in text
+        assert "mem0_controlled" in text
+    assert "excludes `mem0_native`" in readme
+    assert "run on the server, not this workstation" in readme
+    assert "不包含 `mem0_native`" in workflow
+    assert "只在服务器上执行" in workflow
+    assert (
+        "Fill ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, and OPENAI_API_KEY"
+        not in readme
+    )
+    assert "ANTHROPIC_API_KEY=..." not in workflow

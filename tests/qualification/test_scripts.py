@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+CONTROLLED_ZEN_CONFIG = "configs/experiments/mem0_controlled_zen.yaml"
+LEGACY_QUALIFICATION_CONFIG = "configs/experiments/mem0_qualification.yaml"
 SCRIPTS = {
     name: ROOT / "scripts" / name
     for name in (
@@ -111,9 +113,29 @@ def test_compose_wrappers_dry_run_the_same_worker_cli(
     assert completed.returncode == 0, completed.stderr
     assert "docker compose" in completed.stdout
     assert expected in completed.stdout
-    assert "configs/experiments/mem0_qualification.yaml" in completed.stdout
+    assert f"/app/{CONTROLLED_ZEN_CONFIG}" in completed.stdout
+    assert LEGACY_QUALIFICATION_CONFIG not in completed.stdout
     assert "candidate-k" not in completed.stdout
     assert "visible-k" not in completed.stdout
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_count"),
+    (
+        ("bootstrap_server.sh", 2),
+        ("preflight_mem0.sh", 1),
+        ("run_mem0_smoke.sh", 1),
+        ("run_mem0_qualification.sh", 1),
+    ),
+)
+def test_server_entry_points_default_only_to_controlled_zen_config(
+    name: str,
+    expected_count: int,
+) -> None:
+    text = SCRIPTS[name].read_text(encoding="utf-8")
+
+    assert text.count(CONTROLLED_ZEN_CONFIG) == expected_count
+    assert LEGACY_QUALIFICATION_CONFIG not in text
 
 
 def test_bootstrap_and_bundle_dry_runs_do_not_require_network_or_docker(
@@ -150,6 +172,8 @@ def test_bootstrap_and_bundle_dry_runs_do_not_require_network_or_docker(
     assert bootstrap.returncode == 0, bootstrap.stderr
     assert bundle.returncode == 0, bundle.stderr
     assert "DRY-RUN" in bootstrap.stdout
+    assert f"{ROOT}/{CONTROLLED_ZEN_CONFIG}" in bootstrap.stdout
+    assert LEGACY_QUALIFICATION_CONFIG not in bootstrap.stdout
     assert "DRY-RUN" in bundle.stdout
     assert not (tmp_path / "data root").exists()
 

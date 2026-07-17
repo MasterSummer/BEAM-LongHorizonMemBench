@@ -1,9 +1,12 @@
 # Mem0 A100 服务器迁移与 Qualification 工作流
 
 本文档是当前 Mem0 vertical slice 的操作手册。目标是在一台至少配备
-两张 NVIDIA A100 的 Linux 服务器上，从冻结数据直接运行 Controlled 和
-Native 两条轨道，并产出可验证的 memory write、retrieval、visible、
-causal use、behavior 和 drift 指标。
+两张 NVIDIA A100 的 Linux 服务器上，从冻结数据运行 Controlled 轨道，
+并产出可验证的 memory write、retrieval、visible、causal use、behavior
+和 drift 指标。服务器入口默认使用
+`configs/experiments/mem0_controlled_zen.yaml`；当前 Controlled-Zen run
+不包含 `mem0_native`。Live preflight、smoke 和 qualification
+只在服务器上执行，不在本工作站执行。
 
 当前阶段只启用 Mem0。Letta、Graphiti、Hindsight 和 MemOS 保留为后续系统，
 不能混入本次 run identity 或结果目录。
@@ -12,20 +15,19 @@ causal use、behavior 和 drift 指标。
 
 正式数据是一个 16-session Software episode。运行矩阵包含三个 policy：
 
-- `claude-opus-4-8`
-- `deepseek-v4-pro`
-- `gpt-5.6-sol`
+- `claude-opus-4-8` → OpenCode Zen；
+- `deepseek-v4-pro` → 官方 DeepSeek API；
+- `gpt-5.6-sol` → OpenCode Zen。
 
-每个 policy 运行四个原子 condition：
+每个 policy 运行三个原子 condition：
 
 | Condition | Memory 配置 | Policy 可见内容 |
 |---|---|---|
 | `workspace_only` | 无 memory | workspace |
 | `oracle_current_state` | evaluator 当前最小 state | workspace + oracle state |
 | `mem0_controlled` | policy model 同时作为 Mem0 extraction LLM；本地 BGE-M3 embedding | native-order 和 common-rerank 两个配对 readout |
-| `mem0_native` | Mem0 内部固定 `gpt-5-mini` + `text-embedding-3-small` | Mem0 官方式 native readout |
 
-因此共有 12 个可恢复的原子 task，并产生 15 个 condition/readout 结果：
+因此共有 9 个可恢复的原子 task，并产生 12 个 condition/readout 结果：
 Controlled task 的一次相同写入会生成 native order 与 common reranker 两个
 读取分支。
 
@@ -36,9 +38,10 @@ GPU 0 -> BAAI/bge-m3 embedding TEI
 GPU 1 -> BAAI/bge-reranker-v2-m3 reranker TEI
 ```
 
-三个 policy model 和 Native Mem0 的内部 OpenAI 模型通过 provider API
-调用，不在 A100 上本地推理。多于两张 GPU 不会自动扩大当前矩阵并行度；
-当前实现保持 task 顺序执行，以确保首轮 qualification 容易审计。
+三个 policy model 通过 provider API 调用，不在 A100 上本地推理。Claude
+Opus 4.8 和 GPT-5.6 Sol 通过 OpenCode Zen，DeepSeek V4 Pro 通过官方
+DeepSeek API。多于两张 GPU 不会自动扩大当前矩阵并行度；当前实现保持
+task 顺序执行，以确保首轮 qualification 容易审计。
 
 ## 2. 版本与数据锁
 
@@ -70,9 +73,9 @@ GPU 1 -> BAAI/bge-reranker-v2-m3 reranker TEI
 - 至少两张 Docker 可见的 NVIDIA GPU；
 - 一个持久、可写的数据盘，默认挂载为 `/data/lhmsb`；
 - 能访问 OCI registry、PyPI 和 Hugging Face 的 bootstrap 网络；
-- 正式运行时能访问 Anthropic、DeepSeek 和 OpenAI，或对应的显式
-  `*_BASE_URL`；
-- 三个 provider 均已为当前账号提供配置中声明的精确 model ID。
+- 正式运行时能访问 OpenCode Zen 和 DeepSeek，或对应的显式
+  `OPENCODE_ZEN_BASE_URL` / `DEEPSEEK_BASE_URL`；
+- OpenCode Zen 和 DeepSeek 已为当前账号提供配置中声明的精确 model ID。
 
 如果 provider 不提供某个精确 model ID，preflight 会失败。不要静默改用
 邻近模型；应先修改并重新冻结实验配置。
@@ -177,16 +180,14 @@ chmod 600 .env
 编辑 `.env`，至少填写：
 
 ```dotenv
-ANTHROPIC_API_KEY=...
-ANTHROPIC_BASE_URL=https://api.anthropic.com
+OPENCODE_ZEN_API_KEY=...
+OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen
 DEEPSEEK_API_KEY=...
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-OPENAI_API_KEY=...
-OPENAI_BASE_URL=https://api.openai.com
 ```
 
-若使用兼容代理，只修改相应 `*_BASE_URL`。密钥不会写入 run manifest、
-report 或离线 bundle。
+当前凭据只包括 OpenCode Zen 和官方 DeepSeek。若修改 endpoint，只修改相应
+`*_BASE_URL`。密钥不会写入 run manifest、report 或离线 bundle。
 
 ### 5.3 一次性 bootstrap
 
@@ -205,7 +206,8 @@ scripts/bootstrap_server.sh \
 5. 拉取 Qdrant、TEI 和 Python 镜像并解析 OCI digest；
 6. 构建固定代码 commit 的非 root worker image；
 7. 保存镜像归档和 image/model/wheel manifests；
-8. 运行不产生 provider 调用的 repository-only preflight。
+8. 使用 `configs/experiments/mem0_controlled_zen.yaml` 运行不产生 provider
+   调用的 repository-only preflight。
 
 bootstrap 完成后，`.env` 中的 image digest 字段会被写入解析后的值。
 脚本会把 `.env` 权限固定为 `0600`。host manifest 同时记录 GPU UUID、
@@ -226,12 +228,12 @@ scripts/preflight_mem0.sh \
 - Qdrant 隔离生命周期；
 - BGE-M3 输出维度必须为 1024；
 - reranker 排序；
-- 三个 provider 的认证、精确模型身份和结构化输出；
+- OpenCode Zen 与 DeepSeek 的认证、精确模型身份和结构化输出；
 - `mem0ai==2.0.12`；
 - 三个 Controlled policy 各自完成一次真实 Mem0
   write → inventory → history → search；
 - Mem0 内部 LLM 与 embedding 调用均被 trace；
-- Native profile 和完整 trace/prompt contract。
+- Controlled-Zen 配置和完整 trace/prompt contract。
 
 Live preflight 会产生少量真实 provider 调用。成功标志：
 
@@ -251,8 +253,8 @@ scripts/run_mem0_smoke.sh \
 ```
 
 Smoke 会在服务器上确定性生成并冻结 4-session fixture，然后运行同一
-12-task 配置。它用于发现 provider、Mem0 或 trace 的集成问题，不进入论文
-正式结果。
+9-task、12-result-cell 配置。它用于发现 provider、Mem0 或 trace 的集成
+问题，不进入论文正式结果。
 
 ### 5.6 十六 session qualification
 
@@ -369,7 +371,7 @@ report/
 | 文件 | 用途 |
 |---|---|
 | `run_manifest.json` | 代码、数据、配置、镜像、模型、硬件及所有 artifact hash |
-| `tasks.jsonl` | 12 个原子 task |
+| `tasks.jsonl` | 9 个原子 task |
 | `task_results.jsonl` | task 完整可移植结果及实际 store bytes |
 | `memory_events.jsonl` | Mem0 ADD/UPDATE/DELETE/NONE/observed delta |
 | `memory_inventory.jsonl` | 每个 checkpoint 的 `N_write`、`N_live` 和对象清单 |
@@ -398,7 +400,7 @@ jq . "${RUN_DIR}/report/summary.json"
 - `missing_results: 0`；
 - `non_complete_results: 0`；
 - `validation.json` 中 `ok: true`；
-- `summary.json` 中 `n_tasks: 12`；
+- `summary.json` 中 `n_tasks: 9`；
 - report artifact hash 与 trace ordering 全部通过。
 
 ## 9. 指标对应关系
@@ -409,10 +411,9 @@ jq . "${RUN_DIR}/report/summary.json"
 - `behavior_correct_rate`
 - `mem0_controlled_native_gain_beyond_workspace`
 - `mem0_controlled_common_rerank_gain_beyond_workspace`
-- `mem0_native_gain_beyond_workspace`
-- 三个对应的 `*_oracle_gap_closed`
-- `mem0_gain_beyond_workspace` / `oracle_gap_closed`（三个 Mem0
-  condition/readout cell 的宏平均，只作总览，不能用于比较 track）
+- 两个对应的 `*_oracle_gap_closed`
+- `mem0_gain_beyond_workspace` / `oracle_gap_closed`（两个 Controlled
+  readout cell 的宏平均，只作总览）
 - `common_rerank_behavior_delta`
 
 ### 9.2 写入、handoff 与 state maintenance
@@ -524,12 +525,12 @@ scripts/build_offline_bundle.sh \
 Bundle 包含代码归档、commit、wheelhouse、OCI image archives、两个 BGE
 模型、manifests 和两个冻结数据 release，并带确定性 SHA-256 sidecar。
 它不包含 `.env` 或任何 credential。即使依赖通过 bundle 离线迁移，
-正式 qualification 仍需要三个 provider endpoint 的网络访问。
+正式 qualification 仍需要 OpenCode Zen 和 DeepSeek endpoint 的网络访问。
 
 ## 12. Mem0 通过后的 decision gate
 
 1. 冻结 Mem0 的 raw run 和 validated report；
-2. 检查三条 policy、Controlled/Native、native/common-rerank 的可区分性；
+2. 检查三条 policy 及 Controlled native/common-rerank readout 的可区分性；
 3. 审计至少一条完整
    `stored → candidate → retrieved → visible → causal use → behavior`
    链；

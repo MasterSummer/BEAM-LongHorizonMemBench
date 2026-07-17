@@ -123,19 +123,24 @@ All commands assume the repository root as working directory and an activated vi
 ### Mem0 A100 qualification
 
 The first real long-horizon qualification slice is frozen separately from the
-legacy v1 pilot. It runs three policy models over workspace, oracle, Controlled
-Mem0, and Native Mem0 conditions; records the full
-`stored → retrieved → visible → causal use → behavior` chain; and emits
+legacy v1 pilot. The server entry points default to
+`configs/experiments/mem0_controlled_zen.yaml`, which runs three policy models
+over `workspace_only`, `oracle_current_state`, and `mem0_controlled`; the
+current Controlled-Zen run excludes `mem0_native`. Claude Opus 4.8 and GPT-5.6
+Sol use OpenCode Zen, while DeepSeek V4 Pro stays on the official DeepSeek API.
+The qualification records the full
+`stored → retrieved → visible → causal use → behavior` chain and emits
 programmatic state-evolution and behavioral-drift metrics.
 
 On a clean Linux server with Docker, the NVIDIA container runtime, and at least
-two visible A100 GPUs:
+two visible A100 GPUs, run the live preflight, smoke, and qualification. These
+live tests run on the server, not this workstation:
 
 ```bash
 sudo install -d -m 0750 -o "$(id -un)" -g "$(id -gn)" /data/lhmsb
 cp .env.example .env
 chmod 600 .env
-# Fill ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, and OPENAI_API_KEY.
+# Fill OPENCODE_ZEN_API_KEY and DEEPSEEK_API_KEY.
 
 scripts/bootstrap_server.sh --data-root /data/lhmsb --env-file .env
 scripts/preflight_mem0.sh --data-root /data/lhmsb --env-file .env

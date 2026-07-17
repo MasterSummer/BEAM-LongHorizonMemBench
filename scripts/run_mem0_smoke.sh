@@ -74,6 +74,6 @@ mem0_compose "${REPO_ROOT}" "${ENV_FILE}" run --rm \
   --out /data/lhmsb/datasets/software_mem0_smoke
 mem0_compose "${REPO_ROOT}" "${ENV_FILE}" run --rm worker \
   smoke --dataset /data/lhmsb/datasets/software_mem0_smoke \
-  --config /app/configs/experiments/mem0_qualification.yaml \
+  --config /app/configs/experiments/mem0_controlled_zen.yaml \
   --out "/data/lhmsb/runs/mem0/${RUN_NAME}" \
   --json "/data/lhmsb/runs/mem0/${RUN_NAME}/smoke-status.json"

@@ -71,7 +71,7 @@ mem0_compose "${REPO_ROOT}" "${ENV_FILE}" up --detach --wait \
 COMMAND=(
   run --rm worker
   preflight --dataset /data/lhmsb/datasets/software_mem0_v2
-  --config /app/configs/experiments/mem0_qualification.yaml
+  --config /app/configs/experiments/mem0_controlled_zen.yaml
   --data-root /data/lhmsb
   --json /data/lhmsb/runs/preflight/latest.json
 )

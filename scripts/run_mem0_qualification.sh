@@ -65,7 +65,7 @@ mem0_compose "${REPO_ROOT}" "${ENV_FILE}" up --detach --wait \
   qdrant embedding reranker
 mem0_compose "${REPO_ROOT}" "${ENV_FILE}" run --rm worker \
   plan --dataset /data/lhmsb/datasets/software_mem0_v2 \
-  --config /app/configs/experiments/mem0_qualification.yaml \
+  --config /app/configs/experiments/mem0_controlled_zen.yaml \
   --out "${RUN_DIR}"
 mem0_compose "${REPO_ROOT}" "${ENV_FILE}" run --rm worker \
   run-matrix --run-dir "${RUN_DIR}" \

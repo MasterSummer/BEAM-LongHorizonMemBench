@@ -91,7 +91,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   PREFLIGHT_COMMAND=(
     uv run python -m lhmsb.qualification preflight --repository-only
     --dataset "${DATA_ROOT}/datasets/software_mem0_v2"
-    --config "${REPO_ROOT}/configs/experiments/mem0_qualification.yaml"
+    --config "${REPO_ROOT}/configs/experiments/mem0_controlled_zen.yaml"
     --data-root "${DATA_ROOT}"
   )
   if [[ "${ALLOW_DIRTY}" == "1" ]]; then
@@ -403,7 +403,7 @@ PY
 PREFLIGHT_COMMAND=(
   uv run python -m lhmsb.qualification preflight --repository-only
   --dataset "${DATA_ROOT}/datasets/software_mem0_v2"
-  --config "${REPO_ROOT}/configs/experiments/mem0_qualification.yaml"
+  --config "${REPO_ROOT}/configs/experiments/mem0_controlled_zen.yaml"
   --data-root "${DATA_ROOT}"
 )
 if [[ "${ALLOW_DIRTY}" == "1" ]]; then

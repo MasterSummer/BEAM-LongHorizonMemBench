@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="${REPO_ROOT}/deploy/compose.mem0.yaml"
 ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
 DATA_ROOT="${LHMSB_DATA_ROOT:-/data/lhmsb}"
-CONFIG_PATH="/app/configs/experiments/mem0_qualification.yaml"
+CONFIG_PATH="/app/configs/experiments/mem0_controlled_zen.yaml"
 DATASET_PATH="/data/lhmsb/datasets/software_mem0_v2"
 RUN_DIR="/data/lhmsb/runs/mem0/${LHMSB_RUN_NAME:-qualification}"
 

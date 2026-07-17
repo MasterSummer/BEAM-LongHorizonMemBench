@@ -123,6 +123,8 @@ services:
       LHMSB_MEM0_WHEEL: /data/lhmsb/wheelhouse/mem0ai-2.0.12-py3-none-any.whl
       LHMSB_IMAGE_DIGEST_MANIFEST: /data/lhmsb/manifests/images.json
       LHMSB_MODEL_FILE_MANIFEST: /data/lhmsb/manifests/models.json
+      OPENCODE_ZEN_API_KEY: "${OPENCODE_ZEN_API_KEY:-}"
+      OPENCODE_ZEN_BASE_URL: "${OPENCODE_ZEN_BASE_URL:-https://opencode.ai/zen}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
