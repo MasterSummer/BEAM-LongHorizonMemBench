@@ -576,9 +576,18 @@ class MemOSTreeQualificationAdapter:
             "session_id": f"{self.episode_id or 'episode'}:{session_index}",
         }
         try:
-            return get_memory(scene_data, type="chat", info=info)
+            result = get_memory(scene_data, type="chat", info=info)
         except Exception as exc:
             raise MemOSQualificationError("memos_reader_failure", str(exc)) from exc
+        if isinstance(result, Sequence) and not isinstance(result, str | bytes):
+            flattened: list[object] = []
+            for item in result:
+                if isinstance(item, Sequence) and not isinstance(item, str | bytes | Mapping):
+                    flattened.extend(item)
+                else:
+                    flattened.append(item)
+            return flattened
+        return result
 
     def _invoke_add(
         self,

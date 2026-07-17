@@ -294,3 +294,18 @@ def test_reader_payload_supplies_stable_user_id() -> None:
     assert isinstance(info, dict)
     assert info["user_id"] == "episode"
     assert info["session_id"] == "episode:3"
+
+
+def test_reader_payload_flattens_official_reader_batches() -> None:
+    adapter, _backend, _graph = _adapter()
+
+    class FakeReader:
+        def get_memory(
+            self, scene_data: object, *, type: str, info: dict[str, str]
+        ) -> list[list[dict[str, str]]]:
+            del scene_data, type, info
+            return [[{"id": "m0"}], [{"id": "m1"}, {"id": "m2"}]]
+
+    adapter.reader = FakeReader()
+    payload = adapter._reader_payload([{"role": "user", "content": "offline"}], None, 0)
+    assert payload == [{"id": "m0"}, {"id": "m1"}, {"id": "m2"}]
