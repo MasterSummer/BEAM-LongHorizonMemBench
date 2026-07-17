@@ -116,6 +116,64 @@ def test_repository_full_config_declares_all_conditions_explicitly() -> None:
     )
 
 
+def test_explicit_condition_order_controls_hash_and_task_order(
+    tmp_path: Path,
+) -> None:
+    canonical_conditions = [
+        "workspace_only",
+        "oracle_current_state",
+        "mem0_controlled",
+        "mem0_native",
+    ]
+    reordered_conditions = [
+        "mem0_native",
+        "workspace_only",
+        "mem0_controlled",
+        "oracle_current_state",
+    ]
+    canonical = load_qualification_config(
+        _copied_config(
+            tmp_path / "canonical",
+            conditions=canonical_conditions,
+        )
+    )
+    reordered = load_qualification_config(
+        _copied_config(
+            tmp_path / "reordered",
+            conditions=reordered_conditions,
+        )
+    )
+
+    assert canonical.conditions == tuple(canonical_conditions)
+    assert reordered.conditions == tuple(reordered_conditions)
+    assert canonical.to_dict()["conditions"] == canonical_conditions
+    assert reordered.to_dict()["conditions"] == reordered_conditions
+    assert canonical.config_hash != reordered.config_hash
+
+    canonical_tasks = build_qualification_tasks(
+        canonical,
+        episode_ids=("software-mem0-42",),
+        run_identity="run-hash",
+    )
+    reordered_tasks = build_qualification_tasks(
+        reordered,
+        episode_ids=("software-mem0-42",),
+        run_identity="run-hash",
+    )
+    canonical_first_policy = canonical.policy_profiles[0].profile_id
+    reordered_first_policy = reordered.policy_profiles[0].profile_id
+    assert [
+        task.condition
+        for task in canonical_tasks
+        if task.policy_profile_id == canonical_first_policy
+    ] == canonical_conditions
+    assert [
+        task.condition
+        for task in reordered_tasks
+        if task.policy_profile_id == reordered_first_policy
+    ] == reordered_conditions
+
+
 def test_schema_v1_without_conditions_uses_legacy_full_matrix(
     tmp_path: Path,
 ) -> None:
