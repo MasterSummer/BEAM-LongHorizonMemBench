@@ -289,6 +289,17 @@ def test_native_track_pins_no_model(inject_letta: InjectFn) -> None:
     assert "model" not in adapter._client.memory_kwargs
 
 
+def test_ai_memory_sdk_memory_symbol_is_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The official ``ai-memory-sdk`` exports ``Memory``, not ``AIMemory``."""
+    module = types.ModuleType("ai_memory_sdk")
+    module.__dict__["Memory"] = FakeLettaClient
+    monkeypatch.setitem(sys.modules, "ai_memory_sdk", module)
+
+    adapter = _adapter()
+    adapter.initialize(user_id=_UID)
+    assert isinstance(adapter._client, FakeLettaClient)
+
+
 def test_controlled_track_forwards_pinned_model(inject_letta: InjectFn) -> None:
     inject_letta(FakeLettaClient)
     adapter = _adapter()
