@@ -1048,7 +1048,9 @@ def _build_official_reader(
         "embedder": {
             "backend": "universal_api",
             "config": {
-                "provider": "openai_compatible",
+                # The official reader uses the same OpenAI-compatible TEI
+                # endpoint and the same provider registry as TreeTextMemory.
+                "provider": "openai",
                 "model_name_or_path": embedding_model,
                 "api_key": "EMPTY",
                 "base_url": embedding_base_url,

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from lhmsb.adapters.memos_qualification import (
     MemOSLLMConfig,
     MemOSQualificationError,
     MemOSTreeQualificationAdapter,
+    _build_official_reader,
     _build_tree_config,
 )
 from lhmsb.qualification.memory_runtime import LifecycleCapabilities
@@ -183,3 +186,45 @@ def test_tree_config_uses_explicit_native_embedding_and_neo4j_identity() -> None
         "auto_create": False,
         "embedding_dimension": 1024,
     }
+
+
+def test_official_reader_uses_registered_openai_embedding_provider(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeReader:
+        def __init__(self, config: object) -> None:
+            captured["config"] = config
+
+    class FakeConfig:
+        @classmethod
+        def model_validate(cls, value: object) -> object:
+            return dict(value) if isinstance(value, dict) else value
+
+    import lhmsb.adapters.memos_qualification as adapter_module
+
+    original_import = adapter_module.importlib.import_module
+
+    def fake_import(name: str) -> object:
+        if name == "memos.configs.mem_reader":
+            return SimpleNamespace(SimpleStructMemReaderConfig=FakeConfig)
+        return original_import(name)
+
+    monkeypatch.setattr(adapter_module.importlib, "import_module", fake_import)
+    component = MemOSLLMConfig(
+        component="reader",
+        model_id="deepseek-v4-pro",
+        endpoint="https://api.deepseek.com",
+        api_key="secret",
+    )
+    _build_official_reader(
+        SimpleNamespace(SimpleStructMemReader=FakeReader),
+        component,
+        embedding=object(),
+        embedding_model="BAAI/bge-m3",
+        embedding_base_url="http://127.0.0.1:18080",
+    )
+    config = captured["config"]
+    assert isinstance(config, dict)
+    embedder = config["embedder"]
+    assert isinstance(embedder, dict)
+    assert embedder["config"]["provider"] == "openai"
