@@ -976,7 +976,10 @@ def _build_tree_config(
         "embedder": {
             "backend": "universal_api",
             "config": {
-                "provider": "openai_compatible",
+                # MemOS 2.0.23 accepts the OpenAI-compatible TEI endpoint
+                # through its ``openai`` provider; ``openai_compatible`` is
+                # not a registered provider in UniversalAPIEmbedder.
+                "provider": "openai",
                 "model_name_or_path": profile.embedding_model,
                 "base_url": embedding_base_url,
                 "api_key": "EMPTY",
