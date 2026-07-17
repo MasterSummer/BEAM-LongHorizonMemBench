@@ -62,6 +62,7 @@ qualification = [
     "openai>=1.100,<3",
     "pandas>=2.2,<3",
     "pyarrow>=19,<22",
+    "pytest>=8",
     "qdrant-client>=1.15,<2",
 ]
 # Graphiti/Zep temporal-KG adapter (lhmsb.adapters.graphiti_adapter): imported lazily,

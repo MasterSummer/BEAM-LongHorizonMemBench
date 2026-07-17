@@ -22,6 +22,14 @@ def test_mem0_extra_is_exactly_pinned() -> None:
     assert project["optional-dependencies"]["mem0"] == ["mem0ai==2.0.12"]
 
 
+def test_qualification_extra_includes_pytest_for_sandbox_checker() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert any(
+        dependency.startswith("pytest>=")
+        for dependency in project["optional-dependencies"]["qualification"]
+    )
+
+
 def test_legacy_release_archive_matches_declared_sha() -> None:
     release = json.loads((LEGACY_RELEASE / "RELEASE.json").read_text(encoding="utf-8"))
     archive = LEGACY_RELEASE / release["dataset_archive"]
