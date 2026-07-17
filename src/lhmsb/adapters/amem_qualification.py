@@ -14,6 +14,7 @@ import hashlib
 import importlib
 import inspect
 import json
+import os
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -155,8 +156,18 @@ class AMemQualificationAdapter:
             raise AMemQualificationError(
                 "upstream_api_mismatch", "official A-MEM module lacks AgenticMemorySystem"
             )
+        # The upstream Chroma retriever constructs a SentenceTransformer before
+        # the benchmark can inject the common TEI embedding runtime.  On an
+        # offline server, the canonical model identifier cannot be resolved
+        # through Hugging Face even when the model files are present locally.
+        # An explicit path therefore acts only as an offline bootstrap hint;
+        # the public profile and the subsequently injected embedding runtime
+        # remain unchanged.
+        embedding_model = os.environ.get(
+            "LHMSB_AMEM_EMBEDDING_MODEL_PATH", profile.embedding_model
+        )
         kwargs: dict[str, object] = {
-            "model_name": profile.embedding_model,
+            "model_name": embedding_model,
             # A-MEM's official controller only accepts ``openai`` or ``ollama``.
             # ``ollama`` is a constructor-only inert controller here; it is
             # replaced with the DeepSeek bridge before the first add/search call,
