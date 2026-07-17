@@ -45,13 +45,106 @@ def _copied_config(
 _MISSING = object()
 
 
-def test_repository_config_pins_models_and_retrieval_contract() -> None:
+@pytest.mark.parametrize(
+    ("config_path", "expected_profiles"),
+    (
+        pytest.param(
+            CONFIG,
+            (
+                (
+                    "opus_4_8",
+                    "anthropic",
+                    "claude-opus-4-8",
+                    "anthropic_direct",
+                    "ANTHROPIC_API_KEY",
+                    "https://api.anthropic.com",
+                    "ANTHROPIC_BASE_URL",
+                    "messages",
+                ),
+                (
+                    "deepseek_v4_pro",
+                    "deepseek",
+                    "deepseek-v4-pro",
+                    "deepseek_direct",
+                    "DEEPSEEK_API_KEY",
+                    "https://api.deepseek.com",
+                    "DEEPSEEK_BASE_URL",
+                    "chat_completions",
+                ),
+                (
+                    "gpt_5_6_sol",
+                    "openai",
+                    "gpt-5.6-sol",
+                    "openai_direct",
+                    "OPENAI_API_KEY",
+                    "https://api.openai.com",
+                    "OPENAI_BASE_URL",
+                    "responses",
+                ),
+            ),
+            id="full-direct",
+        ),
+        pytest.param(
+            CONTROLLED_ZEN_CONFIG,
+            (
+                (
+                    "opus_4_8_zen",
+                    "anthropic",
+                    "claude-opus-4-8",
+                    "opencode_zen",
+                    "OPENCODE_ZEN_API_KEY",
+                    "https://opencode.ai/zen",
+                    "OPENCODE_ZEN_BASE_URL",
+                    "messages",
+                ),
+                (
+                    "deepseek_v4_pro",
+                    "deepseek",
+                    "deepseek-v4-pro",
+                    "deepseek_direct",
+                    "DEEPSEEK_API_KEY",
+                    "https://api.deepseek.com",
+                    "DEEPSEEK_BASE_URL",
+                    "chat_completions",
+                ),
+                (
+                    "gpt_5_6_sol_zen",
+                    "openai",
+                    "gpt-5.6-sol",
+                    "opencode_zen",
+                    "OPENCODE_ZEN_API_KEY",
+                    "https://opencode.ai/zen",
+                    "OPENCODE_ZEN_BASE_URL",
+                    "responses",
+                ),
+            ),
+            id="controlled-zen",
+        ),
+    ),
+)
+def test_repository_policy_profiles_are_fully_pinned(
+    config_path: Path,
+    expected_profiles: tuple[tuple[str, ...], ...],
+) -> None:
+    config = load_qualification_config(config_path)
+
+    assert [
+        (
+            profile.profile_id,
+            profile.provider,
+            profile.model_id,
+            profile.route_id,
+            profile.api_key_env,
+            profile.endpoint,
+            profile.endpoint_override_env,
+            profile.request_api,
+        )
+        for profile in config.policy_profiles
+    ] == list(expected_profiles)
+
+
+def test_repository_config_pins_retrieval_contract() -> None:
     config = load_qualification_config(CONFIG)
-    assert [profile.model_id for profile in config.policy_profiles] == [
-        "claude-opus-4-8",
-        "deepseek-v4-pro",
-        "gpt-5.6-sol",
-    ]
     assert config.retrieval.embedding_model == "BAAI/bge-m3"
     assert (
         config.retrieval.embedding_revision
@@ -83,6 +176,34 @@ def test_controlled_zen_config_has_three_routes_and_three_conditions() -> None:
     assert config.required_secret_env == (
         "OPENCODE_ZEN_API_KEY",
         "DEEPSEEK_API_KEY",
+    )
+
+
+def test_controlled_zen_reuses_direct_deepseek_profile() -> None:
+    full = load_qualification_config(CONFIG)
+    controlled = load_qualification_config(CONTROLLED_ZEN_CONFIG)
+
+    assert controlled.policy_profiles[1] == full.policy_profiles[1]
+
+
+def test_controlled_zen_shares_full_frozen_non_policy_contract() -> None:
+    full = load_qualification_config(CONFIG)
+    controlled = load_qualification_config(CONTROLLED_ZEN_CONFIG)
+
+    assert (
+        controlled.schema_version,
+        controlled.dataset_release,
+        controlled.data_root_env,
+        controlled.retrieval,
+        controlled.controlled_mem0,
+        controlled.native_mem0,
+    ) == (
+        full.schema_version,
+        full.dataset_release,
+        full.data_root_env,
+        full.retrieval,
+        full.controlled_mem0,
+        full.native_mem0,
     )
 
 
@@ -205,8 +326,29 @@ def test_invalid_condition_matrices_are_rejected(
         load_qualification_config(broken)
 
 
+@pytest.mark.parametrize(
+    "required_secret_env",
+    (
+        ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"),
+        ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"),
+        (
+            "ANTHROPIC_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            "UNEXPECTED_API_KEY",
+        ),
+        (
+            "ANTHROPIC_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENAI_API_KEY",
+        ),
+    ),
+    ids=("missing", "reordered", "extra", "duplicate"),
+)
 def test_required_secret_names_match_ordered_policy_credentials(
     tmp_path: Path,
+    required_secret_env: tuple[str, ...],
 ) -> None:
     path = _copied_config(
         tmp_path,
@@ -219,11 +361,22 @@ def test_required_secret_names_match_ordered_policy_credentials(
     )
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert isinstance(raw, dict)
-    raw["required_secret_env"] = ["DEEPSEEK_API_KEY"]
+    raw["required_secret_env"] = list(required_secret_env)
     path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(QualificationConfigError, match="required_secret_env"):
+    expected_secret_env = (
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
+    )
+    expected_message = (
+        "required_secret_env must equal the ordered unique api_key_env values "
+        "from policy_profiles; "
+        f"expected={expected_secret_env!r}; received={required_secret_env!r}"
+    )
+    with pytest.raises(QualificationConfigError) as exc_info:
         load_qualification_config(path)
+    assert str(exc_info.value) == expected_message
 
 
 def test_tracks_are_explicit_and_separate() -> None:
@@ -281,11 +434,11 @@ def test_secrets_are_named_but_never_loaded_into_config_hash(
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "secret-openai-value")
     config = load_qualification_config(CONFIG)
-    assert set(config.required_secret_env) == {
+    assert config.required_secret_env == (
         "ANTHROPIC_API_KEY",
         "DEEPSEEK_API_KEY",
         "OPENAI_API_KEY",
-    }
+    )
     serialized = str(config.to_dict())
     assert "secret-openai-value" not in serialized
     assert config.config_hash == load_qualification_config(CONFIG).config_hash

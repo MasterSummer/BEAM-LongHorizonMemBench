@@ -38,6 +38,22 @@ class QualificationConfigError(ValueError):
     """Raised when a qualification configuration is ambiguous or inconsistent."""
 
 
+def _validate_conditions(
+    conditions: Sequence[str],
+) -> tuple[QualificationCondition, ...]:
+    resolved = tuple(conditions)
+    if not resolved:
+        raise QualificationConfigError("conditions must be non-empty")
+    if len(resolved) != len(set(resolved)):
+        raise QualificationConfigError("conditions must be unique")
+    unsupported = set(resolved) - _SUPPORTED_CONDITIONS
+    if unsupported:
+        raise QualificationConfigError(
+            f"conditions contain unsupported values: {sorted(unsupported)}"
+        )
+    return cast(tuple[QualificationCondition, ...], resolved)
+
+
 @dataclass(frozen=True)
 class QualificationConfig:
     schema_version: int
@@ -62,16 +78,7 @@ class QualificationConfig:
             raise QualificationConfigError("policy profile IDs must be non-empty and unique")
         if len(model_ids) != len(set(model_ids)):
             raise QualificationConfigError("policy model IDs must be unique")
-        if not self.conditions:
-            raise QualificationConfigError("conditions must be non-empty")
-        if len(self.conditions) != len(set(self.conditions)):
-            raise QualificationConfigError("conditions must be unique")
-        unsupported_conditions = set(self.conditions) - _SUPPORTED_CONDITIONS
-        if unsupported_conditions:
-            raise QualificationConfigError(
-                "conditions contain unsupported values: "
-                f"{sorted(unsupported_conditions)}"
-            )
+        _validate_conditions(self.conditions)
         if self.controlled_mem0.track != "controlled":
             raise QualificationConfigError("controlled_mem0 must use track=controlled")
         if self.native_mem0.track != "native":
@@ -84,7 +91,9 @@ class QualificationConfig:
         if self.required_secret_env != policy_secret_env:
             raise QualificationConfigError(
                 "required_secret_env must equal the ordered unique api_key_env "
-                "values from policy_profiles"
+                "values from policy_profiles; "
+                f"expected={policy_secret_env!r}; "
+                f"received={self.required_secret_env!r}"
             )
 
     def to_dict(self) -> dict[str, object]:
@@ -140,7 +149,12 @@ def load_qualification_config(path: Path) -> QualificationConfig:
     data_root_env = _string(raw.get("data_root_env"), "data_root_env")
     policy_paths = _string_sequence(raw.get("policy_profiles"), "policy_profiles")
     policies = tuple(_load_policy(_resolve(path, item)) for item in policy_paths)
-    conditions = _load_conditions(raw.get("conditions", _DEFAULT_CONDITIONS))
+    conditions = _validate_conditions(
+        _string_sequence(
+            raw.get("conditions", _DEFAULT_CONDITIONS),
+            "conditions",
+        )
+    )
     embedding = _load_yaml(
         _resolve(path, _string(raw.get("embedding_profile"), "embedding_profile"))
     )
@@ -369,20 +383,6 @@ def _string_sequence(value: object, label: str) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise QualificationConfigError(f"{label} must be a string array")
     return tuple(_string(item, label) for item in value)
-
-
-def _load_conditions(value: object) -> tuple[QualificationCondition, ...]:
-    conditions = _string_sequence(value, "conditions")
-    if not conditions:
-        raise QualificationConfigError("conditions must be non-empty")
-    if len(conditions) != len(set(conditions)):
-        raise QualificationConfigError("conditions must be unique")
-    unsupported = set(conditions) - _SUPPORTED_CONDITIONS
-    if unsupported:
-        raise QualificationConfigError(
-            f"conditions contain unsupported values: {sorted(unsupported)}"
-        )
-    return cast(tuple[QualificationCondition, ...], conditions)
 
 
 def _slug(value: str) -> str:
