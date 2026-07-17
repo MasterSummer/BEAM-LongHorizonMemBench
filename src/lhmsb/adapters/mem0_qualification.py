@@ -9,13 +9,23 @@ import os
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Protocol, cast
 from urllib.parse import urlparse
 
+from lhmsb.qualification.memory_runtime import (
+    CandidateSearch,
+    InventoryItem,
+    InventorySnapshot,
+    LifecycleCapabilities,
+    NativeMemoryEvent,
+    ProviderUsageEvent,
+    SearchCandidate,
+    StorageFootprint,
+    WriteSessionResult,
+)
 from lhmsb.qualification.schema import Mem0Profile, PolicyProfile
 
 
@@ -166,100 +176,18 @@ class _OpenAIResponsesBridge:
         return output_text
 
 
-@dataclass(frozen=True)
-class NativeMemoryEvent:
-    operation_id: str
-    session_index: int
-    native_event: str
-    memory_id: str
-    memory_text: str
-    old_content_hash: str | None
-    new_content_hash: str | None
-    source: str
-    latency_seconds: float
-
-
-@dataclass(frozen=True)
-class InventoryItem:
-    memory_id: str
-    content: str
-    content_hash: str
-    metadata: tuple[tuple[str, object], ...]
-    created_at: str
-    updated_at: str
-    history_length: int
-
-
-@dataclass(frozen=True)
-class InventorySnapshot:
-    checkpoint_session: int
-    n_write: int
-    n_live: int
-    items: tuple[InventoryItem, ...]
-    store_hash: str
-    backend_count: int | None
-
-
-@dataclass(frozen=True)
-class SearchCandidate:
-    memory_id: str
-    content: str
-    content_hash: str
-    native_rank: int
-    score: float | None
-    score_details: tuple[tuple[str, float], ...]
-    metadata: tuple[tuple[str, object], ...]
-    created_at: str
-    updated_at: str
-
-
-@dataclass(frozen=True)
-class CandidateSearch:
-    checkpoint_session: int
-    query: str
-    query_hash: str
-    candidates: tuple[SearchCandidate, ...]
-    candidate_shortfall: bool
-    latency_seconds: float
-    usage_events: tuple[ProviderUsageEvent, ...] = ()
-
-
-@dataclass(frozen=True)
-class WriteSessionResult:
-    session_index: int
-    events: tuple[NativeMemoryEvent, ...]
-    inventory: InventorySnapshot
-    n_write: int
-    latency_seconds: float
-    usage_events: tuple[ProviderUsageEvent, ...] = ()
-
-
-@dataclass(frozen=True)
-class ProviderUsageEvent:
-    """One raw Mem0-internal provider or embedding call."""
-
-    call_id: str
-    component: str
-    provider: str
-    model_id: str
-    endpoint_identity: str
-    request_hash: str
-    response_hash: str
-    input_tokens: int | None
-    output_tokens: int | None
-    cached_tokens: int | None
-    reasoning_tokens: int | None
-    usage_observed: bool
-    input_count: int
-    latency_seconds: float
-    retry_count: int | None
-    error_class: str | None
-    started_at_utc: str
-    ended_at_utc: str
-
-
 class Mem0QualificationAdapter:
     """Synchronous Mem0 adapter that preserves native objects and events."""
+
+    capabilities = LifecycleCapabilities(
+        add=True,
+        update=True,
+        delete=True,
+        merge=False,
+        links=False,
+        history=True,
+        resumable=True,
+    )
 
     def __init__(
         self,
@@ -325,6 +253,22 @@ class Mem0QualificationAdapter:
                 "resource_cleanup_failure",
                 "; ".join(errors),
             )
+
+    def storage_footprints(self) -> tuple[StorageFootprint, ...]:
+        """Report explicit unavailability rather than inventing backend bytes."""
+        reason = "Mem0 API does not expose physical storage bytes"
+        return (
+            StorageFootprint(
+                component="mem0_vector_store",
+                bytes=None,
+                unavailable_reason=reason,
+            ),
+            StorageFootprint(
+                component="mem0_history_store",
+                bytes=None,
+                unavailable_reason=reason,
+            ),
+        )
 
     @classmethod
     def create_live(

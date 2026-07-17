@@ -10,16 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
-from lhmsb.adapters.mem0_qualification import (
-    CandidateSearch,
-    InventoryItem,
-    InventorySnapshot,
-    Mem0QualificationError,
-    NativeMemoryEvent,
-    ProviderUsageEvent,
-    SearchCandidate,
-    WriteSessionResult,
-)
+from lhmsb.adapters.mem0_qualification import Mem0QualificationError
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.families.software.vertical_checker import BehaviorResult
 from lhmsb.longhorizon.attribution import (
@@ -50,6 +41,16 @@ from lhmsb.longhorizon.public_surface import (
 from lhmsb.longhorizon.replay import replay_plan
 from lhmsb.longhorizon.schema import SCEU, ActionSpec, SessionSurface, StateUnit
 from lhmsb.qualification.config import canonical_hash
+from lhmsb.qualification.memory_runtime import (
+    CandidateSearch,
+    InventoryItem,
+    InventorySnapshot,
+    MemoryRuntime,
+    NativeMemoryEvent,
+    ProviderUsageEvent,
+    SearchCandidate,
+    WriteSessionResult,
+)
 from lhmsb.qualification.providers import (
     PolicyCallError,
     PolicyClient,
@@ -88,25 +89,6 @@ class QualificationRunError(RuntimeError):
     def __init__(self, error_class: str, message: str) -> None:
         super().__init__(message)
         self.error_class = error_class
-
-
-class MemoryRuntime(Protocol):
-    def restore_write_count(self, n_write: int) -> None: ...
-
-    def write_session(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        session_index: int,
-        metadata: dict[str, object] | None = None,
-    ) -> WriteSessionResult: ...
-
-    def search_candidates(
-        self,
-        query: str,
-        *,
-        checkpoint_session: int,
-    ) -> CandidateSearch: ...
 
 
 class RerankerRuntime(Protocol):
@@ -702,11 +684,14 @@ def _search_or_load(
     relative = f"retrieval/{sceu.sceu_id}/candidate.json"
     stored = storage.load_cell(task, relative, input_hash=input_hash)
     if stored is not None:
-        return _candidate_search_from_dict(_mapping(stored, relative))
+        result = _candidate_search_from_dict(_mapping(stored, relative))
+        result.validate_against_inventory(inventory)
+        return result
     result = memory.search_candidates(
         public.request,
         checkpoint_session=sceu.checkpoint_session,
     )
+    result.validate_against_inventory(inventory)
     storage.save_cell(
         task,
         relative,

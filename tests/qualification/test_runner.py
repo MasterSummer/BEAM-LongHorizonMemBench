@@ -5,14 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from lhmsb.adapters.mem0_qualification import (
-    CandidateSearch,
-    InventoryItem,
-    InventorySnapshot,
-    NativeMemoryEvent,
-    SearchCandidate,
-    WriteSessionResult,
-)
 from lhmsb.families.software.mem0_vertical import (
     SoftwareMem0VerticalFamily,
     SoftwareMem0VerticalSpec,
@@ -22,6 +14,14 @@ from lhmsb.longhorizon.replay import replay_plan
 from lhmsb.qualification.config import (
     build_qualification_tasks,
     load_qualification_config,
+)
+from lhmsb.qualification.memory_runtime import (
+    CandidateSearch,
+    InventoryItem,
+    InventorySnapshot,
+    NativeMemoryEvent,
+    SearchCandidate,
+    WriteSessionResult,
 )
 from lhmsb.qualification.providers import (
     PolicyCallError,
