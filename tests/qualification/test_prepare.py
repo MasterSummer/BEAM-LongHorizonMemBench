@@ -491,6 +491,18 @@ def test_failed_prepare_closes_runtime_and_publishes_no_valid_artifact(tmp_path:
         storage.load_prefix_artifact(task)
 
 
+def test_failed_prepare_can_be_retried_after_any_failure_marker(tmp_path: Path) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task(spec.plan.episode_id)
+    storage = QualificationStorage(tmp_path / "run", run_identity=task.run_identity)
+    with pytest.raises(PrefixPreparationError):
+        prepare_prefix(task, spec, FakeRuntime(fail_session=2), FakeReranker(), storage)
+
+    artifact = prepare_prefix(task, spec, FakeRuntime(), FakeReranker(), storage)
+    assert artifact.episode_id == spec.plan.episode_id
+    assert not storage.prefix_failure_path(task).exists()
+
+
 def test_failed_prepare_marker_never_persists_exception_secrets(tmp_path: Path) -> None:
     spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
     task = _task(spec.plan.episode_id)

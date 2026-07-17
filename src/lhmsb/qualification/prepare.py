@@ -174,7 +174,13 @@ def _prepare_prefix_impl(
     except QualificationStorageError as exc:
         # A failed preparation is explicitly resumable only through a full
         # rerun.  Remove the marker before replaying from session zero.
-        if exc.error_class == "preparation_failed":
+        if (
+            storage.prefix_failure_path(task).exists()
+            and not storage.prefix_artifact_path(task).exists()
+        ):
+            # Any failure marker means that the previous replay did not publish
+            # a valid artifact.  Error classes are diagnostic, not a retry
+            # policy; a subsequent full replay must be allowed to clear it.
             storage.clear_prefix_failure(task)
             existing = None
         else:
