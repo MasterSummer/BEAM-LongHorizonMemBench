@@ -37,7 +37,7 @@ mixed into the controlled leaderboard.
 | `flat_retrieval` | retrieval baseline | top-k raw trajectory objects after common retrieval/reranking |
 | `mem0` | memory system | Mem0-managed memory objects |
 | `amem` | memory system | A-MEM structured notes and evolved links |
-| `memos` | memory system | MemOS general-text memory objects |
+| `memos` | memory system | MemOS-Tree graph-organized memory objects |
 
 `workspace_only` does not mean that all persistence is removed. The benchmark's
 workspace is deliberately persistent. This condition measures the marginal value of
