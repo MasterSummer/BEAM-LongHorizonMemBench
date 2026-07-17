@@ -165,6 +165,12 @@ def test_tree_config_uses_explicit_native_embedding_and_neo4j_identity() -> None
     graph = config["graph_db"]
     assert isinstance(embedder, dict) and isinstance(graph, dict)
     assert embedder["config"]["base_url"] == "http://127.0.0.1:18080"
+    # MemOS 2.0.23's TreeTextMemoryConfig owns only extractor/dispatcher LLMs;
+    # reader and reorganizer are runtime components, and internet retrieval is
+    # disabled by leaving its optional config unset.
+    assert "reader_llm" not in config
+    assert "reorganizer_llm" not in config
+    assert "internet_retrieval" not in config
     assert graph["config"] == {
         "uri": "bolt://127.0.0.1:17687",
         "user": "neo4j",

@@ -972,10 +972,7 @@ def _build_tree_config(
     config: dict[str, object] = {
         "extractor_llm": llm["extractor"],
         "dispatcher_llm": llm["dispatcher"],
-        "reorganizer_llm": llm["reorganizer"],
-        "reader_llm": llm["reader"],
         "reorganize": True,
-        "internet_retrieval": False,
         "embedder": {
             "backend": "universal_api",
             "config": {
