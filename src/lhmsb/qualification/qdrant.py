@@ -305,6 +305,24 @@ def validate_search_order(hits: Sequence[QdrantHit]) -> tuple[QdrantHit, ...]:
     return ordered
 
 
+def _validate_qdrant_score_order(hits: Sequence[QdrantHit]) -> None:
+    """Validate the order guaranteed by Qdrant without imposing tie order."""
+    ids: list[str] = []
+    previous_score: float | None = None
+    for hit in hits:
+        validate_point_id(hit.point_id)
+        score = validate_score(hit.score)
+        ids.append(hit.point_id)
+        if previous_score is not None and score > previous_score:
+            raise QdrantError(
+                "invalid_point_order",
+                "Qdrant search points are not in descending score order",
+            )
+        previous_score = score
+    if len(ids) != len(set(ids)):
+        raise QdrantError("duplicate_point_id", "Qdrant search returned duplicate point IDs")
+
+
 class InMemoryQdrantTransport:
     """Strict in-memory implementation used by offline tests and dry runs."""
 
@@ -588,7 +606,7 @@ class QdrantHttpTransport:
         if not isinstance(result, list):
             raise QdrantError("invalid_points", "search response result must be an array")
         wire_hits = tuple(_hit_from_value(hit) for hit in result)
-        validate_search_order(wire_hits)
+        _validate_qdrant_score_order(wire_hits)
         hits = tuple(_restore_hit(hit) for hit in wire_hits)
         ordered = tuple(sorted(hits, key=lambda hit: (-hit.score, hit.point_id)))
         return validate_search_order(ordered)

@@ -144,6 +144,54 @@ def test_http_boundary_maps_arbitrary_benchmark_ids_to_qdrant_uuid_and_back() ->
     client.close()
 
 
+def test_http_boundary_accepts_qdrant_ties_and_orders_restored_ids() -> None:
+    wire_ids: list[str] = []
+    original_ids = ["a" * 64, "b" * 64]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/points"):
+            body = json.loads(request.content.decode("utf-8"))
+            wire_ids.extend(str(point["id"]) for point in body["points"])
+            return httpx.Response(200, json={"result": {"status": "ok"}})
+        if request.url.path.endswith("/points/search"):
+            return httpx.Response(
+                200,
+                json={
+                    "result": [
+                        {
+                            "id": wire_ids[1],
+                            "score": 0.5,
+                            "payload": {"_lhmsb_point_id": original_ids[1]},
+                        },
+                        {
+                            "id": wire_ids[0],
+                            "score": 0.5,
+                            "payload": {"_lhmsb_point_id": original_ids[0]},
+                        },
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"result": {"status": "ok"}})
+
+    client = QdrantHttpTransport(
+        "http://qdrant",
+        collection_name="c",
+        vector_size=2,
+        transport=httpx.MockTransport(handler),
+    )
+    client.create_collection()
+    client.upsert(
+        namespace="ns",
+        points=[
+            QdrantPoint(original_ids[0], (1.0, 0.0), {}),
+            QdrantPoint(original_ids[1], (0.0, 1.0), {}),
+        ],
+    )
+    hits = client.search(namespace="ns", vector=(1.0, 0.0), limit=2)
+    assert [hit.point_id for hit in hits] == original_ids
+    client.close()
+
+
 def test_validate_vector_rejects_nonfinite_values() -> None:
     with pytest.raises(QdrantError) as caught:
         validate_vector((1.0, math.nan), dimension=2)
