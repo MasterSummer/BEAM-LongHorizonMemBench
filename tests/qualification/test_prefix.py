@@ -85,19 +85,22 @@ def _common_trace() -> object:
     )
 
 
-def _checkpoint(*, diagnostics: tuple[tuple[str, object], ...] = ()) -> object:
-    inventory = _inventory()
-    write = WriteSessionResult(
-        session_index=0,
+def _write(session_index: int) -> WriteSessionResult:
+    return WriteSessionResult(
+        session_index=session_index,
         events=(),
-        inventory=_inventory(0),
+        inventory=_inventory(session_index),
         n_write=1,
         latency_seconds=0.1,
     )
+
+
+def _checkpoint(*, diagnostics: tuple[tuple[str, object], ...] = ()) -> object:
+    inventory = _inventory()
     return prefix.MemoryPrefixCheckpoint(
         checkpoint_session=1,
         surface_hash="b" * 64,
-        writes=(write,),
+        writes=(_write(0),),
         inventory=inventory,
         retrievals=(_search(),),
         common_reranks=(_common_trace(),),
@@ -184,6 +187,51 @@ def test_checkpoint_uses_only_prior_sessions_and_keeps_rerank_chain_linked() -> 
         replace(_checkpoint(), common_reranks=(disconnected,))
 
 
+@pytest.mark.parametrize(
+    "writes",
+    (
+        (_write(0), _write(0)),
+        (_write(1), _write(0)),
+    ),
+    ids=("duplicate", "out-of-order"),
+)
+def test_checkpoint_requires_unique_strictly_increasing_write_sessions(
+    writes: tuple[WriteSessionResult, ...],
+) -> None:
+    with pytest.raises(prefix.PrefixArtifactError, match="write session.*ordered|increasing"):
+        prefix.MemoryPrefixCheckpoint(
+            checkpoint_session=2,
+            surface_hash="b" * 64,
+            writes=writes,
+            inventory=_inventory(2),
+        )
+
+
+def test_checkpoint_zero_is_the_prewrite_snapshot() -> None:
+    checkpoint = prefix.MemoryPrefixCheckpoint(
+        checkpoint_session=0,
+        surface_hash="b" * 64,
+        writes=(),
+        inventory=_inventory(0),
+    )
+    assert checkpoint.writes == ()
+    with pytest.raises(prefix.PrefixArtifactError, match="checkpoint zero|prior"):
+        replace(checkpoint, writes=(_write(0),))
+
+
+@pytest.mark.parametrize("writes", ((), (_write(0),)), ids=("missing", "stale"))
+def test_positive_checkpoint_requires_exactly_the_immediately_prior_write(
+    writes: tuple[WriteSessionResult, ...],
+) -> None:
+    with pytest.raises(prefix.PrefixArtifactError, match="exactly one|immediately prior"):
+        prefix.MemoryPrefixCheckpoint(
+            checkpoint_session=4,
+            surface_hash="b" * 64,
+            writes=writes,
+            inventory=_inventory(4),
+        )
+
+
 def test_common_rerank_defensively_tuples_shallow_frozen_result() -> None:
     ordered = ["memory-1"]
     scores = [0.9]
@@ -208,6 +256,46 @@ def test_common_rerank_defensively_tuples_shallow_frozen_result() -> None:
     scores[0] = -100
     assert trace.result.ordered_memory_ids == ("memory-1",)
     assert trace.result.scores == (0.9,)
+
+
+@pytest.mark.parametrize("score", (True, "0.9", float("nan"), float("inf")))
+def test_common_rerank_rejects_invalid_scores_with_prefix_error(score: object) -> None:
+    result = replace(_rerank_result(), scores=(score,))  # type: ignore[arg-type]
+    with pytest.raises(prefix.PrefixArtifactError, match="score.*finite|score.*numeric"):
+        prefix.CommonRerankTrace(
+            opportunity_id="op-1",
+            query_hash=sha256_text("what is the pipeline constraint?"),
+            candidate_memory_ids=("memory-1",),
+            visible_memory_ids=("memory-1",),
+            result=result,
+        )
+
+
+def test_common_rerank_defensive_tuples_keep_checkpoint_hash_stable() -> None:
+    candidates = ["memory-1"]
+    visible = ["memory-1"]
+    ordered = ["memory-1"]
+    scores = [0.9]
+    trace = prefix.CommonRerankTrace(
+        opportunity_id="op-1",
+        query_hash=sha256_text("what is the pipeline constraint?"),
+        candidate_memory_ids=candidates,  # type: ignore[arg-type]
+        visible_memory_ids=visible,  # type: ignore[arg-type]
+        result=replace(
+            _rerank_result(),
+            ordered_memory_ids=ordered,  # type: ignore[arg-type]
+            scores=scores,  # type: ignore[arg-type]
+        ),
+    )
+    checkpoint = replace(_checkpoint(), common_reranks=(trace,))
+    before = checkpoint.checkpoint_hash
+
+    candidates.append("tampered")
+    visible.reverse()
+    ordered[0] = "tampered"
+    scores[0] = -100.0
+
+    assert checkpoint.checkpoint_hash == before
 
 
 def test_prefix_nested_json_is_deeply_frozen_at_construction() -> None:
@@ -256,6 +344,37 @@ def test_serialized_prefix_rejects_unknown_fields_and_nonstring_json_keys() -> N
         prefix.MemoryPrefixArtifact.from_dict(serialized)
     with pytest.raises(prefix.PrefixArtifactError, match="string"):
         _checkpoint(diagnostics=(("graph", {1: "collision", "1": "other"}),))
+
+
+def test_serialized_nested_memory_trace_errors_are_prefix_errors() -> None:
+    serialized = _artifact().to_dict()
+    checkpoints = serialized["checkpoints"]
+    assert isinstance(checkpoints, list)
+    checkpoint = checkpoints[0]
+    assert isinstance(checkpoint, dict)
+    writes = checkpoint["writes"]
+    assert isinstance(writes, list)
+    write = writes[0]
+    assert isinstance(write, dict)
+    inventory = write["inventory"]
+    assert isinstance(inventory, dict)
+    inventory["n_live"] = 2
+
+    with pytest.raises(prefix.PrefixArtifactError, match="nested memory trace"):
+        prefix.MemoryPrefixArtifact.from_dict(serialized)
+
+
+def test_artifact_and_checkpoint_surface_hashes_have_distinct_scopes() -> None:
+    checkpoint = replace(_checkpoint(), surface_hash="a" * 64)
+    artifact = replace(
+        _artifact(),
+        surface_hash="b" * 64,
+        checkpoints=(checkpoint,),
+        artifact_hash="",
+    )
+
+    assert artifact.surface_hash != artifact.checkpoints[0].surface_hash
+    assert prefix.MemoryPrefixArtifact.from_dict(artifact.to_dict()) == artifact
 
 
 @pytest.mark.parametrize("field", ("run_identity", "config_hash", "model_files_hash"))

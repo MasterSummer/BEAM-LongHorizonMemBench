@@ -18,6 +18,7 @@ from lhmsb.qualification.conditions import (
     condition_definition,
     condition_definitions,
 )
+from lhmsb.qualification.memory_runtime import MemoryTraceValidationError
 from lhmsb.qualification.prefix import (
     MemoryPrefixArtifact,
     PrefixArtifactError,
@@ -681,16 +682,17 @@ def build_preparation_tasks(
             profile = resolved.system_profiles[backend]
             profile_id = profile.profile_id
             index = len(tasks)
+            task_id = f"prepare-{index:05d}--{_slug(episode_id)}--{backend}"
             payload = {
                 "stage": "prepare_prefix",
                 "task_index": index,
+                "task_id": task_id,
                 "episode_id": episode_id,
                 "backend": backend,
                 "profile_id": profile_id,
                 "run_identity": run_identity,
                 "config_hash": resolved.config_hash,
             }
-            task_id = f"prepare-{index:05d}--{_slug(episode_id)}--{backend}"
             tasks.append(
                 PreparationTask(
                     task_index=index,
@@ -733,9 +735,14 @@ def build_evaluation_task_templates(
                 )
                 index = len(templates)
                 prefix_backend = definition.prefix_backend
+                task_id = (
+                    f"evaluate-template-{index:05d}--{_slug(episode_id)}--"
+                    f"{policy.profile_id}--{condition}"
+                )
                 payload = {
                     "stage": "evaluate_template",
                     "task_index": index,
+                    "task_id": task_id,
                     "episode_id": episode_id,
                     "policy_profile_id": policy.profile_id,
                     "condition": condition,
@@ -748,7 +755,7 @@ def build_evaluation_task_templates(
                 templates.append(
                     EvaluationTaskTemplate(
                         task_index=index,
-                        task_id=f"evaluate-template-{index:05d}--{_slug(episode_id)}--{policy.profile_id}--{condition}",
+                        task_id=task_id,
                         episode_id=episode_id,
                         policy_profile_id=policy.profile_id,
                         condition=condition,
@@ -867,9 +874,13 @@ def finalize_evaluation_plan(
             if template.prefix_backend is None
             else verified_hashes[f"{template.episode_id}--{template.prefix_backend}"]
         )
+        task_id = template.task_id.replace("evaluate-template-", "evaluate-")
+        if template.prefix_backend is not None:
+            task_id = f"{task_id}--pfx-{prefix_hash[:12]}"
         payload = {
             "stage": "evaluate",
             "task_index": template.task_index,
+            "task_id": task_id,
             "episode_id": template.episode_id,
             "policy_profile_id": template.policy_profile_id,
             "condition": template.condition,
@@ -879,9 +890,6 @@ def finalize_evaluation_plan(
             "results": [asdict(item) for item in template.scored_conditions],
             "config_hash": resolved.config_hash,
         }
-        task_id = template.task_id.replace("evaluate-template-", "evaluate-")
-        if template.prefix_backend is not None:
-            task_id = f"{task_id}--pfx-{prefix_hash[:12]}"
         tasks.append(
             EvaluationTask(
                 task_index=template.task_index,
@@ -996,7 +1004,7 @@ def _add_artifact(
                 f"{key} must be a MemoryPrefixArtifact or complete serialized mapping"
             )
         prefix_artifact_hash(artifact)
-    except PrefixArtifactError as exc:
+    except (PrefixArtifactError, MemoryTraceValidationError) as exc:
         raise QualificationConfigError(f"invalid prefix artifact {key}: {exc}") from exc
     output[key] = artifact
 

@@ -32,13 +32,17 @@ from lhmsb.longhorizon.public_surface import (
     validate_public_payload,
 )
 from lhmsb.longhorizon.schema import ActionSpec, EpisodePlan
-from lhmsb.qualification.config import load_qualification_config
+from lhmsb.qualification.config import (
+    QualificationConfig,
+    QualificationConfigError,
+    load_qualification_config,
+)
 from lhmsb.qualification.providers import (
     HttpPolicyClient,
     PolicyMessage,
     PolicyRequest,
 )
-from lhmsb.qualification.schema import PolicyProfile
+from lhmsb.qualification.schema import PolicyProfile, SystemsQualificationConfig
 from lhmsb.qualification.tei import (
     EmbeddingClient,
     RerankCandidate,
@@ -57,6 +61,20 @@ _SECRET_MARKERS = (
     "secret",
     "token",
 )
+
+
+def _load_legacy_config(path: Path) -> QualificationConfig:
+    """Load the schema-v1 config required by the legacy preflight gates."""
+    try:
+        config = load_qualification_config(path)
+    except QualificationConfigError:
+        raise
+    if isinstance(config, SystemsQualificationConfig):
+        raise PreflightError(
+            "preflight_failure",
+            "legacy preflight gates require a schema-v1 configuration",
+        )
+    return config
 
 
 class PreflightError(RuntimeError):
@@ -339,7 +357,7 @@ def _gate_repository_config(context: PreflightContext) -> dict[str, object]:
             "preflight_failure",
             "Git worktree is dirty; commit changes or pass --allow-dirty",
         )
-    config = load_qualification_config(context.config_path)
+    config = _load_legacy_config(context.config_path)
     return {
         "code_commit": snapshot.commit,
         "code_dirty": snapshot.dirty,
@@ -640,7 +658,7 @@ def _gate_model_files(context: PreflightContext) -> dict[str, object]:
                 "preflight_failure",
                 f"model file hash mismatch: {path}",
             )
-    config = load_qualification_config(context.config_path)
+    config = _load_legacy_config(context.config_path)
     revisions = json.dumps(data.get("revisions", {}), sort_keys=True)
     for revision in (
         config.retrieval.embedding_revision,
@@ -705,7 +723,7 @@ def _gate_qdrant(context: PreflightContext) -> dict[str, object]:
 
 
 def _gate_embedding(context: PreflightContext) -> dict[str, object]:
-    config = load_qualification_config(context.config_path)
+    config = _load_legacy_config(context.config_path)
     client = EmbeddingClient(
         context.environment.get(
             "LHMSB_EMBEDDING_URL",
@@ -733,7 +751,7 @@ def _gate_embedding(context: PreflightContext) -> dict[str, object]:
 
 
 def _gate_reranker(context: PreflightContext) -> dict[str, object]:
-    config = load_qualification_config(context.config_path)
+    config = _load_legacy_config(context.config_path)
     client = RerankerClient(
         context.environment.get(
             "LHMSB_RERANKER_URL",
@@ -772,7 +790,7 @@ def _gate_reranker(context: PreflightContext) -> dict[str, object]:
 
 
 def _gate_provider_credentials(context: PreflightContext) -> dict[str, object]:
-    config = load_qualification_config(context.config_path)
+    config = _load_legacy_config(context.config_path)
     missing = [
         name
         for name in config.required_secret_env
@@ -790,7 +808,7 @@ def _gate_provider_credentials(context: PreflightContext) -> dict[str, object]:
 
 
 def _gate_provider_smoke(context: PreflightContext) -> dict[str, object]:
-    config = load_qualification_config(context.config_path)
+    config = _load_legacy_config(context.config_path)
     responses: list[dict[str, object]] = []
     option = PublicActionOption(
         option_id="option-preflight",
@@ -848,7 +866,7 @@ def _gate_mem0_runtime(context: PreflightContext) -> dict[str, object]:
             "preflight_failure",
             f"cannot inspect installed Mem0: {exc}",
         ) from exc
-    config = load_qualification_config(context.config_path)
+    config = _load_legacy_config(context.config_path)
     if installed != "2.0.12":
         raise PreflightError(
             "preflight_failure",
@@ -870,7 +888,7 @@ def _gate_controlled_mem0_lifecycle(
             "preflight_failure",
             "qdrant-client is not installed",
         ) from exc
-    config = load_qualification_config(context.config_path)
+    config = _load_legacy_config(context.config_path)
     qdrant_url = context.environment.get(
         "LHMSB_QDRANT_URL",
         "http://qdrant:6333",
@@ -1009,7 +1027,7 @@ def _gate_controlled_mem0_lifecycle(
 
 
 def _gate_native_profile(context: PreflightContext) -> dict[str, object]:
-    profile = load_qualification_config(context.config_path).native_mem0
+    profile = _load_legacy_config(context.config_path).native_mem0
     expected = (
         profile.track == "native"
         and profile.internal_llm_model == "gpt-5-mini"
@@ -1038,7 +1056,7 @@ def _remove_sqlite_files(path: Path) -> None:
 
 
 def _gate_trace_contract(context: PreflightContext) -> dict[str, object]:
-    config = load_qualification_config(context.config_path)
+    config = _load_legacy_config(context.config_path)
     if config.controlled_mem0.prompt_source != "mem0_builtin":
         raise PreflightError(
             "preflight_failure",

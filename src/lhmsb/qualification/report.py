@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Any
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
-from lhmsb.qualification.metrics import compute_qualification_metrics
+from lhmsb.qualification.metrics import (
+    compute_multisystem_metrics,
+    compute_multisystem_metrics_by_cell,
+    compute_multisystem_scorecard,
+    compute_qualification_metrics,
+    multisystem_observations_from_results,
+)
+from lhmsb.qualification.prefix import MemoryPrefixArtifact
 from lhmsb.qualification.runner import (
     PolicyEvaluation,
     QualificationMatrixResult,
@@ -34,11 +41,15 @@ REQUIRED_REPORT_ARTIFACTS: tuple[str, ...] = (
     "retrieval_trace.jsonl",
     "interventions.jsonl",
     "api_usage.jsonl",
+    "policy_calls.jsonl",
+    "prefix_manifests.jsonl",
+    "graph_diagnostics.jsonl",
     "metrics.json",
     "metrics_by_cell.json",
     "summary.json",
     "scorecard.csv",
     "scorecard.md",
+    "validation.json",
 )
 _JSONL_ARTIFACTS = (
     "tasks.jsonl",
@@ -49,6 +60,9 @@ _JSONL_ARTIFACTS = (
     "retrieval_trace.jsonl",
     "interventions.jsonl",
     "api_usage.jsonl",
+    "policy_calls.jsonl",
+    "prefix_manifests.jsonl",
+    "graph_diagnostics.jsonl",
 )
 _SCORECARD_FIELDS = (
     "policy_profile_id",
@@ -60,6 +74,7 @@ _SCORECARD_FIELDS = (
     "behavior_correct_rate",
     "baseline_stability_rate",
     "mean_visible_memory_count",
+    "mean_live_memory_count",
     "causal_memory_use_rate",
     "beneficial_intervention_rate",
     "harmful_intervention_rate",
@@ -94,17 +109,33 @@ def write_qualification_report(
     output_directory: Path,
     *,
     run_metadata: Mapping[str, object] | None = None,
+    prefix_artifacts: Mapping[str, object] | None = None,
 ) -> ReportArtifacts:
     """Write the complete deterministic report and hash every non-manifest file."""
     output_directory.mkdir(parents=True, exist_ok=True)
-    rows = _flatten_rows(matrix)
+    rows = _flatten_rows(matrix, prefix_artifacts=prefix_artifacts)
     for name in _JSONL_ARTIFACTS:
         _atomic_write(
             output_directory / name,
             _jsonl_bytes(rows[name]),
         )
 
-    metrics = compute_qualification_metrics(matrix, specs)
+    evaluation_matrix = any(
+        not hasattr(task, "writes") for task in matrix.task_results
+    )
+    if evaluation_matrix:
+        observations = multisystem_observations_from_results(
+            matrix,
+            specs,
+            prefix_artifacts=prefix_artifacts,
+        )
+        metrics = compute_multisystem_metrics(observations)
+        metrics_by_cell = compute_multisystem_metrics_by_cell(observations)
+        scorecard_rows = list(compute_multisystem_scorecard(observations))
+    else:
+        metrics = compute_qualification_metrics(matrix, specs)
+        metrics_by_cell = ()
+        scorecard_rows = _scorecard_rows(matrix)
     _atomic_write(
         output_directory / "metrics.json",
         _json_bytes(metrics.to_dict()),
@@ -114,7 +145,11 @@ def write_qualification_report(
         _json_bytes(
             {
                 "schema_version": REPORT_SCHEMA_VERSION,
-                "groups": _metrics_by_cell(matrix, specs),
+                "groups": (
+                    list(metrics_by_cell)
+                    if evaluation_matrix
+                    else _metrics_by_cell(matrix, specs)
+                ),
             }
         ),
     )
@@ -122,7 +157,6 @@ def write_qualification_report(
         output_directory / "summary.json",
         _json_bytes(_summary(matrix, rows)),
     )
-    scorecard_rows = _scorecard_rows(matrix)
     _atomic_write(
         output_directory / "scorecard.csv",
         _scorecard_csv(scorecard_rows).encode("utf-8"),
@@ -130,6 +164,16 @@ def write_qualification_report(
     _atomic_write(
         output_directory / "scorecard.md",
         _scorecard_markdown(scorecard_rows).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "validation.json",
+        _json_bytes(
+            {
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "status": "pending_external_validation",
+                "run_identity": matrix.run_identity,
+            }
+        ),
     )
 
     artifact_hashes = tuple(
@@ -161,6 +205,8 @@ def write_qualification_report(
 
 def _flatten_rows(
     matrix: QualificationMatrixResult,
+    *,
+    prefix_artifacts: Mapping[str, object] | None = None,
 ) -> dict[str, list[dict[str, object]]]:
     rows: dict[str, list[dict[str, object]]] = {
         name: [] for name in _JSONL_ARTIFACTS
@@ -168,6 +214,31 @@ def _flatten_rows(
     seen_calls: set[str] = set()
     for task in matrix.task_results:
         task_context = _task_context(task)
+        artifact = _prefix_artifact_for_task(task, prefix_artifacts or {})
+        if artifact is not None:
+            rows["prefix_manifests.jsonl"].append(
+                {
+                    **task_context,
+                    "prefix_artifact_hash": artifact.artifact_hash,
+                    "backend": artifact.backend,
+                    "profile_id": artifact.profile_id,
+                    "config_hash": artifact.config_hash,
+                    "run_identity": artifact.run_identity,
+                    "dataset_release": artifact.dataset_release,
+                    "surface_hash": artifact.surface_hash,
+                    "source_commit": artifact.source_commit,
+                }
+            )
+            for checkpoint in artifact.checkpoints:
+                for key, value in checkpoint.graph_diagnostics:
+                    rows["graph_diagnostics.jsonl"].append(
+                        {
+                            **task_context,
+                            "checkpoint_session": checkpoint.checkpoint_session,
+                            "key": key,
+                            "value": _jsonable(value),
+                        }
+                    )
         rows["tasks.jsonl"].append(
             {
                 **task_context,
@@ -181,7 +252,7 @@ def _flatten_rows(
         rows["task_results.jsonl"].append(
             _jsonable(asdict(task))
         )
-        for write in task.writes:
+        for write in getattr(task, "writes", ()):
             write_context = {
                 **task_context,
                 "session_index": write.session_index,
@@ -206,7 +277,7 @@ def _flatten_rows(
                     write_context,
                     usage,
                 )
-        for trace in task.retrieval_traces:
+        for trace in getattr(task, "retrieval_traces", ()):
             rows["retrieval_trace.jsonl"].append(
                 {
                     **task_context,
@@ -276,6 +347,50 @@ def _flatten_rows(
                             intervention_kind=intervention.intervention_kind,
                             target_memory_id=intervention.target_memory_id,
                         )
+            # The schema-v2 evaluator persists retrievals inside each immutable
+            # SCEU result rather than a mutable runner task trace.  Normalize
+            # them to the same trace artifact here.
+            if not getattr(task, "retrieval_traces", ()) and condition.condition in {
+                "flat_retrieval",
+                "mem0",
+                "amem",
+                "memos",
+            }:
+                for row in condition.sceu_results:
+                    rows["retrieval_trace.jsonl"].append(
+                        {
+                            **condition_context,
+                            "trace_id": row.retrieval_trace_id,
+                            "sceu_id": row.sceu_id,
+                            "opportunity_id": row.opportunity_id,
+                            "checkpoint_session": row.checkpoint_session,
+                            "query": "",
+                            "query_hash": "",
+                            "candidate_memory_ids": list(row.candidate_memory_ids),
+                            "native_retrieved_memory_ids": list(
+                                row.retrieved_memory_ids
+                                if condition.readout == "native"
+                                else ()
+                            ),
+                            "common_reranked_memory_ids": list(
+                                row.retrieved_memory_ids
+                                if condition.readout == "common_rerank"
+                                else ()
+                            ),
+                            "candidate_shortfall": bool(
+                                getattr(row, "candidate_shortfall", False)
+                            ),
+                            "search_latency_seconds": 0.0,
+                            "rerank_result": None,
+                            "internal_usage": [],
+                        }
+                    )
+    rows["policy_calls.jsonl"] = [
+        dict(row)
+        for row in rows["api_usage.jsonl"]
+        if isinstance(row.get("policy_request_hash"), str)
+        and bool(row["policy_request_hash"])
+    ]
     return rows
 
 
@@ -419,6 +534,27 @@ def _task_context(task: QualificationTaskResult) -> dict[str, object]:
     }
 
 
+def _prefix_artifact_for_task(
+    task: object,
+    artifacts: Mapping[str, object],
+) -> MemoryPrefixArtifact | None:
+    condition = str(getattr(task, "condition", ""))
+    episode_id = str(getattr(task, "episode_id", ""))
+    backend = "mem0" if condition in {"mem0_controlled", "mem0_native"} else condition
+    for key in (f"{episode_id}--{backend}", backend, f"{episode_id}--{condition}", condition):
+        raw = artifacts.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, MemoryPrefixArtifact):
+            return raw
+        if isinstance(raw, Mapping):
+            try:
+                return MemoryPrefixArtifact.from_dict(raw)
+            except Exception:
+                return None
+    return None
+
+
 def _summary(
     matrix: QualificationMatrixResult,
     rows: Mapping[str, Sequence[dict[str, object]]],
@@ -441,14 +577,7 @@ def _summary(
         "n_retrieval_traces": len(rows["retrieval_trace.jsonl"]),
         "n_interventions": len(rows["interventions.jsonl"]),
         "n_api_calls": len(rows["api_usage.jsonl"]),
-        "n_policy_calls": sum(
-            row.get("call_kind") not in {
-                "memory_internal_llm",
-                "embedding",
-                "reranker",
-            }
-            for row in rows["api_usage.jsonl"]
-        ),
+        "n_policy_calls": len(rows["policy_calls.jsonl"]),
         "n_memory_internal_calls": sum(
             row.get("call_kind") == "memory_internal_llm"
             for row in rows["api_usage.jsonl"]
@@ -461,6 +590,8 @@ def _summary(
             row.get("call_kind") == "reranker"
             for row in rows["api_usage.jsonl"]
         ),
+        "n_prefix_manifests": len(rows["prefix_manifests.jsonl"]),
+        "n_graph_diagnostics": len(rows["graph_diagnostics.jsonl"]),
     }
 
 
@@ -535,6 +666,18 @@ def _scorecard_rows(
                 "mean_visible_memory_count": _ratio_value(
                     sum(len(row.model_visible_memory_ids) for row in rows),
                     len(rows),
+                ),
+                "mean_live_memory_count": _ratio_value(
+                    sum(
+                        _live_memory_count_or_zero(row)
+                        for row in rows
+                        if _live_memory_count_from_row(row) is not None
+                    ),
+                    sum(
+                        1
+                        for row in rows
+                        if _live_memory_count_from_row(row) is not None
+                    ),
                 ),
                 "causal_memory_use_rate": _ratio_value(
                     sum(label in {"beneficial", "harmful"} for label in causal),
@@ -661,6 +804,16 @@ def _aggregate_status(statuses: Sequence[str] | Any) -> str:
 
 def _flag_rate(flags: Sequence[str], name: str, denominator: int) -> float | None:
     return _ratio_value(flags.count(name), denominator)
+
+
+def _live_memory_count_from_row(row: object) -> int | None:
+    value = getattr(row, "live_memory_count", None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _live_memory_count_or_zero(row: object) -> int:
+    value = _live_memory_count_from_row(row)
+    return 0 if value is None else value
 
 
 def _ratio_value(numerator: float, denominator: float) -> float | None:

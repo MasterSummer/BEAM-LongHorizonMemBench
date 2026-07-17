@@ -12,9 +12,10 @@ SCRIPTS = (
     ROOT / "scripts" / "preflight_systems.sh",
     ROOT / "scripts" / "run_systems_smoke.sh",
     ROOT / "scripts" / "run_systems_qualification.sh",
-    ROOT / "scripts" / "verify_system_images.sh",
+    ROOT / "scripts" / "verify_system_runtime.sh",
 )
 COMMON = ROOT / "scripts" / "lib" / "systems_common.sh"
+SERVICES = ROOT / "scripts" / "lib" / "systems_services.sh"
 SLURM = ROOT / "deploy" / "slurm" / "systems_qualification.sbatch"
 
 
@@ -34,11 +35,11 @@ def _run(
 
 
 def test_system_scripts_are_executable_and_shell_valid() -> None:
-    for path in (*SCRIPTS, COMMON, SLURM):
+    for path in (*SCRIPTS, COMMON, SERVICES, SLURM):
         assert path.is_file()
         assert path.stat().st_mode & (1 << 6), path
     result = subprocess.run(
-        ["bash", "-n", *(str(path) for path in (*SCRIPTS, COMMON, SLURM))],
+        ["bash", "-n", *(str(path) for path in (*SCRIPTS, COMMON, SERVICES, SLURM))],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -64,7 +65,7 @@ def test_system_wrappers_have_dependency_free_dry_run(path: Path, tmp_path: Path
     assert not (tmp_path / "data").exists()
 
 
-def test_slurm_dry_run_does_not_require_slurm_docker_or_gpu(tmp_path: Path) -> None:
+def test_slurm_dry_run_does_not_require_slurm_or_gpu(tmp_path: Path) -> None:
     environment = dict(os.environ)
     environment.update(
         {
@@ -100,19 +101,26 @@ def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
             "run-evaluation-matrix",
             "aggregate-systems",
             "validate-systems",
+            "--keep-going",
         ):
             assert marker in text
-        assert "--keep-going" in text
 
 
-def test_bootstrap_never_passes_provider_credentials_to_build() -> None:
-    text = (ROOT / "scripts" / "bootstrap_systems_server.sh").read_text(encoding="utf-8")
+def test_bootstrap_uses_native_venv_and_pinned_sources() -> None:
+    text = (ROOT / "scripts" / "bootstrap_systems_server.sh").read_text(
+        encoding="utf-8"
+    )
+    for marker in (
+        "python3 -m venv",
+        "uv pip compile",
+        "A-mem",
+        "MemOS",
+        "native-runtime.json",
+        "native-runtime.lock.yaml",
+    ):
+        assert marker in text
     assert "OPENCODE_ZEN_API_KEY" not in text
     assert "DEEPSEEK_API_KEY" not in text
-    assert "--pull=false" in text
-    assert "--generate-hashes" in text
-    assert "ceffb860f0712bbae97b184d440df62bc910ca8d" in text
-    assert "583b07b998afc4debb6c5078439b0b3896f5b097" in text
 
 
 def test_common_helper_does_not_emit_secret_values() -> None:
@@ -120,3 +128,10 @@ def test_common_helper_does_not_emit_secret_values() -> None:
     assert 'printf \'%s\' "${OPENCODE_ZEN_API_KEY' not in text
     assert 'printf \'%s\' "${DEEPSEEK_API_KEY' not in text
     assert "systems_require_live_secrets" in text
+
+
+def test_runtime_verifier_is_native() -> None:
+    text = (ROOT / "scripts" / "verify_system_runtime.sh").read_text(encoding="utf-8")
+    assert "native-runtime.json" in text
+    assert "venvs" in text
+    assert "docker" not in text.lower()

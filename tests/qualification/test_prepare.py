@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,11 @@ from lhmsb.qualification.memory_runtime import (
     WriteSessionResult,
     sha256_text,
 )
-from lhmsb.qualification.prepare import PrefixPreparationError, prepare_prefix
+from lhmsb.qualification.prepare import (
+    PrefixPreparationError,
+    _artifact_identity,
+    prepare_prefix,
+)
 from lhmsb.qualification.schema import PreparationTask
 from lhmsb.qualification.storage import QualificationStorage, QualificationStorageError
 from lhmsb.qualification.tei import RerankCandidate, RerankResult
@@ -186,19 +191,175 @@ class FakeReranker:
         )
 
 
+class SecretFailRuntime(FakeRuntime):
+    def write_session(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        session_index: int,
+        metadata: dict[str, object] | None = None,
+    ) -> WriteSessionResult:
+        del messages, session_index, metadata
+        raise RuntimeError(
+            "Authorization: Bearer sentinel-bearer-123 "
+            '{"api_key":"sentinel-json-key"} '
+            "DEEPSEEK_API_KEY: sentinel-env-key"
+        )
+
+
+class UnsafeErrorClassRuntime(FakeRuntime):
+    def write_session(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        session_index: int,
+        metadata: dict[str, object] | None = None,
+    ) -> WriteSessionResult:
+        del messages, session_index, metadata
+
+        class ProviderFailureError(RuntimeError):
+            error_class = "sk-sentinelSecret123"
+
+        raise ProviderFailureError("provider failed")
+
+
+class InterruptRuntime(FakeRuntime):
+    def write_session(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        session_index: int,
+        metadata: dict[str, object] | None = None,
+    ) -> WriteSessionResult:
+        del messages, session_index, metadata
+        raise KeyboardInterrupt
+
+
+class MalformedReranker:
+    def __init__(self, result: object) -> None:
+        self.result = result
+
+    def rerank(
+        self,
+        query: str,
+        candidates: tuple[RerankCandidate, ...],
+        *,
+        top_k: int | None = None,
+    ) -> object:
+        del query, candidates, top_k
+        return self.result
+
+
+class WrongInputCountReranker(FakeReranker):
+    def rerank(
+        self,
+        query: str,
+        candidates: tuple[RerankCandidate, ...],
+        *,
+        top_k: int | None = None,
+    ) -> RerankResult:
+        result = super().rerank(query, candidates, top_k=top_k)
+        return replace(result, input_count=result.input_count + 999)
+
+
+class CachedArtifactStorage:
+    def __init__(self, artifact: object, *, run_identity: str) -> None:
+        self.artifact = artifact
+        self.run_identity = run_identity
+        self.save_calls = 0
+
+    def prepare_task(self, task: object, *, episode_hash: str) -> None:
+        del task, episode_hash
+
+    def load_prefix_artifact(self, task: object) -> object:
+        del task
+        return self.artifact
+
+    def save_prefix_artifact(self, task: object, artifact: object) -> bool:
+        del task, artifact
+        self.save_calls += 1
+        return True
+
+
 def _task(spec_episode: str, *, backend: str = "mem0") -> PreparationTask:
     run_identity = sha256_text("run-identity")
     config_hash = sha256_text("config")
+    profile_id = f"{backend}_controlled"
+    task_id = f"prepare--{backend}"
+    payload = {
+        "stage": "prepare_prefix",
+        "task_index": 0,
+        "task_id": task_id,
+        "episode_id": spec_episode,
+        "backend": backend,
+        "profile_id": profile_id,
+        "run_identity": run_identity,
+        "config_hash": config_hash,
+    }
     return PreparationTask(
         task_index=0,
-        task_id=f"prepare--{backend}",
+        task_id=task_id,
         episode_id=spec_episode,
         backend=backend,  # type: ignore[arg-type]
-        profile_id=f"{backend}_controlled",
+        profile_id=profile_id,
         run_identity=run_identity,
         config_hash=config_hash,
-        task_payload_hash=canonical_hash({"episode": spec_episode, "backend": backend}),
+        task_payload_hash=canonical_hash(payload),
     )
+
+
+def _model_hash(
+    task: PreparationTask,
+    spec: object,
+    *,
+    embedding_profile_id: str | None = None,
+    reranker_profile_id: str | None = None,
+    model_files_hash: str | None = None,
+) -> str:
+    identity = _artifact_identity(
+        task=task,
+        spec=spec,  # type: ignore[arg-type]
+        config_hash=None,
+        dataset_manifest_hash=None,
+        embedding_profile_id=embedding_profile_id,
+        reranker_profile_id=reranker_profile_id,
+        writer_profile_id=None,
+        source_commit=None,
+        model_files_hash=model_files_hash,
+        dataset_release=None,
+    )
+    value = identity["model_files_hash"]
+    assert isinstance(value, str)
+    return value
+
+
+def test_default_model_bundle_hash_is_shared_across_all_backends() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    hashes = {
+        _model_hash(_task(spec.plan.episode_id, backend=backend), spec)
+        for backend in ("flat_retrieval", "mem0", "amem", "memos")
+    }
+    assert len(hashes) == 1
+
+
+def test_default_model_bundle_hash_tracks_only_common_model_identity() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task(spec.plan.episode_id)
+    default = _model_hash(task, spec)
+
+    assert _model_hash(task, spec, embedding_profile_id="other-embedding") != default
+    assert _model_hash(task, spec, reranker_profile_id="other-reranker") != default
+    assert _model_hash(
+        _task(spec.plan.episode_id, backend="amem"), spec
+    ) == _model_hash(task, spec)
+
+
+def test_explicit_model_bundle_hash_is_preserved_verbatim() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    explicit = "a" * 64
+    assert _model_hash(
+        _task(spec.plan.episode_id), spec, model_files_hash=explicit
+    ) == explicit
 
 
 def test_prepare_replays_public_sessions_and_searches_before_current_write(tmp_path: Path) -> None:
@@ -234,6 +395,9 @@ def test_prepare_replays_public_sessions_and_searches_before_current_write(tmp_p
         for checkpoint in artifact.checkpoints
         for trace in checkpoint.common_reranks
     )
+    checkpoint_hashes = tuple(item.surface_hash for item in artifact.checkpoints)
+    assert len(set(checkpoint_hashes)) == len(checkpoint_hashes)
+    assert all(value != artifact.surface_hash for value in checkpoint_hashes)
     assert storage.load_prefix_artifact(_task(spec.plan.episode_id)) == artifact
 
 
@@ -253,17 +417,203 @@ def test_prepare_is_deterministic_and_second_run_is_read_only(tmp_path: Path) ->
     assert second_runtime.writes == []
 
 
+def test_cached_prefix_requires_complete_requested_identity_match(tmp_path: Path) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task(spec.plan.episode_id)
+    initial_storage = QualificationStorage(
+        tmp_path / "initial", run_identity=task.run_identity
+    )
+    base = prepare_prefix(
+        task,
+        spec,
+        FakeRuntime(),
+        FakeReranker(),
+        initial_storage,
+        dataset_release="software-release-v1",
+        dataset_manifest_hash="1" * 64,
+        embedding_profile_id="bge_m3",
+        reranker_profile_id="bge_reranker_v2_m3",
+        writer_profile_id="deepseek_v4_pro_writer",
+        source_commit="2" * 40,
+        model_files_hash="3" * 64,
+    )
+    mismatches: tuple[tuple[str, object], ...] = (
+        ("episode_id", "other-episode"),
+        ("backend", "amem"),
+        ("profile_id", "other-profile"),
+        ("config_hash", "4" * 64),
+        ("run_identity", "5" * 64),
+        ("dataset_release", "software-release-v2"),
+        ("dataset_manifest_hash", "6" * 64),
+        ("surface_hash", "7" * 64),
+        ("writer_profile_id", "other-writer"),
+        ("embedding_profile_id", "other-embedding"),
+        ("reranker_profile_id", "other-reranker"),
+        ("source_commit", "8" * 40),
+        ("model_files_hash", "9" * 64),
+    )
+
+    for field, value in mismatches:
+        cached = replace(base, **{field: value, "artifact_hash": ""})
+        storage = CachedArtifactStorage(cached, run_identity=task.run_identity)
+        runtime = FakeRuntime()
+        with pytest.raises(PrefixPreparationError) as exc_info:
+            prepare_prefix(
+                task,
+                spec,
+                runtime,
+                FakeReranker(),
+                storage,  # type: ignore[arg-type]
+                dataset_release="software-release-v1",
+                dataset_manifest_hash="1" * 64,
+                embedding_profile_id="bge_m3",
+                reranker_profile_id="bge_reranker_v2_m3",
+                writer_profile_id="deepseek_v4_pro_writer",
+                source_commit="2" * 40,
+                model_files_hash="3" * 64,
+            )
+        assert exc_info.value.error_class == "identity_mismatch", field
+        assert runtime.closed, field
+        assert runtime.writes == [], field
+        assert storage.save_calls == 0, field
+
+
 def test_failed_prepare_closes_runtime_and_publishes_no_valid_artifact(tmp_path: Path) -> None:
     spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
     task = _task(spec.plan.episode_id)
     storage = QualificationStorage(tmp_path / "run", run_identity=sha256_text("run-identity"))
     runtime = FakeRuntime(fail_session=2)
-    with pytest.raises(PrefixPreparationError, match="synthetic write failure"):
+    with pytest.raises(PrefixPreparationError, match="RuntimeError during prefix preparation"):
         prepare_prefix(task, spec, runtime, FakeReranker(), storage)
     assert runtime.closed
     assert not storage.prefix_artifact_path(task).exists()
-    with pytest.raises(QualificationStorageError, match="synthetic write failure"):
+    with pytest.raises(QualificationStorageError, match="RuntimeError during prefix preparation"):
         storage.load_prefix_artifact(task)
+
+
+def test_failed_prepare_marker_never_persists_exception_secrets(tmp_path: Path) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task(spec.plan.episode_id)
+    storage = QualificationStorage(tmp_path / "run", run_identity=task.run_identity)
+
+    with pytest.raises(PrefixPreparationError):
+        prepare_prefix(task, spec, SecretFailRuntime(), FakeReranker(), storage)
+
+    marker = storage.prefix_failure_path(task).read_text(encoding="utf-8")
+    assert "sentinel-bearer-123" not in marker
+    assert "sentinel-json-key" not in marker
+    assert "sentinel-env-key" not in marker
+    assert "Authorization" not in marker
+    assert "DEEPSEEK_API_KEY" not in marker
+
+
+def test_failed_prepare_does_not_trust_arbitrary_error_class(tmp_path: Path) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task(spec.plan.episode_id)
+    storage = QualificationStorage(tmp_path / "run", run_identity=task.run_identity)
+
+    with pytest.raises(PrefixPreparationError) as exc_info:
+        prepare_prefix(task, spec, UnsafeErrorClassRuntime(), FakeReranker(), storage)
+
+    marker = storage.prefix_failure_path(task).read_text(encoding="utf-8")
+    assert "sentinelSecret123" not in marker
+    assert exc_info.value.error_class == "prefix_preparation_failure"
+
+
+def test_prepare_propagates_keyboard_interrupt_without_failure_marker(tmp_path: Path) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task(spec.plan.episode_id)
+    runtime = InterruptRuntime()
+    storage = QualificationStorage(tmp_path / "run", run_identity=task.run_identity)
+
+    with pytest.raises(KeyboardInterrupt):
+        prepare_prefix(task, spec, runtime, FakeReranker(), storage)
+
+    assert runtime.closed
+    assert not storage.prefix_failure_path(task).exists()
+    assert not storage.prefix_artifact_path(task).exists()
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        {"ordered_memory_ids": [1], "scores": [0.5]},
+        {"ordered_memory_ids": ["memory-0"], "scores": ["0.5"]},
+        {"ordered_memory_ids": ["memory-0"], "scores": [True]},
+        {"ordered_memory_ids": ["memory-0"], "scores": [float("nan")]},
+        {"ordered_memory_ids": ["memory-0"], "scores": []},
+        {"ordered_memory_ids": [], "scores": []},
+        {"ordered_memory_ids": ["memory-0"], "scores": [0.5], "input_count": 999},
+        {"ordered_memory_ids": ["memory-0"], "scores": [0.5], "input_count": True},
+        {"ordered_memory_ids": ["memory-0"], "scores": [0.5], "input_count": -1},
+        ["memory-0"],
+    ),
+    ids=(
+        "non-string-id",
+        "string-score",
+        "boolean-score",
+        "non-finite-score",
+        "length-mismatch",
+        "candidate-shortfall",
+        "wrong-input-count",
+        "boolean-input-count",
+        "negative-input-count",
+        "ids-without-scores",
+    ),
+)
+def test_prepare_rejects_malformed_reranker_results(
+    tmp_path: Path,
+    result: object,
+) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task(spec.plan.episode_id)
+    storage = QualificationStorage(
+        tmp_path / canonical_hash(result),
+        run_identity=task.run_identity,
+    )
+
+    with pytest.raises(PrefixPreparationError) as exc_info:
+        prepare_prefix(
+            task,
+            spec,
+            FakeRuntime(),
+            MalformedReranker(result),  # type: ignore[arg-type]
+            storage,
+        )
+
+    assert exc_info.value.error_class == "reranker_failure"
+    assert not storage.prefix_artifact_path(task).exists()
+
+
+def test_prepare_rejects_reranker_input_count_mismatch(tmp_path: Path) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task(spec.plan.episode_id)
+    storage = QualificationStorage(tmp_path / "run", run_identity=task.run_identity)
+
+    with pytest.raises(PrefixPreparationError) as exc_info:
+        prepare_prefix(
+            task,
+            spec,
+            FakeRuntime(),
+            WrongInputCountReranker(),
+            storage,
+        )
+
+    assert exc_info.value.error_class == "reranker_failure"
+    assert not storage.prefix_artifact_path(task).exists()
+
+
+def test_prepare_closes_runtime_on_pre_replay_identity_failure(tmp_path: Path) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task("different-episode")
+    runtime = FakeRuntime()
+    storage = QualificationStorage(tmp_path / "run", run_identity=task.run_identity)
+
+    with pytest.raises(PrefixPreparationError, match="episode"):
+        prepare_prefix(task, spec, runtime, FakeReranker(), storage)
+
+    assert runtime.closed
+    assert not storage.prefix_failure_path(task).exists()
 
 
 def test_prepare_rejects_nonempty_start_and_invalid_common_subset(tmp_path: Path) -> None:

@@ -12,12 +12,18 @@ from lhmsb.qualification.config import (
     QualificationConfigError,
     build_evaluation_task_templates,
     build_preparation_tasks,
+    canonical_hash,
     finalize_evaluation_plan,
     load_qualification_config,
 )
-from lhmsb.qualification.memory_runtime import InventorySnapshot
+from lhmsb.qualification.memory_runtime import InventorySnapshot, WriteSessionResult
 from lhmsb.qualification.prefix import MemoryPrefixArtifact, MemoryPrefixCheckpoint
-from lhmsb.qualification.schema import SystemsQualificationConfig
+from lhmsb.qualification.schema import (
+    EvaluationTask,
+    EvaluationTaskTemplate,
+    PreparationTask,
+    SystemsQualificationConfig,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / "configs" / "experiments" / "systems_controlled_zen.yaml"
@@ -42,6 +48,22 @@ def _artifact(
     checkpoint = MemoryPrefixCheckpoint(
         checkpoint_session=1,
         surface_hash="4" * 64,
+        writes=(
+            WriteSessionResult(
+                session_index=0,
+                events=(),
+                inventory=InventorySnapshot(
+                    checkpoint_session=0,
+                    n_write=0,
+                    n_live=0,
+                    items=(),
+                    store_hash="8" * 64,
+                    backend_count=0,
+                ),
+                n_write=0,
+                latency_seconds=0.0,
+            ),
+        ),
         inventory=InventorySnapshot(
             checkpoint_session=1,
             n_write=0,
@@ -76,6 +98,25 @@ def _artifacts(config: SystemsQualificationConfig) -> dict[str, MemoryPrefixArti
         f"software-42--{backend}": _artifact(config, backend)
         for backend in ("flat_retrieval", "mem0", "amem", "memos")
     }
+
+
+def _rehash_template(raw: dict[str, object]) -> dict[str, object]:
+    raw["task_payload_hash"] = canonical_hash(
+        {
+            "stage": "evaluate_template",
+            "task_index": raw["task_index"],
+            "task_id": raw["task_id"],
+            "episode_id": raw["episode_id"],
+            "policy_profile_id": raw["policy_profile_id"],
+            "condition": raw["condition"],
+            "prefix_backend": raw["prefix_backend"],
+            "prefix_artifact_hash": raw["prefix_artifact_hash"],
+            "run_identity": raw["run_identity"],
+            "config_hash": raw["config_hash"],
+            "results": raw["scored_conditions"],
+        }
+    )
+    return raw
 
 
 def test_schema_v2_repository_matrix_and_exact_pins() -> None:
@@ -161,6 +202,79 @@ def test_schema_v2_config_is_deeply_immutable_and_serializes_condition_definitio
     )
 
 
+def test_schema_v2_config_defensively_tuples_sequence_inputs() -> None:
+    config = _config()
+    policies = list(config.policy_profiles)
+    conditions = list(config.conditions)
+    secrets = list(config.required_secret_env)
+    copied = replace(
+        config,
+        policy_profiles=policies,  # type: ignore[arg-type]
+        conditions=conditions,  # type: ignore[arg-type]
+        required_secret_env=secrets,  # type: ignore[arg-type]
+    )
+    before = copied.to_dict()
+    before_hash = copied.config_hash
+
+    policies.reverse()
+    conditions.reverse()
+    secrets.append("TAMPERED_SECRET")
+
+    assert isinstance(copied.policy_profiles, tuple)
+    assert isinstance(copied.conditions, tuple)
+    assert isinstance(copied.required_secret_env, tuple)
+    assert copied.to_dict() == before
+    assert copied.config_hash == before_hash
+
+
+@pytest.mark.parametrize("backend", ("flat_retrieval", "mem0", "amem", "memos"))
+def test_schema_v2_system_profiles_defensively_tuple_readouts(backend: str) -> None:
+    config = _config()
+    original = config.system_profiles[backend]
+    readouts = list(original.readouts)
+    copied = replace(original, readouts=readouts)  # type: ignore[arg-type]
+    profiles = dict(config.system_profiles)
+    profiles[backend] = copied
+    copied_config = replace(config, system_profiles=profiles)
+    before = copied_config.to_dict()
+    before_hash = copied_config.config_hash
+
+    readouts.append("none")  # type: ignore[arg-type]
+
+    assert isinstance(copied.readouts, tuple)
+    assert copied.readouts == original.readouts
+    assert copied_config.to_dict() == before
+    assert copied_config.config_hash == before_hash
+
+
+def test_schema_v2_evaluation_records_defensively_tuple_scored_conditions() -> None:
+    config = _config()
+    templates = build_evaluation_task_templates(
+        config, episode_ids=("software-42",), run_identity=RUN_ID
+    )
+    template = next(item for item in templates if item.condition == "mem0")
+    template_scores = list(template.scored_conditions)
+    copied_template = replace(
+        template,
+        scored_conditions=template_scores,  # type: ignore[arg-type]
+    )
+    artifacts = _artifacts(config)
+    tasks = finalize_evaluation_plan(config, templates, artifacts, run_identity=RUN_ID)
+    task = next(item for item in tasks if item.condition == "mem0")
+    task_scores = list(task.scored_conditions)
+    copied_task = replace(task, scored_conditions=task_scores)  # type: ignore[arg-type]
+    template_before = copied_template.to_dict()
+    task_before = copied_task.to_dict()
+
+    template_scores.append(template_scores[0])
+    task_scores.reverse()
+
+    assert isinstance(copied_template.scored_conditions, tuple)
+    assert isinstance(copied_task.scored_conditions, tuple)
+    assert copied_template.to_dict() == template_before
+    assert copied_task.to_dict() == task_before
+
+
 @pytest.mark.parametrize(
     "change",
     (
@@ -223,6 +337,180 @@ def test_two_stage_plan_counts_and_template_is_non_executable() -> None:
     assert all(not item.executable for item in templates)
     assert all(item.prefix_artifact_hash == NO_PREFIX_ARTIFACT for item in templates)
     assert all(item.config_hash == config.config_hash for item in templates)
+
+
+def test_v2_task_records_round_trip_through_strict_schema_deserializers() -> None:
+    config = _config()
+    preparation = build_preparation_tasks(
+        config, episode_ids=("software-42",), run_identity=RUN_ID
+    )[0]
+    templates = build_evaluation_task_templates(
+        config, episode_ids=("software-42",), run_identity=RUN_ID
+    )
+    template = next(item for item in templates if item.condition == "mem0")
+    task = next(
+        item
+        for item in finalize_evaluation_plan(
+            config, templates, _artifacts(config), run_identity=RUN_ID
+        )
+        if item.condition == "mem0"
+    )
+
+    assert PreparationTask.from_dict(preparation.to_dict()) == preparation
+    assert EvaluationTaskTemplate.from_dict(template.to_dict()) == template
+    assert EvaluationTask.from_dict(task.to_dict()) == task
+
+
+def test_v2_task_construction_recomputes_all_three_payload_hashes() -> None:
+    config = _config()
+    preparation = build_preparation_tasks(
+        config, episode_ids=("software-42",), run_identity=RUN_ID
+    )[0]
+    templates = build_evaluation_task_templates(
+        config, episode_ids=("software-42",), run_identity=RUN_ID
+    )
+    template = next(item for item in templates if item.condition == "mem0")
+    task = next(
+        item
+        for item in finalize_evaluation_plan(
+            config, templates, _artifacts(config), run_identity=RUN_ID
+        )
+        if item.condition == "mem0"
+    )
+
+    with pytest.raises(ValueError, match="task_payload_hash"):
+        replace(preparation, profile_id="tampered-profile")
+    with pytest.raises(ValueError, match="task_payload_hash"):
+        replace(template, policy_profile_id="tampered-policy")
+    with pytest.raises(ValueError, match="task_payload_hash"):
+        replace(task, prefix_artifact_hash="9" * 64)
+
+
+@pytest.mark.parametrize(
+    ("record_type", "field", "value"),
+    (
+        (PreparationTask, "backend", "mem0"),
+        (EvaluationTaskTemplate, "policy_profile_id", "tampered-policy"),
+        (EvaluationTask, "prefix_artifact_hash", "9" * 64),
+    ),
+)
+def test_v2_task_deserialization_rejects_payload_hash_mismatch(
+    record_type: type[PreparationTask] | type[EvaluationTaskTemplate] | type[EvaluationTask],
+    field: str,
+    value: object,
+) -> None:
+    config = _config()
+    preparation = build_preparation_tasks(
+        config, episode_ids=("software-42",), run_identity=RUN_ID
+    )[0]
+    templates = build_evaluation_task_templates(
+        config, episode_ids=("software-42",), run_identity=RUN_ID
+    )
+    template = next(item for item in templates if item.condition == "mem0")
+    task = next(
+        item
+        for item in finalize_evaluation_plan(
+            config, templates, _artifacts(config), run_identity=RUN_ID
+        )
+        if item.condition == "mem0"
+    )
+    records = {
+        PreparationTask: preparation,
+        EvaluationTaskTemplate: template,
+        EvaluationTask: task,
+    }
+    raw = records[record_type].to_dict()
+    raw[field] = value
+
+    with pytest.raises(ValueError, match="task_payload_hash"):
+        record_type.from_dict(raw)
+
+
+def test_v2_task_hash_validation_cannot_be_bypassed_with_custom_task_id() -> None:
+    config = _config()
+    preparation = build_preparation_tasks(
+        config, episode_ids=("software-42",), run_identity=RUN_ID
+    )[0]
+    raw = preparation.to_dict()
+    raw["task_id"] = "custom-task-id"
+    raw["profile_id"] = "tampered-profile"
+
+    with pytest.raises(ValueError, match="task_payload_hash"):
+        PreparationTask.from_dict(raw)
+
+
+def test_v2_task_id_alone_is_bound_into_every_task_payload_hash() -> None:
+    config = _config()
+    preparation = build_preparation_tasks(
+        config, episode_ids=("software-42",), run_identity=RUN_ID
+    )[0]
+    templates = build_evaluation_task_templates(
+        config, episode_ids=("software-42",), run_identity=RUN_ID
+    )
+    template = next(
+        item
+        for item in templates
+        if item.condition == "mem0"
+    )
+    task = next(
+        item
+        for item in finalize_evaluation_plan(
+            config, templates, _artifacts(config), run_identity=RUN_ID
+        )
+        if item.condition == "mem0"
+    )
+
+    for record in (preparation, template, task):
+        raw = record.to_dict()
+        raw["task_id"] = "custom-task-id"
+        with pytest.raises(ValueError, match="task_payload_hash"):
+            type(record).from_dict(raw)
+
+    escaped = preparation.to_dict()
+    escaped["task_id"] = "../../escape"
+    with pytest.raises(ValueError, match="task_id"):
+        PreparationTask.from_dict(escaped)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        ("policy", "result_id"),
+        ("prefix_backend", "prefix_backend"),
+        ("cell_condition", "condition"),
+        ("readout", "readout"),
+        ("duplicate_cell", "unique"),
+    ),
+)
+def test_v2_evaluation_schema_rejects_rehashed_cross_cell_drift(
+    mutation: str, error: str
+) -> None:
+    config = _config()
+    template = next(
+        item
+        for item in build_evaluation_task_templates(
+            config, episode_ids=("software-42",), run_identity=RUN_ID
+        )
+        if item.condition == "mem0"
+    )
+    raw = template.to_dict()
+    scored = raw["scored_conditions"]
+    assert isinstance(scored, list)
+    assert all(isinstance(item, dict) for item in scored)
+    if mutation == "policy":
+        raw["policy_profile_id"] = "tampered-policy"
+    elif mutation == "prefix_backend":
+        raw["prefix_backend"] = "amem"
+    elif mutation == "cell_condition":
+        scored[0]["condition"] = "amem"
+    elif mutation == "readout":
+        scored[1]["readout"] = "none"
+    else:
+        scored[1] = dict(scored[0])
+    _rehash_template(raw)
+
+    with pytest.raises(ValueError, match=error):
+        EvaluationTaskTemplate.from_dict(raw)
 
 
 def test_v2_task_builders_require_lowercase_sha256_run_identity() -> None:
@@ -292,6 +580,20 @@ def test_finalize_accepts_one_serialized_artifact_mapping_without_misclassifying
     assert len(tasks) == 21
 
 
+def test_finalize_converts_nested_memory_trace_errors_to_config_errors() -> None:
+    config = _config()
+    templates = build_evaluation_task_templates(
+        config, episode_ids=("software-42",), run_identity=RUN_ID
+    )
+    serialized = {key: value.to_dict() for key, value in _artifacts(config).items()}
+    checkpoint = serialized["software-42--mem0"]["checkpoints"][0]  # type: ignore[index]
+    inventory = checkpoint["inventory"]  # type: ignore[index]
+    inventory["n_live"] = 1  # type: ignore[index]
+
+    with pytest.raises(QualificationConfigError, match="prefix artifact"):
+        finalize_evaluation_plan(config, templates, serialized, run_identity=RUN_ID)
+
+
 def test_finalize_rejects_raw_hashes_and_duck_typed_objects() -> None:
     config = _config()
     templates = build_evaluation_task_templates(
@@ -334,7 +636,9 @@ def test_finalize_rebuilds_and_verifies_exact_template_matrix(mutation: str) -> 
     if mutation == "incomplete":
         changed = templates[:-1]
     elif mutation == "tampered":
-        changed = (replace(templates[0], task_payload_hash="0" * 64), *templates[1:])
+        with pytest.raises(ValueError, match="task_payload_hash"):
+            replace(templates[0], task_payload_hash="0" * 64)
+        return
     else:
         changed = build_evaluation_task_templates(
             config, episode_ids=("software-42",), run_identity=OTHER_RUN_ID

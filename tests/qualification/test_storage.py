@@ -13,15 +13,28 @@ from lhmsb.qualification.storage import QualificationStorage, QualificationStora
 
 
 def _task(episode_id: str) -> PreparationTask:
+    run_identity = sha256_text("run")
+    config_hash = sha256_text("config")
+    task_id = "prepare-storage"
+    payload = {
+        "stage": "prepare_prefix",
+        "task_index": 0,
+        "task_id": task_id,
+        "episode_id": episode_id,
+        "backend": "mem0",
+        "profile_id": "mem0_controlled",
+        "run_identity": run_identity,
+        "config_hash": config_hash,
+    }
     return PreparationTask(
         task_index=0,
-        task_id="prepare-storage",
+        task_id=task_id,
         episode_id=episode_id,
         backend="mem0",
         profile_id="mem0_controlled",
-        run_identity=sha256_text("run"),
-        config_hash=sha256_text("config"),
-        task_payload_hash=canonical_hash({"episode": episode_id}),
+        run_identity=run_identity,
+        config_hash=config_hash,
+        task_payload_hash=canonical_hash(payload),
     )
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
@@ -57,7 +58,24 @@ class CommonReranker(Protocol):
         candidates: tuple[RerankCandidate, ...],
         *,
         top_k: int | None = None,
-    ) -> RerankResult | Mapping[str, object] | Sequence[object]: ...
+    ) -> RerankResult | Mapping[str, object]: ...
+
+
+class _CloseOnceRuntime:
+    """Delegate a memory runtime while making cleanup total and idempotent."""
+
+    def __init__(self, runtime: MemoryRuntime) -> None:
+        self._runtime = runtime
+        self.closed = False
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._runtime, name)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self._runtime.close()
 
 
 def prepare_prefix(
@@ -74,6 +92,48 @@ def prepare_prefix(
     writer_profile_id: str | None = None,
     source_commit: str | None = None,
     model_files_hash: str | None = None,
+    dataset_release: str | None = None,
+    visible_k: int = 5,
+) -> MemoryPrefixArtifact:
+    """Prepare a prefix and close its native runtime on every exit path."""
+    guarded = _CloseOnceRuntime(runtime)
+    try:
+        return _prepare_prefix_impl(
+            task,
+            spec,
+            cast(MemoryRuntime, guarded),
+            reranker,
+            storage,
+            config_hash=config_hash,
+            dataset_manifest_hash=dataset_manifest_hash,
+            embedding_profile_id=embedding_profile_id,
+            reranker_profile_id=reranker_profile_id,
+            writer_profile_id=writer_profile_id,
+            source_commit=source_commit,
+            model_files_hash=model_files_hash,
+            dataset_release=dataset_release,
+            visible_k=visible_k,
+        )
+    finally:
+        with suppress(Exception):
+            guarded.close()
+
+
+def _prepare_prefix_impl(
+    task: PreparationTask,
+    spec: SoftwareMem0VerticalSpec,
+    runtime: MemoryRuntime,
+    reranker: CommonReranker | None,
+    storage: QualificationStorage,
+    *,
+    config_hash: str | None = None,
+    dataset_manifest_hash: str | None = None,
+    embedding_profile_id: str | None = None,
+    reranker_profile_id: str | None = None,
+    writer_profile_id: str | None = None,
+    source_commit: str | None = None,
+    model_files_hash: str | None = None,
+    dataset_release: str | None = None,
     visible_k: int = 5,
 ) -> MemoryPrefixArtifact:
     """Replay one episode and publish a complete immutable prefix artifact.
@@ -96,6 +156,18 @@ def prepare_prefix(
             "preparation task episode differs from Software spec",
         )
 
+    identity = _artifact_identity(
+        task=task,
+        spec=spec,
+        config_hash=config_hash,
+        dataset_manifest_hash=dataset_manifest_hash,
+        embedding_profile_id=embedding_profile_id,
+        reranker_profile_id=reranker_profile_id,
+        writer_profile_id=writer_profile_id,
+        source_commit=source_commit,
+        model_files_hash=model_files_hash,
+        dataset_release=dataset_release,
+    )
     storage.prepare_task(task, episode_hash=spec.surface_hash)
     try:
         existing = storage.load_prefix_artifact(task)
@@ -108,20 +180,22 @@ def prepare_prefix(
         else:
             raise PrefixPreparationError(exc.error_class, str(exc)) from exc
     if existing is not None:
+        mismatches = _cached_identity_mismatches(
+            existing,
+            task=task,
+            spec=spec,
+            requested=identity,
+        )
         _close_runtime(runtime)
+        if mismatches:
+            raise PrefixPreparationError(
+                "identity_mismatch",
+                "cached prefix artifact identity differs from this request: "
+                + ", ".join(mismatches),
+            )
         return existing
 
-    identity = _artifact_identity(
-        task=task,
-        spec=spec,
-        config_hash=config_hash,
-        dataset_manifest_hash=dataset_manifest_hash,
-        embedding_profile_id=embedding_profile_id,
-        reranker_profile_id=reranker_profile_id,
-        writer_profile_id=writer_profile_id,
-        source_commit=source_commit,
-        model_files_hash=model_files_hash,
-    )
+    runtime_closed = False
     try:
         artifact = _replay_prefix(
             task,
@@ -132,14 +206,10 @@ def prepare_prefix(
             identity=identity,
         )
         _close_runtime(runtime)
+        runtime_closed = True
         storage.save_prefix_artifact(task, artifact)
         return artifact
-    except BaseException as exc:
-        # ``close`` is required on both successful and failed paths.  A second
-        # close is harmless for the adapter contract; fakes may reject it, so
-        # swallow only cleanup errors here and preserve the primary exception.
-        with suppress(Exception):
-            runtime.close()
+    except Exception as exc:
         error_class = _error_class(exc)
         try:
             storage.mark_prefix_failed(
@@ -155,6 +225,12 @@ def prepare_prefix(
         if isinstance(exc, PrefixPreparationError):
             raise
         raise PrefixPreparationError(error_class, _safe_error_message(exc)) from exc
+    finally:
+        # Cancellation signals propagate unchanged, but native clients and
+        # service handles are still released on every exit path.
+        if not runtime_closed:
+            with suppress(Exception):
+                runtime.close()
 
 
 def _replay_prefix(
@@ -237,7 +313,7 @@ def _replay_prefix(
         checkpoints.append(
             MemoryPrefixCheckpoint(
                 checkpoint_session=checkpoint_session,
-                surface_hash=spec.surface_hash,
+                surface_hash=_checkpoint_surface_hash(spec, checkpoint_session),
                 writes=() if previous_write is None else (previous_write,),
                 inventory=current_inventory,
                 retrievals=tuple(retrievals),
@@ -315,6 +391,7 @@ def _artifact_identity(
     writer_profile_id: str | None,
     source_commit: str | None,
     model_files_hash: str | None,
+    dataset_release: str | None = None,
 ) -> dict[str, object]:
     run_identity = task.run_identity
     if re.fullmatch(r"[0-9a-f]{64}", run_identity) is None:
@@ -325,7 +402,7 @@ def _artifact_identity(
     return {
         "config_hash": config_hash or task.config_hash,
         "run_identity": run_identity,
-        "dataset_release": spec.plan.template_id,
+        "dataset_release": dataset_release or spec.plan.template_id,
         "dataset_manifest_hash": dataset_manifest_hash or spec.surface_hash,
         "embedding_profile_id": embedding_profile_id
         or getattr(task, "embedding_profile_id", None)
@@ -337,15 +414,65 @@ def _artifact_identity(
         if writer_profile_id is not None
         else (None if task.backend == "flat_retrieval" else "deepseek_v4_pro_writer"),
         "source_commit": resolved_source,
+        # This fallback is a deterministic dry-run identity. Live server runs
+        # must pass the measured hash of the shared embedding/reranker bundle.
         "model_files_hash": model_files_hash
         or _hash_json(
             {
                 "embedding_profile_id": embedding_profile_id or "bge_m3",
                 "reranker_profile_id": reranker_profile_id or "bge_reranker_v2_m3",
-                "profile_id": task.profile_id,
             }
         ),
     }
+
+
+def _cached_identity_mismatches(
+    existing: MemoryPrefixArtifact,
+    *,
+    task: PreparationTask,
+    spec: SoftwareMem0VerticalSpec,
+    requested: Mapping[str, object],
+) -> tuple[str, ...]:
+    expected = (
+        ("episode_id", existing.episode_id, task.episode_id),
+        ("backend", existing.backend, task.backend),
+        ("profile_id", existing.profile_id, task.profile_id),
+        ("config_hash", existing.config_hash, requested["config_hash"]),
+        ("run_identity", existing.run_identity, requested["run_identity"]),
+        (
+            "dataset_release",
+            existing.dataset_release,
+            requested["dataset_release"],
+        ),
+        (
+            "dataset_manifest_hash",
+            existing.dataset_manifest_hash,
+            requested["dataset_manifest_hash"],
+        ),
+        ("surface_hash", existing.surface_hash, spec.surface_hash),
+        (
+            "writer_profile_id",
+            existing.writer_profile_id,
+            requested["writer_profile_id"],
+        ),
+        (
+            "embedding_profile_id",
+            existing.embedding_profile_id,
+            requested["embedding_profile_id"],
+        ),
+        (
+            "reranker_profile_id",
+            existing.reranker_profile_id,
+            requested["reranker_profile_id"],
+        ),
+        ("source_commit", existing.source_commit, requested["source_commit"]),
+        (
+            "model_files_hash",
+            existing.model_files_hash,
+            requested["model_files_hash"],
+        ),
+    )
+    return tuple(field for field, actual, wanted in expected if actual != wanted)
 
 
 def _opportunity(spec: SoftwareMem0VerticalSpec, opportunity_id: str) -> Any:
@@ -453,7 +580,7 @@ def _common_rerank_record(
                 "reranker_missing",
                 "common reranker is required for a non-empty candidate set",
             )
-        result: RerankResult | Mapping[str, object] | Sequence[object] = RerankResult(
+        result: RerankResult | Mapping[str, object] = RerankResult(
             ordered_memory_ids=(),
             scores=(),
             model="none",
@@ -482,6 +609,13 @@ def _common_rerank_record(
             "reranker_failure",
             f"common reranker output for {sceu_id} exceeds visible_k",
         )
+    expected_count = min(visible_k, len(candidate_ids))
+    if len(ordered) != expected_count:
+        raise PrefixPreparationError(
+            "reranker_failure",
+            f"common reranker output for {sceu_id} returned "
+            f"{len(ordered)} results; expected {expected_count}",
+        )
     result = _rerank_result_from_normalized(
         ordered=ordered,
         scores=scores,
@@ -507,25 +641,61 @@ def _rerank_result_from_normalized(
     query: str,
 ) -> RerankResult:
     if len(scores) != len(ordered):
-        scores = tuple(0.0 for _ in ordered)
+        raise PrefixPreparationError(
+            "reranker_failure",
+            "reranker IDs and scores must have identical lengths",
+        )
     model = metadata.get("model", "common-reranker")
     revision = metadata.get("revision", "controlled")
+    if not isinstance(model, str) or not model:
+        raise PrefixPreparationError("reranker_failure", "reranker model is invalid")
+    if not isinstance(revision, str) or not revision:
+        raise PrefixPreparationError("reranker_failure", "reranker revision is invalid")
+    reported_input_count = metadata.get("input_count")
+    if reported_input_count is not None:
+        if (
+            isinstance(reported_input_count, bool)
+            or not isinstance(reported_input_count, int)
+            or reported_input_count < 0
+        ):
+            raise PrefixPreparationError(
+                "reranker_failure", "reranker input_count must be non-negative"
+            )
+        if reported_input_count != input_count:
+            raise PrefixPreparationError(
+                "reranker_failure",
+                "reranker input_count does not match candidate set",
+            )
     request_hash = metadata.get("request_hash")
     response_hash = metadata.get("response_hash")
-    if not isinstance(request_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", request_hash):
+    if request_hash is not None and (
+        not isinstance(request_hash, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", request_hash)
+    ):
+        raise PrefixPreparationError("reranker_failure", "reranker request hash is invalid")
+    if request_hash is None:
         request_hash = _hash_json({"query": query, "ordered": ordered, "input_count": input_count})
-    if not isinstance(response_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", response_hash):
+    if response_hash is not None and (
+        not isinstance(response_hash, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", response_hash)
+    ):
+        raise PrefixPreparationError("reranker_failure", "reranker response hash is invalid")
+    if response_hash is None:
         response_hash = _hash_json({"ordered": ordered, "scores": scores})
     latency = metadata.get("latency_seconds", 0.0)
-    try:
-        latency_value = float(cast(Any, latency))
-    except (TypeError, ValueError) as exc:
-        raise PrefixPreparationError("reranker_failure", "reranker latency is invalid") from exc
+    if (
+        isinstance(latency, bool)
+        or not isinstance(latency, (int, float))
+        or not math.isfinite(latency)
+        or latency < 0
+    ):
+        raise PrefixPreparationError("reranker_failure", "reranker latency is invalid")
+    latency_value = float(latency)
     return RerankResult(
         ordered_memory_ids=ordered,
         scores=scores,
-        model=str(model),
-        revision=str(revision),
+        model=model,
+        revision=revision,
         input_count=input_count,
         request_hash=request_hash,
         response_hash=response_hash,
@@ -534,12 +704,15 @@ def _rerank_result_from_normalized(
 
 
 def _normalize_rerank(
-    result: RerankResult | Mapping[str, object] | Sequence[object],
+    result: RerankResult | Mapping[str, object],
 ) -> tuple[tuple[str, ...], tuple[float, ...], dict[str, object]]:
     if isinstance(result, RerankResult):
+        ids = _strict_rerank_ids(result.ordered_memory_ids)
+        scores = _strict_rerank_scores(result.scores)
+        _require_matching_rerank_lengths(ids, scores)
         return (
-            tuple(result.ordered_memory_ids),
-            tuple(float(value) for value in result.scores),
+            ids,
+            scores,
             {
                 "model": result.model,
                 "revision": result.revision,
@@ -550,27 +723,69 @@ def _normalize_rerank(
             },
         )
     if isinstance(result, Mapping):
-        raw_ids = result.get("ordered_memory_ids", result.get("memory_ids", ()))
-        raw_scores = result.get("scores", ())
+        if "ordered_memory_ids" not in result and "memory_ids" not in result:
+            raise PrefixPreparationError("reranker_failure", "reranker response lacks IDs")
+        if "scores" not in result:
+            raise PrefixPreparationError("reranker_failure", "reranker response lacks scores")
+        raw_ids = result.get("ordered_memory_ids", result.get("memory_ids"))
+        raw_scores = result.get("scores")
         if not isinstance(raw_ids, Sequence) or isinstance(raw_ids, (str, bytes)):
             raise PrefixPreparationError("reranker_failure", "reranker IDs must be an array")
-        ids = tuple(str(value) for value in raw_ids)
         if not isinstance(raw_scores, Sequence) or isinstance(raw_scores, (str, bytes)):
             raise PrefixPreparationError("reranker_failure", "reranker scores must be an array")
-        try:
-            scores = tuple(float(value) for value in raw_scores)
-        except (TypeError, ValueError) as exc:
-            raise PrefixPreparationError("reranker_failure", "reranker scores are invalid") from exc
+        ids = _strict_rerank_ids(raw_ids)
+        scores = _strict_rerank_scores(raw_scores)
+        _require_matching_rerank_lengths(ids, scores)
         metadata = {
-            str(key): value
-            for key, value in result.items()
-            if key not in {"ordered_memory_ids", "memory_ids", "scores"}
+            key: result[key]
+            for key in (
+                "model",
+                "revision",
+                "input_count",
+                "request_hash",
+                "response_hash",
+                "latency_seconds",
+            )
+            if key in result
         }
         return ids, scores, metadata
-    if isinstance(result, (str, bytes)):
-        raise PrefixPreparationError("reranker_failure", "reranker result must be structured")
-    ids = tuple(str(value) for value in result)
-    return ids, (), {}
+    raise PrefixPreparationError("reranker_failure", "reranker result must be structured")
+
+
+def _strict_rerank_ids(values: Sequence[object]) -> tuple[str, ...]:
+    if any(not isinstance(value, str) or not value for value in values):
+        raise PrefixPreparationError(
+            "reranker_failure",
+            "reranker IDs must be non-empty strings",
+        )
+    return tuple(cast(str, value) for value in values)
+
+
+def _strict_rerank_scores(values: Sequence[object]) -> tuple[float, ...]:
+    scores: list[float] = []
+    for value in values:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise PrefixPreparationError(
+                "reranker_failure",
+                "reranker scores must be finite numbers",
+            )
+        scores.append(float(value))
+    return tuple(scores)
+
+
+def _require_matching_rerank_lengths(
+    ids: tuple[str, ...],
+    scores: tuple[float, ...],
+) -> None:
+    if len(ids) != len(scores):
+        raise PrefixPreparationError(
+            "reranker_failure",
+            "reranker IDs and scores must have identical lengths",
+        )
 
 
 def _close_runtime(runtime: MemoryRuntime) -> None:
@@ -582,22 +797,67 @@ def _close_runtime(runtime: MemoryRuntime) -> None:
 
 def _error_class(exc: BaseException) -> str:
     value = getattr(exc, "error_class", None)
-    return value if isinstance(value, str) and value else type(exc).__name__
+    safe_classes = {
+        "future_memory_leak",
+        "identity_mismatch",
+        "inventory_eligibility_mismatch",
+        "non_empty_start",
+        "reranker_missing",
+        "reranker_failure",
+        "session_mismatch",
+        "unknown_opportunity",
+        "close_failure",
+        "storage_failure",
+        "prefix_preparation_failure",
+    }
+    if (
+        isinstance(exc, PrefixPreparationError)
+        and isinstance(value, str)
+        and value in safe_classes
+    ):
+        return value
+    if value is not None:
+        return "prefix_preparation_failure"
+    fallback = type(exc).__name__
+    if type(exc).__module__ == "builtins" and fallback in {
+        "AssertionError",
+        "KeyError",
+        "RuntimeError",
+        "TypeError",
+        "ValueError",
+    }:
+        return fallback
+    return "prefix_preparation_failure"
 
 
 def _safe_error_message(exc: BaseException) -> str:
-    # Never copy provider request/response bodies into a failure marker.  The
-    # type and benchmark error class are sufficient to diagnose a failed task;
-    # adapter-specific logs remain outside the artifact identity.
-    value = str(exc).replace("\n", " ").strip()
-    value = re.sub(
-        r"(?i)(?:sk-[a-z0-9_-]{8,}|(?:api[_-]?key|token|secret)[=:][^\s,;]+)",
-        "<redacted>",
-        value,
+    # Arbitrary provider exceptions can embed credentials in headers, JSON,
+    # URLs, or environment dumps.  Regex redaction is therefore not a safe
+    # persistence boundary: only benchmark-controlled text enters artifacts.
+    return f"{_error_class(exc)} during prefix preparation"
+
+
+def _checkpoint_surface_hash(
+    spec: SoftwareMem0VerticalSpec,
+    checkpoint_session: int,
+) -> str:
+    sessions = spec.public_session_dicts
+    current_session: object = (
+        sessions[checkpoint_session] if checkpoint_session < len(sessions) else None
     )
-    if len(value) > 400:
-        value = value[:400]
-    return value or type(exc).__name__
+    continuations = tuple(
+        item.to_dict()
+        for item in spec.public_continuations
+        if item.checkpoint_session == checkpoint_session
+    )
+    return _hash_json(
+        {
+            "episode_id": spec.plan.episode_id,
+            "checkpoint_session": checkpoint_session,
+            "session": current_session,
+            "continuations": continuations,
+        }
+    )
 
 
 def _hash_json(value: object) -> str:

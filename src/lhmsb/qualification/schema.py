@@ -5,10 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, cast
 
 PolicyProvider = Literal["anthropic", "deepseek", "openai"]
 PolicyRequestAPI = Literal["messages", "responses", "chat_completions"]
@@ -193,6 +193,7 @@ class Mem0ControlledProfile:
     fallback_backend: str | None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "readouts", tuple(self.readouts))
         if self.backend != "mem0" or self.kind != "mem0" or self.track != "controlled":
             raise ValueError("schema-v2 Mem0 profile must be controlled mem0")
         if (
@@ -291,6 +292,7 @@ class FlatRetrievalProfile:
     fallback_backend: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "readouts", tuple(self.readouts))
         if self.backend != "flat_retrieval" or self.kind != "flat_retrieval":
             raise ValueError("flat profile backend/kind must be flat_retrieval")
         if (
@@ -344,6 +346,7 @@ class AMemProfile:
     fallback_backend: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "readouts", tuple(self.readouts))
         if self.backend != "amem" or self.kind != "amem":
             raise ValueError("A-MEM profile backend/kind must be amem")
         if self.package.strip().lower() in {"a-mem", "a_mem"}:
@@ -406,6 +409,7 @@ class MemOSTreeProfile:
     fallback_backend: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "readouts", tuple(self.readouts))
         if self.backend != "memos" or self.kind != "memos":
             raise ValueError("MemOS profile backend/kind must be memos")
         if self.mode != "tree":
@@ -450,6 +454,162 @@ FlatProfile = FlatRetrievalProfile
 SamplingProfile = CausalSamplingProfile
 
 
+def _canonical_task_hash(value: object) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validate_task_payload_hash(actual: str, payload: Mapping[str, object]) -> None:
+    _require_sha256(actual, "task_payload_hash")
+    expected = _canonical_task_hash(payload)
+    if actual != expected:
+        raise ValueError(
+            "task_payload_hash does not match the canonical task payload: "
+            f"expected {expected}; received {actual}"
+        )
+
+
+def _task_text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+    return value
+
+
+def _task_id(value: object) -> str:
+    task_id = _task_text(value, "task_id")
+    if (
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", task_id) is None
+        or ".." in task_id
+        or "/" in task_id
+        or "\\" in task_id
+    ):
+        raise ValueError("task_id must be a canonical path-safe identifier")
+    return task_id
+
+
+def _task_index(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("task_index must be a non-negative integer")
+    return value
+
+
+def _task_bool(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    return value
+
+
+def _task_backend(value: object, *, optional: bool) -> SystemBackend | None:
+    if value is None and optional:
+        return None
+    backend = _task_text(value, "prefix_backend" if optional else "backend")
+    if backend not in {"flat_retrieval", "mem0", "amem", "memos"}:
+        raise ValueError(f"unsupported task backend: {backend!r}")
+    return cast(SystemBackend, backend)
+
+
+def _task_slug(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "-", value).strip("-")
+
+
+@dataclass(frozen=True)
+class ScoredCondition:
+    result_id: str
+    condition: str
+    readout: ReadoutKind
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "result_id": self.result_id,
+            "condition": self.condition,
+            "readout": self.readout,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> ScoredCondition:
+        readout = _task_text(raw.get("readout"), "readout")
+        if readout not in {"none", "native", "common_rerank"}:
+            raise ValueError(f"unsupported scored-condition readout: {readout!r}")
+        return cls(
+            result_id=_task_text(raw.get("result_id"), "result_id"),
+            condition=_task_text(raw.get("condition"), "scored condition"),
+            readout=cast(ReadoutKind, readout),
+        )
+
+
+def _task_scored_conditions(value: object) -> tuple[ScoredCondition, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError("scored_conditions must be an array")
+    scored: list[ScoredCondition] = []
+    for item in value:
+        if isinstance(item, ScoredCondition):
+            scored.append(item)
+        elif isinstance(item, Mapping):
+            scored.append(ScoredCondition.from_dict(item))
+        else:
+            raise ValueError("scored_conditions entries must be objects")
+    return tuple(scored)
+
+
+def _validate_scored_condition_shape(scored: tuple[ScoredCondition, ...]) -> None:
+    if not scored:
+        raise ValueError("scored_conditions must be non-empty")
+    for item in scored:
+        if not isinstance(item, ScoredCondition):
+            raise ValueError("scored_conditions entries must be ScoredCondition records")
+        _task_text(item.result_id, "result_id")
+        _task_text(item.condition, "scored condition")
+        if item.readout not in {"none", "native", "common_rerank"}:
+            raise ValueError(f"unsupported scored-condition readout: {item.readout!r}")
+
+
+def _validate_evaluation_relations(
+    *,
+    episode_id: str,
+    policy_profile_id: str,
+    condition: QualificationCondition,
+    prefix_backend: SystemBackend | None,
+    scored_conditions: tuple[ScoredCondition, ...],
+) -> None:
+    # Local import avoids the conditions -> schema import cycle.
+    from lhmsb.qualification.conditions import condition_definition
+
+    definition = condition_definition(condition)
+    if prefix_backend != definition.prefix_backend:
+        raise ValueError(
+            "condition and prefix_backend disagree: "
+            f"{condition!r} requires {definition.prefix_backend!r}"
+        )
+    result_ids = tuple(item.result_id for item in scored_conditions)
+    cells = tuple((item.condition, item.readout) for item in scored_conditions)
+    if len(result_ids) != len(set(result_ids)) or len(cells) != len(set(cells)):
+        raise ValueError("scored result IDs and scored cells must be unique within a task")
+    if any(item.condition != condition for item in scored_conditions):
+        raise ValueError("each scored condition must match the evaluation task condition")
+    actual_readouts = tuple(item.readout for item in scored_conditions)
+    if actual_readouts != definition.readouts:
+        raise ValueError(
+            "scored readout sequence does not match the condition definition: "
+            f"expected {definition.readouts!r}; received {actual_readouts!r}"
+        )
+    for item in scored_conditions:
+        suffix = condition if item.readout == "none" else f"{condition}--{item.readout}"
+        expected_result_id = (
+            f"{_task_slug(episode_id)}--{policy_profile_id}--{suffix}"
+        )
+        if item.result_id != expected_result_id:
+            raise ValueError(
+                "scored result_id does not match episode, policy, condition, and readout: "
+                f"expected {expected_result_id!r}; received {item.result_id!r}"
+            )
+
+
 @dataclass(frozen=True)
 class PreparationTask:
     """One backend-specific, episode-level prefix construction task."""
@@ -464,11 +624,26 @@ class PreparationTask:
     task_payload_hash: str
 
     def __post_init__(self) -> None:
-        if isinstance(self.task_index, bool) or self.task_index < 0:
-            raise ValueError("task_index must be non-negative")
+        _task_index(self.task_index)
+        _task_id(self.task_id)
+        _task_text(self.episode_id, "episode_id")
+        _task_backend(self.backend, optional=False)
+        _task_text(self.profile_id, "profile_id")
         _require_sha256(self.run_identity, "run_identity")
         _require_sha256(self.config_hash, "config_hash")
-        _require_sha256(self.task_payload_hash, "task_payload_hash")
+        _validate_task_payload_hash(self.task_payload_hash, self._canonical_payload())
+
+    def _canonical_payload(self) -> dict[str, object]:
+        return {
+            "stage": "prepare_prefix",
+            "task_index": self.task_index,
+            "task_id": self.task_id,
+            "episode_id": self.episode_id,
+            "backend": self.backend,
+            "profile_id": self.profile_id,
+            "run_identity": self.run_identity,
+            "config_hash": self.config_hash,
+        }
 
     @property
     def system_profile_id(self) -> str:
@@ -485,6 +660,23 @@ class PreparationTask:
             "config_hash": self.config_hash,
             "task_payload_hash": self.task_payload_hash,
         }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> PreparationTask:
+        backend = _task_backend(raw.get("backend"), optional=False)
+        assert backend is not None
+        return cls(
+            task_index=_task_index(raw.get("task_index")),
+            task_id=_task_id(raw.get("task_id")),
+            episode_id=_task_text(raw.get("episode_id"), "episode_id"),
+            backend=backend,
+            profile_id=_task_text(raw.get("profile_id"), "profile_id"),
+            run_identity=_task_text(raw.get("run_identity"), "run_identity"),
+            config_hash=_task_text(raw.get("config_hash"), "config_hash"),
+            task_payload_hash=_task_text(
+                raw.get("task_payload_hash"), "task_payload_hash"
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -505,15 +697,42 @@ class EvaluationTaskTemplate:
     executable: bool = False
 
     def __post_init__(self) -> None:
-        if isinstance(self.task_index, bool) or self.task_index < 0:
-            raise ValueError("task_index must be non-negative")
+        object.__setattr__(self, "scored_conditions", tuple(self.scored_conditions))
+        _task_index(self.task_index)
+        _task_id(self.task_id)
+        _task_text(self.episode_id, "episode_id")
+        _task_text(self.policy_profile_id, "policy_profile_id")
+        _task_backend(self.prefix_backend, optional=True)
+        _validate_scored_condition_shape(self.scored_conditions)
         _require_sha256(self.run_identity, "run_identity")
         _require_sha256(self.config_hash, "config_hash")
-        _require_sha256(self.task_payload_hash, "task_payload_hash")
-        if self.executable:
+        if self.executable is not False:
             raise ValueError("EvaluationTaskTemplate is never executable")
+        _validate_task_payload_hash(self.task_payload_hash, self._canonical_payload())
         if self.prefix_artifact_hash != "NO_PREFIX_ARTIFACT":
             raise ValueError("evaluation templates cannot carry prefix artifacts")
+        _validate_evaluation_relations(
+            episode_id=self.episode_id,
+            policy_profile_id=self.policy_profile_id,
+            condition=self.condition,
+            prefix_backend=self.prefix_backend,
+            scored_conditions=self.scored_conditions,
+        )
+
+    def _canonical_payload(self) -> dict[str, object]:
+        return {
+            "stage": "evaluate_template",
+            "task_index": self.task_index,
+            "task_id": self.task_id,
+            "episode_id": self.episode_id,
+            "policy_profile_id": self.policy_profile_id,
+            "condition": self.condition,
+            "prefix_backend": self.prefix_backend,
+            "prefix_artifact_hash": self.prefix_artifact_hash,
+            "run_identity": self.run_identity,
+            "config_hash": self.config_hash,
+            "results": [item.to_dict() for item in self.scored_conditions],
+        }
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -525,18 +744,37 @@ class EvaluationTaskTemplate:
             "run_identity": self.run_identity,
             "config_hash": self.config_hash,
             "task_payload_hash": self.task_payload_hash,
-            "scored_conditions": [
-                {
-                    "result_id": item.result_id,
-                    "condition": item.condition,
-                    "readout": item.readout,
-                }
-                for item in self.scored_conditions
-            ],
+            "scored_conditions": [item.to_dict() for item in self.scored_conditions],
             "prefix_backend": self.prefix_backend,
             "prefix_artifact_hash": self.prefix_artifact_hash,
             "executable": self.executable,
         }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> EvaluationTaskTemplate:
+        condition = _task_text(raw.get("condition"), "condition")
+        prefix_backend = _task_backend(raw.get("prefix_backend"), optional=True)
+        return cls(
+            task_index=_task_index(raw.get("task_index")),
+            task_id=_task_id(raw.get("task_id")),
+            episode_id=_task_text(raw.get("episode_id"), "episode_id"),
+            policy_profile_id=_task_text(
+                raw.get("policy_profile_id"), "policy_profile_id"
+            ),
+            condition=cast(QualificationCondition, condition),
+            run_identity=_task_text(raw.get("run_identity"), "run_identity"),
+            config_hash=_task_text(raw.get("config_hash"), "config_hash"),
+            task_payload_hash=_task_text(
+                raw.get("task_payload_hash"), "task_payload_hash"
+            ),
+            scored_conditions=_task_scored_conditions(raw.get("scored_conditions")),
+            prefix_backend=prefix_backend,
+            prefix_artifact_hash=_task_text(
+                raw.get("prefix_artifact_hash", "NO_PREFIX_ARTIFACT"),
+                "prefix_artifact_hash",
+            ),
+            executable=_task_bool(raw.get("executable", False), "executable"),
+        )
 
 
 @dataclass(frozen=True)
@@ -557,16 +795,46 @@ class EvaluationTask:
     executable: bool = True
 
     def __post_init__(self) -> None:
-        if not self.executable:
+        object.__setattr__(self, "scored_conditions", tuple(self.scored_conditions))
+        _task_index(self.task_index)
+        _task_id(self.task_id)
+        _task_text(self.episode_id, "episode_id")
+        _task_text(self.policy_profile_id, "policy_profile_id")
+        _task_backend(self.prefix_backend, optional=True)
+        _validate_scored_condition_shape(self.scored_conditions)
+        if self.executable is not True:
             raise ValueError("EvaluationTask must be executable")
         _require_sha256(self.run_identity, "run_identity")
         _require_sha256(self.config_hash, "config_hash")
-        _require_sha256(self.task_payload_hash, "task_payload_hash")
+        _task_text(self.prefix_artifact_hash, "prefix_artifact_hash")
+        _validate_task_payload_hash(self.task_payload_hash, self._canonical_payload())
         if self.prefix_backend is None:
             if self.prefix_artifact_hash != "NO_PREFIX_ARTIFACT":
                 raise ValueError("control task must use NO_PREFIX_ARTIFACT")
         else:
             _require_sha256(self.prefix_artifact_hash, "prefix_artifact_hash")
+        _validate_evaluation_relations(
+            episode_id=self.episode_id,
+            policy_profile_id=self.policy_profile_id,
+            condition=self.condition,
+            prefix_backend=self.prefix_backend,
+            scored_conditions=self.scored_conditions,
+        )
+
+    def _canonical_payload(self) -> dict[str, object]:
+        return {
+            "stage": "evaluate",
+            "task_index": self.task_index,
+            "task_id": self.task_id,
+            "episode_id": self.episode_id,
+            "policy_profile_id": self.policy_profile_id,
+            "condition": self.condition,
+            "prefix_backend": self.prefix_backend,
+            "prefix_artifact_hash": self.prefix_artifact_hash,
+            "run_identity": self.run_identity,
+            "results": [item.to_dict() for item in self.scored_conditions],
+            "config_hash": self.config_hash,
+        }
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -579,17 +847,35 @@ class EvaluationTask:
             "run_identity": self.run_identity,
             "config_hash": self.config_hash,
             "task_payload_hash": self.task_payload_hash,
-            "scored_conditions": [
-                {
-                    "result_id": item.result_id,
-                    "condition": item.condition,
-                    "readout": item.readout,
-                }
-                for item in self.scored_conditions
-            ],
+            "scored_conditions": [item.to_dict() for item in self.scored_conditions],
             "prefix_backend": self.prefix_backend,
             "executable": self.executable,
         }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> EvaluationTask:
+        condition = _task_text(raw.get("condition"), "condition")
+        prefix_backend = _task_backend(raw.get("prefix_backend"), optional=True)
+        return cls(
+            task_index=_task_index(raw.get("task_index")),
+            task_id=_task_id(raw.get("task_id")),
+            episode_id=_task_text(raw.get("episode_id"), "episode_id"),
+            policy_profile_id=_task_text(
+                raw.get("policy_profile_id"), "policy_profile_id"
+            ),
+            condition=cast(QualificationCondition, condition),
+            prefix_artifact_hash=_task_text(
+                raw.get("prefix_artifact_hash"), "prefix_artifact_hash"
+            ),
+            run_identity=_task_text(raw.get("run_identity"), "run_identity"),
+            config_hash=_task_text(raw.get("config_hash"), "config_hash"),
+            task_payload_hash=_task_text(
+                raw.get("task_payload_hash"), "task_payload_hash"
+            ),
+            scored_conditions=_task_scored_conditions(raw.get("scored_conditions")),
+            prefix_backend=prefix_backend,
+            executable=_task_bool(raw.get("executable", True), "executable"),
+        )
 
 
 @dataclass(frozen=True)
@@ -615,6 +901,9 @@ class SystemsQualificationConfig:
     source_lock_hash: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "policy_profiles", tuple(self.policy_profiles))
+        object.__setattr__(self, "conditions", tuple(self.conditions))
+        object.__setattr__(self, "required_secret_env", tuple(self.required_secret_env))
         object.__setattr__(
             self,
             "system_profiles",
@@ -825,13 +1114,6 @@ class SystemsQualificationConfig:
             default=str,
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-@dataclass(frozen=True)
-class ScoredCondition:
-    result_id: str
-    condition: str
-    readout: ReadoutKind
 
 
 @dataclass(frozen=True)

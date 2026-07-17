@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from lhmsb.datasets.mem0_stateful_pipeline import (
+    freeze_mem0_stateful,
+    generate_mem0_stateful_to_staging,
+)
+from lhmsb.qualification.cli import main
+
+
+def _dataset(tmp_path: Path, *, sessions: int = 4) -> Path:
+    stage = tmp_path / "stage"
+    frozen = tmp_path / "dataset"
+    generate_mem0_stateful_to_staging(
+        stage,
+        seeds=(42,),
+        n_episodes=1,
+        n_sessions=sessions,
+    )
+    freeze_mem0_stateful(stage, frozen)
+    return frozen
+
+
+def test_plan_systems_writes_stable_two_stage_contract(tmp_path: Path) -> None:
+    dataset = _dataset(tmp_path)
+    run = tmp_path / "run"
+    code = main(
+        [
+            "plan-systems",
+            "--dataset",
+            str(dataset),
+            "--config",
+            "configs/experiments/systems_controlled_zen.yaml",
+            "--out",
+            str(run),
+            "--allow-dirty",
+            "--n-sessions",
+            "4",
+        ]
+    )
+    assert code == 0
+    manifest = json.loads((run / "run_manifest.json").read_text())
+    assert manifest["schema_version"] == 2
+    assert manifest["preparation_task_count"] == 4
+    assert manifest["evaluation_template_count"] == 21
+    assert len((run / "prepare_tasks.jsonl").read_text().splitlines()) == 4
+    assert len((run / "evaluation_task_templates.jsonl").read_text().splitlines()) == 21
+    assert not (run / "tasks.jsonl").exists()
+
+
+def test_smoke_systems_dry_run_is_network_free(capsys) -> None:
+    code = main(["smoke-systems", "--dry-run"])
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "plan-systems" in output
+    assert "prepare-task" in output
+    assert "run-evaluation-matrix" in output
+
+
+def test_prepare_task_dry_run_does_not_require_backend(tmp_path: Path) -> None:
+    dataset = _dataset(tmp_path)
+    run = tmp_path / "run"
+    assert (
+        main(
+            [
+                "plan-systems",
+                "--dataset",
+                str(dataset),
+                "--config",
+                "configs/experiments/systems_controlled_zen.yaml",
+                "--out",
+                str(run),
+                "--allow-dirty",
+                "--n-sessions",
+                "4",
+            ]
+        )
+        == 0
+    )
+    assert main(["prepare-task", "--run-dir", str(run), "--task-index", "0", "--dry-run"]) == 0
+
+
+def test_plan_binds_native_runtime_and_model_bundle_manifests(tmp_path: Path) -> None:
+    dataset = _dataset(tmp_path)
+    run = tmp_path / "run"
+    runtime = "a" * 64
+    models = "b" * 64
+    from lhmsb.qualification.multisystem_cli import plan_systems_run
+
+    payload = plan_systems_run(
+        dataset,
+        Path("configs/experiments/systems_controlled_zen.yaml"),
+        run,
+        allow_dirty=True,
+        n_sessions=4,
+        environment={
+            "LHMSB_RUNTIME_MANIFEST_HASH": runtime,
+            "LHMSB_MODEL_BUNDLE_HASH": models,
+        },
+    )
+    assert payload["runtime_manifest_hash"] == runtime
+    assert payload["model_bundle_hash"] == models
+    assert payload["model_files_hash"] == models
+    manifest = json.loads((run / "run_manifest.json").read_text())
+    assert manifest["run_identity"] == payload["run_identity"]
+
+
+def test_manifest_hash_rejects_non_digest_environment_values(tmp_path: Path) -> None:
+    dataset = _dataset(tmp_path)
+    from lhmsb.qualification.multisystem_cli import MultisystemCliError, plan_systems_run
+
+    try:
+        plan_systems_run(
+            dataset,
+            Path("configs/experiments/systems_controlled_zen.yaml"),
+            tmp_path / "run",
+            allow_dirty=True,
+            n_sessions=4,
+            environment={"LHMSB_RUNTIME_MANIFEST_HASH": "not-a-digest"},
+        )
+    except MultisystemCliError as exc:
+        assert "SHA-256" in str(exc)
+    else:
+        raise AssertionError("invalid runtime manifest digest was accepted")

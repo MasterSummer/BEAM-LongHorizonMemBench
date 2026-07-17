@@ -15,13 +15,13 @@ usage() {
   cat <<'EOF'
 Usage: scripts/bootstrap_systems_server.sh [options]
 
-Prepare the reproducible four-worker multisystem A100 environment.
+Prepare the native Python environments, pinned sources, models, and service paths.
 
 Options:
   --data-root PATH  persistent root (default: /data/lhmsb)
   --env-file PATH   operator-owned KEY=VALUE file (default: .env)
   --allow-dirty     allow a non-formal dirty checkout
-  --dry-run         print actions without Docker, network, GPU, or writes
+  --dry-run         print actions without network, GPU, or writes
   -h, --help        show this help
 EOF
 }
@@ -59,7 +59,7 @@ done
 if [[ "${DRY_RUN}" == "1" ]]; then
   systems_print_command mkdir -p \
     "${DATA_ROOT}/datasets" "${DATA_ROOT}/models" "${DATA_ROOT}/qdrant" \
-    "${DATA_ROOT}/neo4j" "${DATA_ROOT}/wheelhouse" "${DATA_ROOT}/images" \
+    "${DATA_ROOT}/neo4j" "${DATA_ROOT}/wheelhouse" \
     "${DATA_ROOT}/manifests" "${DATA_ROOT}/runs" "${DATA_ROOT}/logs" \
     "${DATA_ROOT}/locks" "${DATA_ROOT}/bundles"
   systems_print_command git clone --no-checkout https://github.com/agiresearch/A-mem \
@@ -75,27 +75,15 @@ if [[ "${DRY_RUN}" == "1" ]]; then
     --output-file "${DATA_ROOT}/wheelhouse/core-requirements.txt"
   systems_print_command uv pip download --require-hashes \
     --dest "${DATA_ROOT}/wheelhouse" -r "${DATA_ROOT}/wheelhouse/core-requirements.txt"
-  systems_print_command docker build --pull=false --file docker/core-worker.Dockerfile \
-    --tag lhmsb/core-worker:qualification .
-  systems_print_command docker build --pull=false --file docker/amem-worker.Dockerfile \
-    --tag lhmsb/amem-worker:qualification .
-  systems_print_command docker build --pull=false --file docker/memos-worker.Dockerfile \
-    --tag lhmsb/memos-worker:qualification .
-  systems_print_command docker save --output "${DATA_ROOT}/images/core-worker.tar" \
-    lhmsb/core-worker:qualification
-  systems_print_command docker save --output "${DATA_ROOT}/images/amem-worker.tar" \
-    lhmsb/amem-worker:qualification
-  systems_print_command docker save --output "${DATA_ROOT}/images/memos-worker.tar" \
-    lhmsb/memos-worker:qualification
-  systems_print_command docker pull "${QDRANT_IMAGE:-qdrant/qdrant}:${QDRANT_IMAGE_TAG:-v1.15.4}"
-  systems_print_command docker pull "${NEO4J_IMAGE:-neo4j}:${NEO4J_IMAGE_TAG:-5.26.3-community}"
-  systems_print_command docker pull "${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference}:${TEI_IMAGE_TAG:-1.8.0}"
-  systems_print_command docker save --output "${DATA_ROOT}/images/qdrant.tar" \
-    "${QDRANT_IMAGE:-qdrant/qdrant}:${QDRANT_IMAGE_TAG:-v1.15.4}"
-  systems_print_command docker save --output "${DATA_ROOT}/images/neo4j.tar" \
-    "${NEO4J_IMAGE:-neo4j}:${NEO4J_IMAGE_TAG:-5.26.3-community}"
-  systems_print_command docker save --output "${DATA_ROOT}/images/tei.tar" \
-    "${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference}:${TEI_IMAGE_TAG:-1.8.0}"
+  for environment in core mem0 amem memos; do
+    systems_print_command python3 -m venv "${DATA_ROOT}/venvs/${environment}"
+    systems_print_command uv pip compile --generate-hashes --python-version 3.11 \
+      --output-file "${DATA_ROOT}/locks/${environment}-requirements.txt" \
+      "${REPO_ROOT}/pyproject.toml"
+    systems_print_command uv pip sync --python "${DATA_ROOT}/venvs/${environment}/bin/python" \
+      --require-hashes "${DATA_ROOT}/locks/${environment}-requirements.txt"
+  done
+  systems_print_command verify_system_runtime.sh --data-root "${DATA_ROOT}"
   systems_print_command uv run python -m lhmsb.qualification preflight-systems \
     --repository-only --dataset "${DATA_ROOT}/datasets/software_v2" \
     --config "${REPO_ROOT}/configs/experiments/systems_controlled_zen.yaml" \
@@ -103,7 +91,6 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
-command -v docker >/dev/null
 command -v git >/dev/null
 command -v python3 >/dev/null
 command -v uv >/dev/null
@@ -135,6 +122,10 @@ fi
 
 systems_prepare_dirs "${DATA_ROOT}"
 mkdir -p "${DATA_ROOT}/sources/amem" "${DATA_ROOT}/sources/memos"
+[[ -f "${REPO_ROOT}/deploy/native-runtime.lock.yaml" ]] || {
+  printf 'missing native-runtime.lock.yaml\n' >&2
+  exit 1
+}
 export LHMSB_WORKER_UID="${LHMSB_WORKER_UID:-$(id -u)}"
 export LHMSB_WORKER_GID="${LHMSB_WORKER_GID:-$(id -g)}"
 export LHMSB_REPO_ROOT="${REPO_ROOT}"
@@ -173,85 +164,108 @@ clone_at_pin https://github.com/agiresearch/A-mem \
 clone_at_pin https://github.com/MemTensor/MemOS \
   "${DATA_ROOT}/sources/memos" 583b07b998afc4debb6c5078439b0b3896f5b097
 
-# Generate hash-locked transitive requirements and wheelhouses before any
-# image build. A stale checked-in placeholder manifest is never accepted as a
-# live image input.
+# Generate hash-locked transitive requirements and wheelhouses for each native
+# environment. A stale checked-in contract is never accepted as a live lock.
 uv pip compile --generate-hashes --python-version 3.11 \
   "${REPO_ROOT}/pyproject.toml" --extra qualification \
-  --output-file "${DATA_ROOT}/wheelhouse/core-requirements.txt"
-uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse" \
-  -r "${DATA_ROOT}/wheelhouse/core-requirements.txt"
+  --output-file "${DATA_ROOT}/locks/core-requirements.txt"
+uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse/core" \
+  -r "${DATA_ROOT}/locks/core-requirements.txt"
 uv pip compile --generate-hashes --python-version 3.11 \
-  "${DATA_ROOT}/sources/amem" --output-file "${REPO_ROOT}/docker/locks/amem-requirements.txt"
-uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse" \
-  -r "${REPO_ROOT}/docker/locks/amem-requirements.txt"
+  "${REPO_ROOT}/pyproject.toml" --output-file "${DATA_ROOT}/locks/mem0-requirements.txt"
+uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse/mem0" \
+  -r "${DATA_ROOT}/locks/mem0-requirements.txt"
 uv pip compile --generate-hashes --python-version 3.11 \
-  "${DATA_ROOT}/sources/memos" --output-file "${REPO_ROOT}/docker/locks/memos-requirements.txt"
-uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse" \
-  -r "${REPO_ROOT}/docker/locks/memos-requirements.txt"
+  "${DATA_ROOT}/sources/amem" --output-file "${DATA_ROOT}/locks/amem-requirements.txt"
+uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse/amem" \
+  -r "${DATA_ROOT}/locks/amem-requirements.txt"
+uv pip compile --generate-hashes --python-version 3.11 \
+  "${DATA_ROOT}/sources/memos" --output-file "${DATA_ROOT}/locks/memos-requirements.txt"
+uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse/memos" \
+  -r "${DATA_ROOT}/locks/memos-requirements.txt"
 
-export PYTHON_BASE_IMAGE="${PYTHON_BASE_IMAGE:-python:3.11-slim}"
-export PYTHON_BASE_DIGEST="${PYTHON_BASE_DIGEST:?bootstrap must resolve PYTHON_BASE_DIGEST}"
-export LHMSB_COMPOSE_PROJECT="${LHMSB_COMPOSE_PROJECT:-lhmsb-systems-bootstrap}"
-for image in core-worker amem-worker memos-worker; do
-  docker build --pull=false \
-    --build-arg "PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE}" \
-    --build-arg "PYTHON_BASE_DIGEST=${PYTHON_BASE_DIGEST}" \
-    --build-arg "SOURCE_COMMIT=${SOURCE_COMMIT}" \
-    --build-arg "SOURCE_REF=${SOURCE_REF}" \
-    --build-arg "SOURCE_DIRTY=${SOURCE_DIRTY}" \
-    --file "${REPO_ROOT}/docker/${image}.Dockerfile" \
-    --tag "lhmsb/${image}:qualification" "${REPO_ROOT}"
-  docker save --output "${DATA_ROOT}/images/${image}.tar" "lhmsb/${image}:qualification"
+for environment in core mem0 amem memos; do
+  python="${DATA_ROOT}/venvs/${environment}/bin/python"
+  [[ -x "${python}" ]] || python3 -m venv "${DATA_ROOT}/venvs/${environment}"
+  uv pip sync --python "${python}" --require-hashes \
+    "${DATA_ROOT}/locks/${environment}-requirements.txt"
+  uv pip install --python "${python}" --no-deps --editable "${REPO_ROOT}"
 done
 
-git -C "${REPO_ROOT}" rev-parse HEAD >"${DATA_ROOT}/manifests/benchmark.commit"
-
-resolve_runtime_image() {
-  local reference="$1"
-  local alias="$2"
-  local archive="$3"
-  local digest
-  docker pull "${reference}" >/dev/null
-  digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "${reference}")"
-  if [[ "${digest}" != *@sha256:* ]]; then
-    printf 'could not resolve immutable digest for %s\n' "${reference}" >&2
+for required in LHMSB_QDRANT_BIN LHMSB_NEO4J_HOME LHMSB_JAVA_HOME LHMSB_TEI_BIN \
+  LHMSB_EMBEDDING_MODEL_DIR LHMSB_RERANKER_MODEL_DIR; do
+  [[ -n "${!required:-}" ]] || {
+    printf '%s must be configured for native execution\n' "${required}" >&2
     exit 1
-  fi
-  docker tag "${reference}" "${alias}"
-  docker save --output "${DATA_ROOT}/images/${archive}" "${alias}"
-  docker image inspect --format '{{.Id}}' "${alias}"
-}
-
-QDRANT_REFERENCE="${QDRANT_IMAGE:-qdrant/qdrant}:${QDRANT_IMAGE_TAG:-v1.15.4}"
-NEO4J_REFERENCE="${NEO4J_IMAGE:-neo4j}:${NEO4J_IMAGE_TAG:-5.26.3-community}"
-TEI_REFERENCE="${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference}:${TEI_IMAGE_TAG:-1.8.0}"
-QDRANT_ID="$(resolve_runtime_image "${QDRANT_REFERENCE}" lhmsb/qdrant:qualification qdrant.tar)"
-NEO4J_ID="$(resolve_runtime_image "${NEO4J_REFERENCE}" lhmsb/neo4j:qualification neo4j.tar)"
-TEI_ID="$(resolve_runtime_image "${TEI_REFERENCE}" lhmsb/tei:qualification tei.tar)"
-CORE_ID="$(docker image inspect --format '{{.Id}}' lhmsb/core-worker:qualification)"
-MEM0_ID="$(docker image inspect --format '{{.Id}}' lhmsb/mem0-worker:qualification)"
-AMEM_ID="$(docker image inspect --format '{{.Id}}' lhmsb/amem-worker:qualification)"
-MEMOS_ID="$(docker image inspect --format '{{.Id}}' lhmsb/memos-worker:qualification)"
-QDRANT_ID="${QDRANT_ID}" NEO4J_ID="${NEO4J_ID}" TEI_ID="${TEI_ID}" \
-CORE_ID="${CORE_ID}" MEM0_ID="${MEM0_ID}" AMEM_ID="${AMEM_ID}" MEMOS_ID="${MEMOS_ID}" \
-  python3 - "${DATA_ROOT}/manifests/images.json" <<'PY'
+  }
+done
+EMBEDDING_MODEL_DIR="${LHMSB_EMBEDDING_MODEL_DIR}" \
+RERANKER_MODEL_DIR="${LHMSB_RERANKER_MODEL_DIR}" \
+python3 - "${DATA_ROOT}/manifests/model-bundle.json" <<'PY'
+import hashlib
 import json
 import os
-import pathlib
 import sys
+from pathlib import Path
 
-path = pathlib.Path(sys.argv[1])
+
+def snapshot(root: Path) -> dict[str, object]:
+    if not root.is_dir():
+        raise SystemExit(f"model directory is not a directory: {root}")
+    files: list[dict[str, object]] = []
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        files.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "size": path.stat().st_size,
+                "sha256": digest.hexdigest(),
+            }
+        )
+    return {"root": str(root), "files": files}
+
+
 payload = {
     "schema_version": 1,
-    "qdrant_runtime": os.environ["QDRANT_ID"],
-    "neo4j_runtime": os.environ["NEO4J_ID"],
-    "tei_runtime": os.environ["TEI_ID"],
-    "core_worker": os.environ["CORE_ID"],
-    "mem0_worker": os.environ["MEM0_ID"],
-    "amem_worker": os.environ["AMEM_ID"],
-    "memos_worker": os.environ["MEMOS_ID"],
+    "models": {
+        "embedding": snapshot(Path(os.environ["EMBEDDING_MODEL_DIR"])),
+        "reranker": snapshot(Path(os.environ["RERANKER_MODEL_DIR"])),
+    },
 }
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+temporary = path.with_suffix(".json.tmp")
+temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+temporary.replace(path)
+PY
+DATA_ROOT="${DATA_ROOT}" QDRANT_BIN="${LHMSB_QDRANT_BIN}" \
+NEO4J_HOME="${LHMSB_NEO4J_HOME}" JAVA_HOME="${LHMSB_JAVA_HOME}" \
+TEI_BIN="${LHMSB_TEI_BIN}" python3 - "${DATA_ROOT}/manifests/native-runtime.json" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
+
+paths = {
+    "qdrant": Path(os.environ["QDRANT_BIN"]),
+    "neo4j": Path(os.environ["NEO4J_HOME"]) / "bin/neo4j",
+    "java": Path(os.environ["JAVA_HOME"]) / "bin/java",
+    "text-embeddings-router": Path(os.environ["TEI_BIN"]),
+}
+payload = {"schema_version": 1, "executables": {name: digest(path) for name, path in paths.items()}}
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
 temporary = path.with_suffix(".json.tmp")
 temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 temporary.replace(path)

@@ -18,6 +18,7 @@ from typing import NoReturn, cast
 from lhmsb.qualification.memory_runtime import (
     CandidateSearch,
     InventorySnapshot,
+    MemoryTraceValidationError,
     StorageFootprint,
     WriteSessionResult,
 )
@@ -130,8 +131,16 @@ class CommonRerankTrace:
     result: RerankResult
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "candidate_memory_ids", tuple(self.candidate_memory_ids))
-        object.__setattr__(self, "visible_memory_ids", tuple(self.visible_memory_ids))
+        candidate_memory_ids = tuple(
+            _string(item, "candidate memory ID")
+            for item in _sequence(self.candidate_memory_ids, "candidate_memory_ids")
+        )
+        visible_memory_ids = tuple(
+            _string(item, "visible memory ID")
+            for item in _sequence(self.visible_memory_ids, "visible_memory_ids")
+        )
+        object.__setattr__(self, "candidate_memory_ids", candidate_memory_ids)
+        object.__setattr__(self, "visible_memory_ids", visible_memory_ids)
         _nonempty_string(self.opportunity_id, "opportunity_id")
         _require_hash(self.query_hash, "query_hash")
         _memory_ids(self.candidate_memory_ids, "candidate_memory_ids")
@@ -139,14 +148,26 @@ class CommonRerankTrace:
         if not isinstance(self.result, RerankResult):
             raise PrefixArtifactError("common rerank result must be a RerankResult")
         result = RerankResult(
-            ordered_memory_ids=tuple(self.result.ordered_memory_ids),
-            scores=tuple(float(item) for item in self.result.scores),
-            model=self.result.model,
-            revision=self.result.revision,
-            input_count=self.result.input_count,
-            request_hash=self.result.request_hash,
-            response_hash=self.result.response_hash,
-            latency_seconds=self.result.latency_seconds,
+            ordered_memory_ids=tuple(
+                _string(item, "ordered memory ID")
+                for item in _sequence(
+                    self.result.ordered_memory_ids,
+                    "rerank ordered_memory_ids",
+                )
+            ),
+            scores=tuple(
+                _number(item, "rerank score")
+                for item in _sequence(self.result.scores, "rerank scores")
+            ),
+            model=_string(self.result.model, "rerank model"),
+            revision=_string(self.result.revision, "rerank revision"),
+            input_count=_integer(self.result.input_count, "rerank input_count"),
+            request_hash=_require_hash(self.result.request_hash, "rerank request_hash"),
+            response_hash=_require_hash(self.result.response_hash, "rerank response_hash"),
+            latency_seconds=_number(
+                self.result.latency_seconds,
+                "rerank latency_seconds",
+            ),
         )
         object.__setattr__(self, "result", result)
         if result.input_count != len(self.candidate_memory_ids):
@@ -271,7 +292,12 @@ class CommonRerankTrace:
 
 @dataclass(frozen=True)
 class MemoryPrefixCheckpoint:
-    """One write-boundary snapshot and retrieval chain for a prepared prefix."""
+    """One write-boundary snapshot and retrieval chain for a prepared prefix.
+
+    ``surface_hash`` addresses only this checkpoint's agent-visible surface.  It
+    is intentionally distinct from the episode-aggregate surface hash stored on
+    :class:`MemoryPrefixArtifact`, so the two hashes need not be equal.
+    """
 
     checkpoint_session: int
     surface_hash: str
@@ -312,6 +338,21 @@ class MemoryPrefixCheckpoint:
             raise PrefixArtifactError("inventory checkpoint does not match prefix checkpoint")
         if any(item.checkpoint_session != self.checkpoint_session for item in self.retrievals):
             raise PrefixArtifactError("retrieval checkpoint does not match prefix checkpoint")
+        write_sessions = [item.session_index for item in self.writes]
+        if write_sessions != sorted(set(write_sessions)):
+            raise PrefixArtifactError(
+                "write sessions must be unique and strictly increasing"
+            )
+        if self.checkpoint_session == 0:
+            if self.writes:
+                raise PrefixArtifactError("checkpoint zero must be the prewrite snapshot")
+        elif (
+            len(self.writes) != 1
+            or self.writes[0].session_index != self.checkpoint_session - 1
+        ):
+            raise PrefixArtifactError(
+                "a positive checkpoint requires exactly one immediately prior write"
+            )
         if any(item.session_index >= self.checkpoint_session for item in self.writes):
             raise PrefixArtifactError("write session must be prior to prefix checkpoint")
         searches_by_query: dict[str, CandidateSearch] = {}
@@ -359,36 +400,45 @@ class MemoryPrefixCheckpoint:
             },
             "checkpoint",
         )
-        checkpoint = cls(
-            checkpoint_session=_integer(data.get("checkpoint_session"), "checkpoint_session"),
-            surface_hash=_string(data.get("surface_hash"), "surface_hash"),
-            writes=tuple(
-                WriteSessionResult.from_dict(_mapping(item, "write"))
-                for item in _sequence(data.get("writes", ()), "writes")
-            ),
-            inventory=(
-                None
-                if data.get("inventory") is None
-                else InventorySnapshot.from_dict(_mapping(data.get("inventory"), "inventory"))
-            ),
-            retrievals=tuple(
-                CandidateSearch.from_dict(_mapping(item, "retrieval"))
-                for item in _sequence(data.get("retrievals", ()), "retrievals")
-            ),
-            common_reranks=tuple(
-                CommonRerankTrace.from_dict(_mapping(item, "common rerank"))
-                for item in _sequence(data.get("common_reranks", ()), "common_reranks")
-            ),
-            graph_diagnostics=_freeze_pairs(
-                data.get("graph_diagnostics", ()), "graph_diagnostics"
-            ),
-            storage_footprints=tuple(
-                StorageFootprint.from_dict(_mapping(item, "storage footprint"))
-                for item in _sequence(
-                    data.get("storage_footprints", ()), "storage_footprints"
-                )
-            ),
-        )
+        try:
+            checkpoint = cls(
+                checkpoint_session=_integer(
+                    data.get("checkpoint_session"), "checkpoint_session"
+                ),
+                surface_hash=_string(data.get("surface_hash"), "surface_hash"),
+                writes=tuple(
+                    WriteSessionResult.from_dict(_mapping(item, "write"))
+                    for item in _sequence(data.get("writes", ()), "writes")
+                ),
+                inventory=(
+                    None
+                    if data.get("inventory") is None
+                    else InventorySnapshot.from_dict(
+                        _mapping(data.get("inventory"), "inventory")
+                    )
+                ),
+                retrievals=tuple(
+                    CandidateSearch.from_dict(_mapping(item, "retrieval"))
+                    for item in _sequence(data.get("retrievals", ()), "retrievals")
+                ),
+                common_reranks=tuple(
+                    CommonRerankTrace.from_dict(_mapping(item, "common rerank"))
+                    for item in _sequence(
+                        data.get("common_reranks", ()), "common_reranks"
+                    )
+                ),
+                graph_diagnostics=_freeze_pairs(
+                    data.get("graph_diagnostics", ()), "graph_diagnostics"
+                ),
+                storage_footprints=tuple(
+                    StorageFootprint.from_dict(_mapping(item, "storage footprint"))
+                    for item in _sequence(
+                        data.get("storage_footprints", ()), "storage_footprints"
+                    )
+                ),
+            )
+        except MemoryTraceValidationError as exc:
+            raise PrefixArtifactError(f"invalid nested memory trace: {exc}") from exc
         recorded = data.get("checkpoint_hash")
         if recorded is not None and recorded != checkpoint.checkpoint_hash:
             raise PrefixArtifactError("checkpoint_hash does not match nested checkpoint content")
@@ -397,7 +447,12 @@ class MemoryPrefixCheckpoint:
 
 @dataclass(frozen=True)
 class MemoryPrefixArtifact:
-    """Complete hash-addressed result of one backend prefix preparation."""
+    """Complete hash-addressed result of one backend prefix preparation.
+
+    ``surface_hash`` addresses the aggregate public surface for the whole
+    episode.  Each checkpoint separately hashes its checkpoint-local surface;
+    those values deliberately are not required to equal this aggregate hash.
+    """
 
     episode_id: str
     backend: str
@@ -508,41 +563,46 @@ class MemoryPrefixArtifact:
             },
             "prefix artifact",
         )
-        return cls(
-            episode_id=_string(data.get("episode_id"), "episode_id"),
-            backend=_string(data.get("backend"), "backend"),
-            profile_id=_string(data.get("profile_id"), "profile_id"),
-            config_hash=_string(data.get("config_hash"), "config_hash"),
-            run_identity=_string(data.get("run_identity"), "run_identity"),
-            dataset_release=_string(data.get("dataset_release"), "dataset_release"),
-            dataset_manifest_hash=_string(
-                data.get("dataset_manifest_hash"), "dataset_manifest_hash"
-            ),
-            surface_hash=_string(data.get("surface_hash"), "surface_hash"),
-            writer_profile_id=_optional_string(data.get("writer_profile_id")),
-            embedding_profile_id=_string(
-                data.get("embedding_profile_id"), "embedding_profile_id"
-            ),
-            reranker_profile_id=_string(
-                data.get("reranker_profile_id"), "reranker_profile_id"
-            ),
-            source_commit=_string(data.get("source_commit"), "source_commit"),
-            model_files_hash=_string(data.get("model_files_hash"), "model_files_hash"),
-            checkpoints=tuple(
-                MemoryPrefixCheckpoint.from_dict(_mapping(item, "checkpoint"))
-                for item in _sequence(data.get("checkpoints", ()), "checkpoints")
-            ),
-            graph_diagnostics=_freeze_pairs(
-                data.get("graph_diagnostics", ()), "graph_diagnostics"
-            ),
-            storage_footprints=tuple(
-                StorageFootprint.from_dict(_mapping(item, "storage footprint"))
-                for item in _sequence(
-                    data.get("storage_footprints", ()), "storage_footprints"
-                )
-            ),
-            artifact_hash=_string(data.get("artifact_hash"), "artifact_hash"),
-        )
+        try:
+            return cls(
+                episode_id=_string(data.get("episode_id"), "episode_id"),
+                backend=_string(data.get("backend"), "backend"),
+                profile_id=_string(data.get("profile_id"), "profile_id"),
+                config_hash=_string(data.get("config_hash"), "config_hash"),
+                run_identity=_string(data.get("run_identity"), "run_identity"),
+                dataset_release=_string(data.get("dataset_release"), "dataset_release"),
+                dataset_manifest_hash=_string(
+                    data.get("dataset_manifest_hash"), "dataset_manifest_hash"
+                ),
+                surface_hash=_string(data.get("surface_hash"), "surface_hash"),
+                writer_profile_id=_optional_string(data.get("writer_profile_id")),
+                embedding_profile_id=_string(
+                    data.get("embedding_profile_id"), "embedding_profile_id"
+                ),
+                reranker_profile_id=_string(
+                    data.get("reranker_profile_id"), "reranker_profile_id"
+                ),
+                source_commit=_string(data.get("source_commit"), "source_commit"),
+                model_files_hash=_string(
+                    data.get("model_files_hash"), "model_files_hash"
+                ),
+                checkpoints=tuple(
+                    MemoryPrefixCheckpoint.from_dict(_mapping(item, "checkpoint"))
+                    for item in _sequence(data.get("checkpoints", ()), "checkpoints")
+                ),
+                graph_diagnostics=_freeze_pairs(
+                    data.get("graph_diagnostics", ()), "graph_diagnostics"
+                ),
+                storage_footprints=tuple(
+                    StorageFootprint.from_dict(_mapping(item, "storage footprint"))
+                    for item in _sequence(
+                        data.get("storage_footprints", ()), "storage_footprints"
+                    )
+                ),
+                artifact_hash=_string(data.get("artifact_hash"), "artifact_hash"),
+            )
+        except MemoryTraceValidationError as exc:
+            raise PrefixArtifactError(f"invalid nested memory trace: {exc}") from exc
 
 
 def prefix_artifact_hash(value: MemoryPrefixArtifact | Mapping[str, object]) -> str:
@@ -642,8 +702,12 @@ def _integer(value: object, field: str) -> int:
 
 
 def _number(value: object, field: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise PrefixArtifactError(f"{field} must be numeric")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(float(value))
+    ):
+        raise PrefixArtifactError(f"{field} must be a finite number")
     return float(value)
 
 
