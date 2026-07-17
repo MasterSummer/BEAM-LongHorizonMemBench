@@ -273,3 +273,24 @@ def test_official_reader_uses_local_tokenizer_when_configured(monkeypatch) -> No
     chunker_config = chunker["config"]
     assert isinstance(chunker_config, dict)
     assert chunker_config["tokenizer_or_token_counter"] == "/offline/models/bge-m3"
+
+
+def test_reader_payload_supplies_stable_user_id() -> None:
+    adapter, _backend, _graph = _adapter()
+    captured: dict[str, object] = {}
+
+    class FakeReader:
+        def get_memory(
+            self, scene_data: object, *, type: str, info: dict[str, str]
+        ) -> list[object]:
+            captured["scene_data"] = scene_data
+            captured["type"] = type
+            captured["info"] = info
+            return []
+
+    adapter.reader = FakeReader()
+    adapter._reader_payload([{"role": "user", "content": "offline"}], None, 3)
+    info = captured["info"]
+    assert isinstance(info, dict)
+    assert info["user_id"] == "episode"
+    assert info["session_id"] == "episode:3"

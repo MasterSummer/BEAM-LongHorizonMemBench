@@ -570,7 +570,11 @@ class MemOSTreeQualificationAdapter:
         if not scene_messages:
             scene_messages = [dict(message) for message in messages]
         scene_data = [scene_messages]
-        info = {"episode_id": self.episode_id or "episode", "session_id": str(session_index)}
+        info = {
+            "user_id": self.namespace,
+            "episode_id": self.episode_id or "episode",
+            "session_id": f"{self.episode_id or 'episode'}:{session_index}",
+        }
         try:
             return get_memory(scene_data, type="chat", info=info)
         except Exception as exc:
@@ -590,9 +594,12 @@ class MemOSTreeQualificationAdapter:
             kwargs["reorganize"] = True
         if _accepts(signature, "info"):
             kwargs["info"] = {
+                "user_id": self.namespace,
                 "episode_id": self.episode_id or "episode",
-                "session_id": str(session_index),
+                "session_id": f"{self.episode_id or 'episode'}:{session_index}",
             }
+        if _accepts(signature, "user_name"):
+            kwargs["user_name"] = self.namespace
         if _accepts(signature, "metadata"):
             kwargs["metadata"] = dict(metadata or {})
         try:
@@ -641,10 +648,13 @@ class MemOSTreeQualificationAdapter:
             kwargs["mode"] = "fast"
         if _accepts(signature, "info"):
             kwargs["info"] = {
+                "user_id": self.namespace,
                 "query": query,
                 "episode_id": self.episode_id or "episode",
-                "session_id": str(checkpoint_session),
+                "session_id": f"{self.episode_id or 'episode'}:{checkpoint_session}",
             }
+        if _accepts(signature, "user_name"):
+            kwargs["user_name"] = self.namespace
         try:
             return search(query, **kwargs)
         except TypeError:
