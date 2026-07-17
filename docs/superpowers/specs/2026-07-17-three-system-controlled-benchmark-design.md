@@ -79,6 +79,12 @@ The three policy models remain:
 The action prompt, current workspace, option set, temperature policy, maximum output,
 and structured-output contract are identical across conditions.
 
+The schema-v2 sampling contract freezes `temperature=0`,
+`max_output_tokens=512`, `baseline_repeats=2`,
+`intervention_repeats=2`, the profile-specific single format-repair allowance,
+and an explicit null provider seed where a common seed is unsupported. These
+values participate in run identity.
+
 ### 4.2 Memory writer
 
 All three managed systems use one fixed DeepSeek writer profile. The tested policy
@@ -132,6 +138,11 @@ hash-addressed `MemoryPrefixArtifact`.
 The same prefix artifact is reused by all three continuation policy models. A policy
 evaluation never calls the memory writer or mutates the prepared store.
 
+At every SCEU, the eligible prefix contains exactly public sessions
+`0 .. checkpoint_session - 1`. Retrieval is performed before the checkpoint's current
+surface could be written. This ordering is shared by Flat, Mem0, A-MEM, and MemOS-Tree
+and is checked at session/write boundaries.
+
 ### Stage B: continuation evaluation
 
 The core worker evaluates the three policies over the seven headline conditions. For
@@ -145,6 +156,12 @@ native and common-rerank result, producing 30 scored cells in total:
 Evaluation task identity includes the exact prefix-artifact hash. Changing a writer,
 source commit, embedding model, system configuration, or prepared trace necessarily
 changes the run identity.
+
+Planning therefore has two explicit schema types. Initial planning emits stable
+`EvaluationTaskTemplate` rows without artifact hashes. After all four required
+preparations are verified, `finalize-evaluation-plan` materializes immutable
+`EvaluationTask` rows in the same stable index order and binds each retrieval
+condition to its exact artifact hash. Templates are never executable.
 
 ## 6. Public context construction
 
@@ -258,7 +275,8 @@ measured as link-validity and store-consistency diagnostics.
 - Organization: `TreeTextMemory` with `reorganize=true`, synchronous add, internet
   retrieval disabled, and an explicit wait for the reorganizer after each session.
 - Retrieval: vector/graph-expanded TreeTextMemory search in its frozen fast mode.
-- Storage: one isolated Neo4j database/user namespace per preparation task.
+- Storage: one fresh Neo4j Community container volume per preparation task, created
+  and destroyed by the serial preparation orchestrator.
 - Writer: fixed DeepSeek controlled profile.
 - Embedding: common BGE-M3 service.
 
@@ -356,10 +374,13 @@ worker-amem   A-MEM prefix preparation
 worker-memos  MemOS prefix preparation
 ```
 
-Qdrant, Neo4j, BGE-M3, and BGE-Reranker-v2-M3 are shared infrastructure services.
-Every preparation uses a unique namespace, database/user scope, or local store
-directory. Images and upstream source archives are pinned, hashed, saved under the
-data root, restored on the assigned compute node, and run with `pull_policy: never`.
+Qdrant, BGE-M3, and BGE-Reranker-v2-M3 are shared infrastructure services. MemOS uses
+the pinned official Neo4j Python driver against a fresh Neo4j Community service and
+fresh volume for each serial preparation; no Enterprise-only multi-database feature
+is assumed. Every other preparation uses a unique namespace or local store directory.
+Images, per-worker hash-locked wheelhouses, and upstream source archives are pinned,
+hashed, saved under the data root, restored on the assigned compute node, and run with
+`pull_policy: never`.
 
 The formal Slurm job requests two A100 GPUs. One serves embedding and one serves
 reranking. Prefix preparations run serially in the first qualification release to
@@ -384,7 +405,9 @@ Live server preflight verifies:
 6. native add, inventory, search, update, and delete where supported;
 7. reconstructable native IDs and model-visible blocks;
 8. reset/isolation behavior;
-9. a four-session end-to-end smoke matrix.
+9. each restored worker image starts offline and reports the expected benchmark
+   commit, upstream package/source identity, CLI entrypoint, and prefix schema;
+10. a four-session end-to-end smoke matrix.
 
 Unsupported APIs, source drift, missing scores/IDs, model substitution, silent context
 truncation, hidden-gold leakage, or non-empty starting stores are hard failures. A

@@ -97,8 +97,9 @@
 - [ ] Write failing tests that load schema-v2 and assert exact condition order, three policies, fixed DeepSeek writer, common BGE profiles, source pins, candidate_k=20, visible_k=5, and full_context_max_chars=100000.
 - [ ] Assert repository pins: Mem0 2.0.12, A-MEM commit ceffb860f0712bbae97b184d440df62bc910ca8d, and MemOS v2.0.23 commit 583b07b998afc4debb6c5078439b0b3896f5b097.
 - [ ] Add frozen FlatRetrievalProfile, AMemProfile, MemOSTreeProfile, and a discriminated SystemProfile union. Reject A-MEM package identity a-mem, MemOS modes other than tree, fallback declarations, different embedding models, writer/profile mismatches, or managed profiles without both readouts.
-- [ ] Add PreparationTask and EvaluationTask. build_preparation_tasks produces exactly Flat/Mem0/A-MEM/MemOS once per episode. build_evaluation_tasks produces exactly 7 conditions × 3 policies and 30 unique ScoredCondition IDs, with managed native/common branches.
+- [ ] Add PreparationTask, EvaluationTaskTemplate, and EvaluationTask. Initial planning produces four preparations plus stable non-executable templates. Only finalize_evaluation_plan, after verified artifacts exist, produces exactly 7 conditions × 3 policies and 30 unique ScoredCondition IDs with managed native/common branches. Assert stable indices across finalization and reject execution of templates.
 - [ ] Add immutable MemoryPrefixCheckpoint and MemoryPrefixArtifact schemas. Include source/profile/config/model identities, dataset/surface hashes, writes, inventories, retrievals, common reranks, graph diagnostics, storage footprints, and canonical artifact_hash. Round-trip must reproduce byte-identical canonical JSON.
+- [ ] Add a frozen causal-use/sampling profile with temperature=0, max_output_tokens=512, baseline_repeats=2, intervention_repeats=2, format-repair policy, and explicit null provider seed. Include it in config and run identity.
 - [ ] Ensure evaluation task identity contains the required prefix artifact hash while controls use a canonical no-prefix marker. Changing any prefix hash must change only dependent evaluation task hashes.
 - [ ] Preserve schema-v1 parser behavior and build_qualification_tasks output for old configs.
 - [ ] Run:
@@ -141,7 +142,7 @@
 - Test: tests/qualification/test_prepare.py
 - Create: tests/qualification/test_storage.py
 
-- [ ] Write failing tests with a fake MemoryRuntime proving that sessions replay once in order, each write is followed by inventory/alignment, and each SCEU receives native candidates plus common-reranked ordering.
+- [ ] Write failing tests with a fake MemoryRuntime proving that sessions replay once in order, each write is followed by inventory/alignment, and each SCEU receives native candidates plus common-reranked ordering. At checkpoint c the eligible store must contain exactly sessions 0..c-1; retrieve before writing the current checkpoint surface and test SCEUs on write boundaries.
 - [ ] Implement prepare_prefix(task, spec, runtime, reranker, storage). It must atomically write a complete artifact only after all checkpoints succeed; failures leave an explicit failed preparation and no valid artifact.
 - [ ] Use canonical public transcripts only. Pass no latent state, state IDs, valid actions, future values, or ideal summaries to the runtime.
 - [ ] Record the complete stored→candidate→native retrieved/common reranked chain, normalized mutations, N_write/N_live, content attribution, latency/usage, and backend diagnostics.
@@ -237,8 +238,8 @@
 - Test: tests/qualification/test_neo4j.py
 
 - [ ] Build fake TreeTextMemory, SimpleStructMemReader, MemoryManager, reorganizer, and graph-store boundaries matching the pinned release. Write failing tests for synchronous add, reorganize queue/wait, vector/graph-expanded search, archived nodes, MERGED_TO lineage, structural nodes, and graph failures.
-- [ ] Implement the minimal Neo4j HTTP/Bolt-facing inventory boundary needed to list namespace nodes/edges and count storage. Validate isolation before use.
-- [ ] Implement MemOSTreeQualificationAdapter with reorganize=true, internet retrieval disabled, synchronous add, frozen fast search, common BGE-M3 embedding, and fixed DeepSeek reader/reorganizer/dispatcher.
+- [ ] Use the pinned official Neo4j Python Bolt driver for the minimal inventory boundary needed to list nodes/edges and count storage. Each preparation must receive a freshly created Neo4j Community volume; validate an empty graph before use and reject volume reuse/contamination.
+- [ ] Implement MemOSTreeQualificationAdapter with reorganize=true, internet retrieval disabled, synchronous add, frozen fast search, common BGE-M3 embedding, and fixed DeepSeek reader/reorganizer/dispatcher. Add a MemOS-specific DeepSeek transport/config contract proving every LLM component uses only the configured endpoint/model, records usage, rejects substitution, and never invokes an upstream default provider.
 - [ ] After every session, wait until the reorganizer is idle or fail on timeout. Snapshot graph before/after and derive node add/update/archive/delete plus edge add/remove events.
 - [ ] Count all live retrievable graph nodes in N_live, label structural/topic versus content nodes, exclude archived/deleted nodes from N_live, and keep edges separate from object count.
 - [ ] Never instantiate GeneralTextMemory. Missing tree APIs, unsupported configuration, reorganizer timeout, package/source drift, or graph namespace contamination are terminal.
@@ -262,7 +263,7 @@
 - Modify: tests/qualification/test_cli.py
 
 - [ ] Write failing CLI tests for plan-systems, prepare-task, evaluate-task, run-evaluation-matrix, aggregate-systems, validate-systems, preflight-systems, and smoke-systems --dry-run.
-- [ ] plan-systems writes run_manifest.json, prepare_tasks.jsonl, and a control-aware evaluation plan template. Verify 4 prepare tasks and 21 evaluation tasks/30 cells after artifacts are present.
+- [ ] plan-systems writes run_manifest.json, prepare_tasks.jsonl, and evaluation_task_templates.jsonl. Add finalize-evaluation-plan to verify all required artifacts and atomically materialize tasks.jsonl with 21 executable tasks/30 cells in stable template index order.
 - [ ] prepare-task dispatches only the task's backend factory, produces an atomic artifact, and is independently retryable. A failed backend does not block other preparations but blocks dependent evaluation tasks.
 - [ ] evaluate-task loads no upstream memory package, verifies the artifact hash, and writes one atomic policy-condition task result. Completed cells with the same input hash are reused; mismatches require explicit force.
 - [ ] Keep task indices stable, deterministic, and unique. Include code commit/dirty bit, dataset, config, policy routes, writer, source pins, dependency locks, image IDs, model files, hardware profile, and prefix hashes in identities.
@@ -311,6 +312,10 @@
 - Create: docker/core-worker.Dockerfile
 - Create: docker/amem-worker.Dockerfile
 - Create: docker/memos-worker.Dockerfile
+- Create: docker/locks/amem-requirements.txt
+- Create: docker/locks/memos-requirements.txt
+- Create: docker/locks/amem-wheelhouse-manifest.json
+- Create: docker/locks/memos-wheelhouse-manifest.json
 - Create: deploy/compose.systems.yaml
 - Create: deploy/slurm/systems_qualification.sbatch
 - Create: scripts/lib/systems_common.sh
@@ -318,6 +323,7 @@
 - Create: scripts/preflight_systems.sh
 - Create: scripts/run_systems_smoke.sh
 - Create: scripts/run_systems_qualification.sh
+- Create: scripts/verify_system_images.sh
 - Create: docs/systems-server-workflow.md
 - Modify: src/lhmsb/qualification/preflight.py
 - Modify: .env.example
@@ -328,10 +334,10 @@
 
 - [ ] Write static failing tests for four isolated worker images, one benchmark commit, exact upstream pins, shared Qdrant/Neo4j/embedding/reranker services, two distinct A100 assignments, non-root workers, read-only source mounts, persistent data root, healthchecks, pull_policy never, and no credential copy.
 - [ ] Pin Qdrant, Neo4j 5, TEI, and CUDA base images by immutable digest in a generated image manifest. Bootstrap must reject unresolved tags in live mode.
-- [ ] Build core and Mem0 from the repository lock; clone A-MEM and MemOS only at exact commits into source archives, verify hashes, and build dedicated dependency-isolated images. Save every image archive and digest under the data root for compute-node restore.
+- [ ] Build core and Mem0 from the repository lock. Commit exact transitive, hash-locked requirements for A-MEM and MemOS; clone only the pinned commits, verify source archives, populate per-image wheelhouses with --require-hashes, and build dedicated dependency-isolated images without online resolution. Save every wheel manifest, image archive, and digest under the data root.
 - [ ] Use only OPENCODE_ZEN_API_KEY and DEEPSEEK_API_KEY plus documented base-URL overrides. Only worker services receive provider credentials/egress.
 - [ ] Split preflight into reusable repository/data/provider/service gates and condition-aware lifecycle gates. Add repository-only checks for config/dataset/source/image/model contracts and live checks for two A100s, TEI dimensions/order, Qdrant/Neo4j isolation, exact package identities, writer/policy model identities, lifecycle add/search/update/delete where supported, and trace reconstruction. Unselected backend gates must skip without requiring their packages or services.
-- [ ] Add a four-session smoke that prepares all four prefixes and evaluates all 21 tasks/30 cells before the 16-session run.
+- [ ] Add verify_system_images.sh to restore and start every image offline, then assert benchmark commit, upstream package/source identity, CLI entrypoint, and cross-image prefix-artifact schema compatibility before any provider call. Add a four-session smoke that prepares all four prefixes, finalizes the evaluation plan, and evaluates all 21 tasks/30 cells before the 16-session run.
 - [ ] The Slurm script requests at least two A100 GPUs, maps one to embedding and one to reranking, uses a unique Compose project and data namespace, takes a shared-state lock, restores pinned images, cleans up on signals, prepares prefixes serially, evaluates resumably, aggregates, and validates.
 - [ ] Make bootstrap and run wrappers support --dry-run without network, Docker, GPUs, or secrets. Preserve old Mem0 server scripts unchanged.
 - [ ] Document exact migration commands: git checkout pinned commit, bootstrap, repository preflight, sbatch smoke, inspect validation, then sbatch full qualification. Document expected output paths and failure recovery.
