@@ -12,6 +12,12 @@ from typing import cast
 
 import yaml
 
+from lhmsb.qualification.conditions import (
+    CANONICAL_CONDITION_IDS,
+    LEGACY_CONDITION_IDS,
+    condition_definition,
+    condition_definitions,
+)
 from lhmsb.qualification.schema import (
     Mem0Profile,
     Mem0Track,
@@ -32,7 +38,9 @@ _DEFAULT_CONDITIONS: tuple[QualificationCondition, ...] = (
     "mem0_controlled",
     "mem0_native",
 )
-_SUPPORTED_CONDITIONS = frozenset(_DEFAULT_CONDITIONS)
+_SUPPORTED_CONDITIONS = frozenset(
+    (*CANONICAL_CONDITION_IDS, *LEGACY_CONDITION_IDS)
+)
 
 
 class QualificationConfigError(ValueError):
@@ -52,6 +60,8 @@ def _validate_conditions(
         raise QualificationConfigError(
             f"conditions contain unsupported values: {sorted(unsupported)}"
         )
+    for condition in resolved:
+        condition_definition(condition)
     return cast(tuple[QualificationCondition, ...], resolved)
 
 
@@ -105,6 +115,10 @@ class QualificationConfig:
             "data_root_env": self.data_root_env,
             "policy_profiles": [asdict(profile) for profile in self.policy_profiles],
             "conditions": list(self.conditions),
+            "condition_definitions": [
+                definition.to_dict()
+                for definition in condition_definitions(self.conditions)
+            ],
             "retrieval": asdict(self.retrieval),
             "controlled_mem0": asdict(self.controlled_mem0),
             "native_mem0": asdict(self.native_mem0),
@@ -213,12 +227,8 @@ def build_qualification_tasks(
                 task_index = len(tasks)
                 prefix = f"{_slug(episode_id)}--{policy.profile_id}--{condition}"
                 task_id = f"{task_index:05d}--{prefix}"
-                if condition == "mem0_controlled":
-                    readouts: tuple[ReadoutKind, ...] = ("native", "common_rerank")
-                elif condition == "mem0_native":
-                    readouts = ("native",)
-                else:
-                    readouts = ("none",)
+                definition = condition_definition(condition)
+                readouts: tuple[ReadoutKind, ...] = definition.readouts
                 scored: list[ScoredCondition] = []
                 for readout in readouts:
                     suffix = condition if readout == "none" else f"{condition}--{readout}"
@@ -233,7 +243,7 @@ def build_qualification_tasks(
                             readout=readout,
                         )
                     )
-                if condition.startswith("mem0_"):
+                if definition.prefix_backend is not None:
                     store_namespace = _slug(
                         f"{run_identity[:12]}--{episode_id}--{policy.profile_id}--{condition}"
                     )

@@ -10,7 +10,12 @@ PolicyRequestAPI = Literal["messages", "responses", "chat_completions"]
 Mem0Track = Literal["controlled", "native"]
 QualificationCondition = Literal[
     "workspace_only",
+    "full_context",
     "oracle_current_state",
+    "flat_retrieval",
+    "mem0",
+    "amem",
+    "memos",
     "mem0_controlled",
     "mem0_native",
 ]

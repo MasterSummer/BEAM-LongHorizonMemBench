@@ -365,6 +365,37 @@ def test_schema_v1_without_conditions_uses_legacy_full_matrix(
     )
 
 
+def test_seven_condition_matrix_uses_explicit_registry_contracts(
+    tmp_path: Path,
+) -> None:
+    conditions = [
+        "workspace_only",
+        "full_context",
+        "oracle_current_state",
+        "flat_retrieval",
+        "mem0",
+        "amem",
+        "memos",
+    ]
+    config = load_qualification_config(
+        _copied_config(tmp_path, conditions=conditions)
+    )
+    tasks = build_qualification_tasks(
+        config,
+        episode_ids=("software-mem0-42",),
+        run_identity="run-hash",
+    )
+
+    assert config.conditions == tuple(conditions)
+    serialized_definitions = config.to_dict()["condition_definitions"]
+    assert isinstance(serialized_definitions, list)
+    assert [item["condition_id"] for item in serialized_definitions] == conditions
+    assert len(tasks) == 21
+    assert len(
+        [result for task in tasks for result in task.scored_conditions]
+    ) == 30
+
+
 @pytest.mark.parametrize(
     "conditions",
     (
