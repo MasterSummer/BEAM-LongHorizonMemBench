@@ -144,6 +144,8 @@ def test_deepseek_uses_openai_compatible_chat_tools() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/chat/completions"
         assert request.headers["authorization"] == "Bearer secret"
+        body = json.loads(request.content)
+        assert body["thinking"] == {"type": "disabled"}
         return httpx.Response(
             200,
             json={

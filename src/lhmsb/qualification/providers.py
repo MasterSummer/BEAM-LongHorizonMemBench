@@ -240,6 +240,10 @@ class HttpPolicyClient:
                 "model": self.profile.model_id,
                 "messages": [{"role": "system", "content": system}, *messages],
                 "max_tokens": request.max_output_tokens,
+                # DeepSeek's reasoning mode rejects forced tool calls.  The
+                # qualification policy needs a deterministic structured call,
+                # so explicitly disable thinking for this request.
+                "thinking": {"type": "disabled"},
                 "tools": [
                     {
                         "type": "function",
