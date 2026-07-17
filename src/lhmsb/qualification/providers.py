@@ -413,10 +413,17 @@ class HttpPolicyClient:
                 "submit_action action_id is missing",
             )
         if not isinstance(rationale, str):
-            raise PolicyCallError(
-                "structured_output_failure",
-                "submit_action concise_rationale is missing",
-            )
+            if self.profile.provider == "deepseek" and rationale is None:
+                # DeepSeek occasionally omits this explanatory field while
+                # still returning a valid, uniquely selectable action.  The
+                # rationale is diagnostic only; preserve the action and make
+                # the omission explicit as an empty trace field.
+                rationale = ""
+            else:
+                raise PolicyCallError(
+                    "structured_output_failure",
+                    "submit_action concise_rationale is missing",
+                )
         if patch is not None and not isinstance(patch, str):
             raise PolicyCallError(
                 "structured_output_failure",
