@@ -149,7 +149,12 @@ class AMemQualificationAdapter:
             endpoint=policy.endpoint,
             timeout_seconds=policy.timeout_seconds,
             max_retries=policy.max_retries,
-            max_output_tokens=512,
+            # DeepSeek reasoning can consume the whole 512-token budget on
+            # A-MEM's evolution prompt, leaving an empty ``content`` field
+            # even when JSON mode is requested.  Keep this writer budget
+            # independent from continuation sampling and allow operators to
+            # tune it without changing the public profile.
+            max_output_tokens=_amem_writer_max_output_tokens(),
         )
         memory_class = getattr(module, "AgenticMemorySystem", None)
         if not callable(memory_class):
@@ -725,6 +730,22 @@ def _install_writer(backend: object, writer: DeepSeekJSONBridge) -> None:
             "upstream_api_mismatch", "A-MEM llm_controller lacks llm boundary"
         )
     controller.llm = writer
+
+
+def _amem_writer_max_output_tokens() -> int:
+    """Return the controlled A-MEM writer budget with reasoning headroom."""
+    raw = os.environ.get("LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS", "2048")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise AMemQualificationError(
+            "invalid_writer_budget", "LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS must be an integer"
+        ) from exc
+    if value < 1:
+        raise AMemQualificationError(
+            "invalid_writer_budget", "LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS must be positive"
+        )
+    return value
 
 
 def _safe_signature(value: object) -> inspect.Signature | None:

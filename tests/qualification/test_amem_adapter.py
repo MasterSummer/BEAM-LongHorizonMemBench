@@ -8,6 +8,7 @@ import pytest
 from lhmsb.adapters.amem_qualification import (
     AMemQualificationAdapter,
     AMemQualificationError,
+    _amem_writer_max_output_tokens,
 )
 from lhmsb.qualification.context import PublicHistoryUnit
 
@@ -167,3 +168,10 @@ def test_source_and_api_mismatch_fail_without_fallback() -> None:
     # Constructor-level fake identity is checked by the live factory; ensure the
     # explicit source verifier remains strict through the public helper path.
     assert bad.__source_commit__ == "wrong"
+
+
+def test_amem_writer_budget_has_offline_reasoning_headroom(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS", raising=False)
+    assert _amem_writer_max_output_tokens() == 2048
+    monkeypatch.setenv("LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS", "3072")
+    assert _amem_writer_max_output_tokens() == 3072
