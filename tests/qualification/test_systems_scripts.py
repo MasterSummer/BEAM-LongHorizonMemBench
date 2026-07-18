@@ -106,6 +106,21 @@ def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
             assert marker in text
 
 
+def test_qualification_forwards_allow_dirty_to_plan(tmp_path: Path) -> None:
+    result = _run(
+        ROOT / "scripts" / "run_systems_qualification.sh",
+        "--dry-run",
+        "--allow-dirty",
+        "--data-root",
+        str(tmp_path / "data"),
+        "--env-file",
+        str(tmp_path / "missing.env"),
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "plan-systems" in result.stdout
+    assert "--allow-dirty" in result.stdout
+
+
 def test_bootstrap_uses_native_venv_and_pinned_sources() -> None:
     text = (ROOT / "scripts" / "bootstrap_systems_server.sh").read_text(
         encoding="utf-8"

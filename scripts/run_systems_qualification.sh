@@ -13,6 +13,7 @@ CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_zen.yaml"
 DRY_RUN=0
 FORCE=0
 KEEP_GOING=0
+ALLOW_DIRTY=0
 
 usage() {
   cat <<'EOF'
@@ -27,6 +28,7 @@ Options:
   --config PATH     schema-v2 experiment config
   --run-name NAME   run name (default: systems-qualification)
   --force           replace a conflicting run identity
+  --allow-dirty    allow a working tree with runtime-only untracked files
   --keep-going      continue independent tasks after a failed cell
   --dry-run         print commands without network, GPU, secrets, or writes
   -h, --help        show this help
@@ -41,6 +43,7 @@ while (($#)); do
     --config) systems_require_value "$1" "${2:-}" || exit 2; CONFIG="$2"; shift 2 ;;
     --run-name) systems_require_value "$1" "${2:-}" || exit 2; RUN_NAME="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
+    --allow-dirty) ALLOW_DIRTY=1; shift ;;
     --keep-going) KEEP_GOING=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -54,6 +57,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   systems_print_command systems_start_all_services "${DATA_ROOT}"
   PLAN=(plan-systems --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}")
   [[ "${FORCE}" == "1" ]] && PLAN+=(--force)
+  [[ "${ALLOW_DIRTY}" == "1" ]] && PLAN+=(--allow-dirty)
   systems_print_command "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification "${PLAN[@]}"
   for pair in "core 0" "mem0 1" "amem 2" "memos 3"; do
     read -r environment task_index <<<"${pair}"
@@ -90,6 +94,7 @@ systems_write_runtime_env "${DATA_ROOT}"
 
 PLAN=(plan-systems --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}")
 [[ "${FORCE}" == "1" ]] && PLAN+=(--force)
+[[ "${ALLOW_DIRTY}" == "1" ]] && PLAN+=(--allow-dirty)
 systems_run_cli "${DATA_ROOT}" core "${PLAN[@]}"
 for pair in "core 0" "mem0 1" "amem 2" "memos 3"; do
   read -r environment task_index <<<"${pair}"
