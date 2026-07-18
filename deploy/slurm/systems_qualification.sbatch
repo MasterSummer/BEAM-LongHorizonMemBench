@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=lhmsb-systems
-#SBATCH --gres=gpu:a100:2
+# Request two generic NVIDIA GPUs.  Set LHMSB_REQUIRE_A100=1 only on a legacy
+# partition whose benchmark contract explicitly requires A100 hardware.
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --time=2-00:00:00
@@ -30,7 +32,7 @@ cleanup() {
 trap cleanup EXIT INT TERM USR1
 
 if [[ "${DRY_RUN}" == "1" ]]; then
-  systems_print_command systems_select_a100_devices
+  systems_print_command systems_select_devices
   systems_print_command systems_acquire_run_lock "${DATA_ROOT}" "${RUN_NAME}"
   systems_print_command systems_start_all_services "${DATA_ROOT}"
   systems_print_command "${SCRIPT_DIR}/preflight_systems.sh" --dry-run \

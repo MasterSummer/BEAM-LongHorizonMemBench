@@ -30,12 +30,13 @@ def test_native_layout_and_lock_contracts_are_tracked() -> None:
         assert "--require-hashes" in text
 
 
-def test_slurm_uses_two_a100s_and_native_lifecycle() -> None:
+def test_slurm_uses_two_gpus_and_native_lifecycle() -> None:
     path = ROOT / "deploy" / "slurm" / "systems_qualification.sbatch"
     text = path.read_text(encoding="utf-8")
-    assert "#SBATCH --gres=gpu:a100:2" in text
+    assert "#SBATCH --gres=gpu:2" in text
+    assert "LHMSB_REQUIRE_A100=1" in text
     for marker in (
-        "systems_select_a100_devices",
+        "systems_select_devices",
         "systems_acquire_run_lock",
         "systems_start_all_services",
         "systems_stop_all_services",

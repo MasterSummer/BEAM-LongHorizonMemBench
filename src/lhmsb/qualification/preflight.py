@@ -553,8 +553,9 @@ def _gate_host_runtime(context: PreflightContext) -> dict[str, object]:
             "preflight_failure",
             "embedding and reranker GPU IDs must be distinct",
         )
+    require_a100 = _requires_a100(context.environment)
     selected_gpu_lines = tuple(
-        _selected_a100_gpu(gpu_lines, gpu_id)
+        _selected_gpu(gpu_lines, gpu_id, require_a100=require_a100)
         for gpu_id in (embedding_gpu_id, reranker_gpu_id)
     )
     if selected_gpu_lines[0] == selected_gpu_lines[1]:
@@ -593,14 +594,25 @@ def _gate_host_runtime(context: PreflightContext) -> dict[str, object]:
         "selected_gpus": selected_gpu_lines,
         "embedding_gpu_id": embedding_gpu_id,
         "reranker_gpu_id": reranker_gpu_id,
+        "require_a100": require_a100,
         "free_bytes": free_bytes,
         "mem0_wheel_sha256": expected,
     }
 
 
-def _selected_a100_gpu(
+def _requires_a100(environment: Mapping[str, str]) -> bool:
+    return environment.get("LHMSB_REQUIRE_A100", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _selected_gpu(
     gpu_lines: tuple[str, ...],
     gpu_id: str,
+    *,
+    require_a100: bool = False,
 ) -> str:
     for line in gpu_lines:
         fields = tuple(part.strip() for part in line.split(","))
@@ -609,7 +621,7 @@ def _selected_a100_gpu(
         if not (matches_index or matches_uuid):
             continue
         name = fields[1] if len(fields) > 1 else ""
-        if "A100" not in name.upper():
+        if require_a100 and "A100" not in name.upper():
             raise PreflightError(
                 "preflight_failure",
                 f"selected GPU {gpu_id!r} is not an NVIDIA A100: {name!r}",
@@ -619,6 +631,14 @@ def _selected_a100_gpu(
         "preflight_failure",
         f"selected GPU {gpu_id!r} is absent from the host inventory",
     )
+
+
+def _selected_a100_gpu(
+    gpu_lines: tuple[str, ...],
+    gpu_id: str,
+) -> str:
+    """Backward-compatible strict A100 selector for legacy callers."""
+    return _selected_gpu(gpu_lines, gpu_id, require_a100=True)
 
 
 def _gate_image_digests(context: PreflightContext) -> dict[str, object]:

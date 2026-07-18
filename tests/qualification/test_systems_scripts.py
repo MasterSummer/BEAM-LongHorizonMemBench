@@ -130,6 +130,77 @@ def test_common_helper_does_not_emit_secret_values() -> None:
     assert "systems_require_live_secrets" in text
 
 
+def test_gpu_configuration_accepts_two_visible_rtx_devices_by_default(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_smi = fake_bin / "nvidia-smi"
+    fake_smi.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$*\" == *\"index,name,uuid\"* ]]; then\n"
+        "  printf '%s\\n' '0, NVIDIA GeForce RTX 4090, GPU-a' '1, NVIDIA GeForce RTX 4090, GPU-b'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_smi.chmod(0o755)
+    env = dict(os.environ)
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "LHMSB_EMBEDDING_GPU_ID": "0",
+            "LHMSB_RERANKER_GPU_ID": "1",
+            "LHMSB_REQUIRE_A100": "0",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"source {COMMON!s}; systems_configure_gpus",
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_gpu_configuration_can_keep_a100_strict_mode(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_smi = fake_bin / "nvidia-smi"
+    fake_smi.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' '0, NVIDIA GeForce RTX 4090, GPU-a' '1, NVIDIA GeForce RTX 4090, GPU-b'\n",
+        encoding="utf-8",
+    )
+    fake_smi.chmod(0o755)
+    env = dict(os.environ)
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "LHMSB_EMBEDDING_GPU_ID": "0",
+            "LHMSB_RERANKER_GPU_ID": "1",
+            "LHMSB_REQUIRE_A100": "1",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-c", f"source {COMMON!s}; systems_configure_gpus"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "A100" in result.stderr
+
+
 def test_runtime_verifier_is_native() -> None:
     text = (ROOT / "scripts" / "verify_system_runtime.sh").read_text(encoding="utf-8")
     assert "native-runtime.json" in text

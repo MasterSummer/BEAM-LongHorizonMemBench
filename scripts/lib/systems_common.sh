@@ -125,7 +125,7 @@ systems_assert_generated_lock() {
   }
 }
 
-systems_select_a100_devices() {
+systems_select_devices() {
   local allocated="${SLURM_JOB_GPUS:-${CUDA_VISIBLE_DEVICES:-}}"
   local embedding="${LHMSB_EMBEDDING_GPU_ID:-}"
   local reranker="${LHMSB_RERANKER_GPU_ID:-}"
@@ -134,7 +134,7 @@ systems_select_a100_devices() {
     allocated="${allocated//gpu:/}"
     IFS=',' read -r -a devices <<<"${allocated}"
     if ((${#devices[@]} < 2)); then
-      printf 'at least two allocated A100 devices are required\n' >&2
+      printf 'at least two allocated GPU devices are required\n' >&2
       return 1
     fi
     embedding="${devices[0]//[[:space:]]/}"
@@ -152,8 +152,15 @@ systems_select_a100_devices() {
   export LHMSB_RERANKER_GPU_ID="${reranker}"
 }
 
+# Keep the historical name as a compatibility entry point for older Slurm
+# recipes and downstream scripts.  Device selection is no longer A100-only;
+# model validation is controlled by LHMSB_REQUIRE_A100.
+systems_select_a100_devices() {
+  systems_select_devices "$@"
+}
+
 systems_configure_gpus() {
-  systems_select_a100_devices
+  systems_select_devices
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     return 0
   fi
@@ -162,12 +169,28 @@ systems_configure_gpus() {
     return 1
   }
   local inventory
-  inventory="$(nvidia-smi --query-gpu=index,name --format=csv,noheader)"
+  inventory="$(nvidia-smi --query-gpu=index,name,uuid --format=csv,noheader)"
+  local require_a100="${LHMSB_REQUIRE_A100:-0}"
+  local require_a100_lc
+  require_a100_lc="$(printf '%s' "${require_a100}" | tr '[:upper:]' '[:lower:]')"
   local device
   for device in "${LHMSB_EMBEDDING_GPU_ID}" "${LHMSB_RERANKER_GPU_ID}"; do
     printf '%s\n' "${inventory}" | awk -F, -v wanted="${device}" \
-      '$1 ~ /^[[:space:]]*'"${device}"'[[:space:]]*$/ && toupper($2) ~ /A100/ {found=1} END {exit !found}' || {
-        printf 'selected device %s is not an NVIDIA A100\n' "${device}" >&2
+      -v require_a100="${require_a100}" \
+      'function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value } \
+       { index_value=trim($1); name=trim($2); uuid=trim($3); \
+         if (index_value == wanted || uuid == wanted) { \
+           if (require_a100 == "1" || tolower(require_a100) == "true" || tolower(require_a100) == "yes") { \
+             if (toupper(name) !~ /A100/) next \
+           } \
+           found=1 \
+         } \
+       } END {exit !found}' || {
+        if [[ "${require_a100_lc}" == "1" || "${require_a100_lc}" == "true" || "${require_a100_lc}" == "yes" ]]; then
+          printf 'selected device %s is absent or is not an NVIDIA A100\n' "${device}" >&2
+        else
+          printf 'selected device %s is absent from the visible NVIDIA GPU inventory\n' "${device}" >&2
+        fi
         return 1
       }
   done
@@ -203,6 +226,7 @@ systems_write_host_manifest() {
   GPU_INVENTORY="${inventory}" \
   EMBEDDING_GPU="${LHMSB_EMBEDDING_GPU_ID}" \
   RERANKER_GPU="${LHMSB_RERANKER_GPU_ID}" \
+  REQUIRE_A100="${LHMSB_REQUIRE_A100:-0}" \
     python3 - "${manifest}" <<'PY'
 import json
 import os
@@ -211,14 +235,26 @@ from pathlib import Path
 
 rows = [line.strip() for line in os.environ["GPU_INVENTORY"].splitlines() if line.strip()]
 selected = (os.environ["EMBEDDING_GPU"], os.environ["RERANKER_GPU"])
-by_index = {row.split(",", 1)[0].strip(): row for row in rows}
+require_a100 = os.environ.get("REQUIRE_A100", "0").strip().lower() in {"1", "true", "yes"}
+by_id = {}
+for row in rows:
+    fields = [part.strip() for part in row.split(",")]
+    if fields:
+        by_id[fields[0]] = (row, fields[1] if len(fields) > 1 else "")
+    if len(fields) > 2:
+        by_id[fields[2]] = (row, fields[1])
 for device in selected:
-    row = by_index.get(device)
-    if row is None or "A100" not in row.upper():
+    selected_row = by_id.get(device)
+    if selected_row is None:
+        raise SystemExit(f"selected device {device} is absent from the visible NVIDIA GPU inventory")
+    row, name = selected_row
+    if require_a100 and "A100" not in name.upper():
         raise SystemExit(f"selected device {device} is not an NVIDIA A100")
 payload = {
     "schema_version": 1,
     "selected_devices": {"embedding": selected[0], "reranker": selected[1]},
+    "gpu_policy": "a100" if require_a100 else "any",
+    "require_a100": require_a100,
     "gpus": rows,
 }
 path = Path(sys.argv[1])
