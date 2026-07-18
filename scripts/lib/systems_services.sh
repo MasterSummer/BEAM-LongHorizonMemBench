@@ -211,12 +211,15 @@ systems_start_qdrant() {
   root="$(systems_service_root "${data_root}")"
   local state="${data_root}/qdrant/${LHMSB_SERVICE_INSTANCE:-manual}"
   mkdir -p "${state}" "${root}/logs"
-  env -i HOME="${HOME}" PATH="/usr/bin:/bin" LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-    QDRANT__SERVICE__HOST=127.0.0.1 \
-    QDRANT__SERVICE__HTTP_PORT="${LHMSB_QDRANT_HTTP_PORT}" \
-    QDRANT__SERVICE__GRPC_PORT="${LHMSB_QDRANT_GRPC_PORT}" \
-    QDRANT__STORAGE__STORAGE_PATH="${state}" \
-    "${LHMSB_QDRANT_BIN}" >"${root}/logs/qdrant.log" 2>&1 &
+  (
+    cd "${state}"
+    exec env -i HOME="${HOME}" PATH="/usr/bin:/bin" LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+      QDRANT__SERVICE__HOST=127.0.0.1 \
+      QDRANT__SERVICE__HTTP_PORT="${LHMSB_QDRANT_HTTP_PORT}" \
+      QDRANT__SERVICE__GRPC_PORT="${LHMSB_QDRANT_GRPC_PORT}" \
+      QDRANT__STORAGE__STORAGE_PATH="${state}" \
+      "${LHMSB_QDRANT_BIN}"
+  ) >"${root}/logs/qdrant.log" 2>&1 &
   systems_record_pid "${data_root}" qdrant "$!"
 }
 

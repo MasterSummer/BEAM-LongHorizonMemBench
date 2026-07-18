@@ -201,6 +201,13 @@ def test_gpu_configuration_can_keep_a100_strict_mode(
     assert "A100" in result.stderr
 
 
+def test_qdrant_process_starts_inside_its_isolated_state_directory() -> None:
+    text = SERVICES.read_text(encoding="utf-8")
+
+    assert '(\n    cd "${state}"' in text
+    assert 'exec env -i HOME="${HOME}"' in text
+
+
 def test_runtime_verifier_is_native() -> None:
     text = (ROOT / "scripts" / "verify_system_runtime.sh").read_text(encoding="utf-8")
     assert "native-runtime.json" in text
