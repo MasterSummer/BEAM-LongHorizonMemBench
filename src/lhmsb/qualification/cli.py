@@ -43,6 +43,7 @@ from lhmsb.qualification.preflight import (
 from lhmsb.qualification.providers import HttpPolicyClient
 from lhmsb.qualification.report import write_qualification_report
 from lhmsb.qualification.runner import (
+    ConditionRunResult,
     QualificationMatrixResult,
     QualificationRunError,
     QualificationTaskResult,
@@ -291,6 +292,56 @@ def plan_qualification_run(
     return manifest
 
 
+def _failed_task_result(
+    task: QualificationTask,
+    exc: Exception,
+) -> QualificationTaskResult:
+    """Build a portable failed result so failures remain reportable."""
+    error_class = getattr(exc, "error_class", type(exc).__name__)
+    if not isinstance(error_class, str) or not error_class:
+        error_class = type(exc).__name__
+    error_message = str(exc)
+    conditions = tuple(
+        ConditionRunResult(
+            result_id=item.result_id,
+            condition=item.condition,
+            readout=item.readout,
+            status="failed",
+            sceu_results=(),
+            error_class=error_class,
+            error_message=error_message,
+        )
+        for item in task.scored_conditions
+    )
+    return QualificationTaskResult(
+        task_id=task.task_id,
+        episode_id=task.episode_id,
+        policy_profile_id=task.policy_profile_id,
+        condition=task.condition,
+        status="failed",
+        condition_results=conditions,
+        writes=(),
+        alignments=(),
+        retrieval_traces=(),
+        error_class=error_class,
+        error_message=error_message,
+    )
+
+
+def _refresh_report_preserving_failure(
+    run_directory: Path,
+) -> AggregateStatus | None:
+    """Refresh the report, attaching report errors to an active failure."""
+    try:
+        return aggregate_qualification_run(run_directory)
+    except Exception as report_exc:
+        active = sys.exc_info()[1]
+        if active is not None:
+            active.add_note(f"experiment report generation failed: {report_exc}")
+            return None
+        raise
+
+
 def execute_qualification_task(
     run_directory: Path,
     task_index: int,
@@ -308,58 +359,71 @@ def execute_qualification_task(
     task = tasks[task_index]
     if dry_run:
         return None
-    env = dict(os.environ if environment is None else environment)
-    require_live_gate(env)
     result_path = _task_result_path(run_directory, task)
     if result_path.is_file() and not force:
         return _read_task_result(result_path, manifest, task)
-    storage = QualificationStorage(
-        run_directory / "cells",
-        run_identity=manifest.run_identity,
-    )
-    spec = specs[task.episode_id]
-    isolation = TaskIsolation.for_task(
-        task,
-        storage.task_directory(task),
-    )
-    components = _live_components(
-        task,
-        isolation,
-        spec=spec,
-        config=config,
-        environment=env,
-    )
+    components: TaskComponents | None = None
     try:
-        result = run_qualification_task(
+        env = dict(os.environ if environment is None else environment)
+        require_live_gate(env)
+        storage = QualificationStorage(
+            run_directory / "cells",
+            run_identity=manifest.run_identity,
+        )
+        spec = specs[task.episode_id]
+        isolation = TaskIsolation.for_task(
             task,
-            spec,
-            components=components,
-            storage=storage,
-            visible_k=config.retrieval.visible_k,
+            storage.task_directory(task),
         )
-    except BaseException as exc:
+        components = _live_components(
+            task,
+            isolation,
+            spec=spec,
+            config=config,
+            environment=env,
+        )
         try:
-            _close_task_components(components)
-        except Exception as cleanup_exc:
-            exc.add_note(f"task resource cleanup also failed: {cleanup_exc}")
+            result = run_qualification_task(
+                task,
+                spec,
+                components=components,
+                storage=storage,
+                visible_k=config.retrieval.visible_k,
+            )
+        except BaseException as exc:
+            try:
+                _close_task_components(components)
+            except Exception as cleanup_exc:
+                exc.add_note(f"task resource cleanup also failed: {cleanup_exc}")
+            raise
+        _close_task_components(components)
+        if task.condition.startswith("mem0_"):
+            qdrant_store_bytes = _qdrant_collection_snapshot_size(
+                env.get("LHMSB_QDRANT_URL", "http://qdrant:6333"),
+                isolation.collection_name,
+            )
+            history_store_bytes = _sqlite_store_size(
+                isolation.history_db_path
+            )
+        else:
+            qdrant_store_bytes = 0
+            history_store_bytes = 0
+        result = replace(
+            result,
+            qdrant_store_bytes=qdrant_store_bytes,
+            history_store_bytes=history_store_bytes,
+        )
+    except Exception as exc:
+        # Persist a failed task envelope before re-raising.  The matrix can
+        # then continue with ``--keep-going`` and the report can explain the
+        # failure instead of silently omitting the experiment.
+        _write_task_result(
+            result_path,
+            manifest,
+            task,
+            _failed_task_result(task, exc),
+        )
         raise
-    _close_task_components(components)
-    if task.condition.startswith("mem0_"):
-        qdrant_store_bytes = _qdrant_collection_snapshot_size(
-            env.get("LHMSB_QDRANT_URL", "http://qdrant:6333"),
-            isolation.collection_name,
-        )
-        history_store_bytes = _sqlite_store_size(
-            isolation.history_db_path
-        )
-    else:
-        qdrant_store_bytes = 0
-        history_store_bytes = 0
-    result = replace(
-        result,
-        qdrant_store_bytes=qdrant_store_bytes,
-        history_store_bytes=history_store_bytes,
-    )
     _write_task_result(result_path, manifest, task, result)
     return result
 
@@ -383,17 +447,41 @@ def run_qualification_matrix_cli(
                 dry_run=True,
             )
         return None
-    require_live_gate(dict(os.environ if environment is None else environment))
-    for index in range(len(tasks)):
-        result = execute_qualification_task(
-            run_directory,
-            index,
-            environment=environment,
-            force=force,
-        )
-        if result is not None and result.status != "complete" and not keep_going:
-            break
-    status = aggregate_qualification_run(run_directory)
+    status: AggregateStatus | None = None
+    try:
+        require_live_gate(dict(os.environ if environment is None else environment))
+        # A report is a run-level checkpoint, not merely an end-of-matrix
+        # artifact.  This initial write also makes a planned-but-not-started
+        # run inspectable if the process is interrupted before task 0.
+        status = aggregate_qualification_run(run_directory)
+        for index in range(len(tasks)):
+            try:
+                result = execute_qualification_task(
+                    run_directory,
+                    index,
+                    environment=environment,
+                    force=force,
+                )
+            except Exception:
+                if not keep_going:
+                    raise
+                result = _read_task_result(
+                    _task_result_path(run_directory, tasks[index]),
+                    manifest,
+                    tasks[index],
+                )
+            # Refresh after every task so a partial run always has a report.
+            status = aggregate_qualification_run(run_directory)
+            if result is not None and result.status != "complete" and not keep_going:
+                break
+    finally:
+        # Preserve the primary task exception, while attaching a report error
+        # as a note if report generation itself is what failed.
+        checkpoint = _refresh_report_preserving_failure(run_directory)
+        if checkpoint is not None:
+            status = checkpoint
+    if status is None:
+        raise QualificationCliError("matrix did not produce a report status")
     if status.run_identity != manifest.run_identity:
         raise QualificationCliError("aggregate run identity changed")
     return status
@@ -568,12 +656,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if command == "run-task":
-            result = execute_qualification_task(
-                args.run_dir,
-                args.task_index,
-                dry_run=args.dry_run,
-                force=args.force,
-            )
+            try:
+                result = execute_qualification_task(
+                    args.run_dir,
+                    args.task_index,
+                    dry_run=args.dry_run,
+                    force=args.force,
+                )
+            finally:
+                if not args.dry_run:
+                    _refresh_report_preserving_failure(args.run_dir)
             payload = (
                 {
                     "dry_run": True,
@@ -586,7 +678,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if result is None:
                 print(f"task {args.task_index} dry-run passed")
                 return 0
-            print(f"task {args.task_index} status={result.status}")
+            print(
+                f"task {args.task_index} status={result.status}; "
+                f"report -> {args.run_dir / 'report'}"
+            )
             return 0 if result.status == "complete" else 1
         if command == "run-matrix":
             status = run_qualification_matrix_cli(
@@ -606,7 +701,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             print(
                 f"aggregated {status.completed_results}/"
-                f"{status.planned_tasks} task result(s)"
+                f"{status.planned_tasks} task result(s); "
+                f"report -> {status.report_directory}"
             )
             return 0 if status.complete else 1
         if command == "aggregate":

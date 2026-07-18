@@ -30,6 +30,7 @@ from lhmsb.qualification.report import write_qualification_report
 from lhmsb.qualification.runner import (
     ConditionRunResult,
     QualificationMatrixResult,
+    QualificationRunError,
     QualificationTaskResult,
     SCEURunResult,
     TaskIsolation,
@@ -283,6 +284,62 @@ def test_run_task_dry_run_needs_no_credentials_but_live_execution_is_gated(
         == 2
     )
     assert "LHMSB_LIVE_QUALIFICATION" in capsys.readouterr().err
+
+
+def test_failed_experiment_still_writes_report_and_failure_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qualification_dataset: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    monkeypatch.setenv("LHMSB_DATA_ROOT", str(data_root))
+    monkeypatch.setattr(cli_module, "require_live_gate", lambda env: None)
+
+    def fail_components(*args: object, **kwargs: object) -> object:
+        raise QualificationRunError("provider_auth_failure", "zen key rejected")
+
+    monkeypatch.setattr(cli_module, "_live_components", fail_components)
+    run_dir = tmp_path / "run"
+    assert (
+        main(
+            [
+                "plan",
+                "--dataset",
+                str(qualification_dataset),
+                "--config",
+                str(CONFIG),
+                "--out",
+                str(run_dir),
+                "--allow-dirty",
+            ]
+        )
+        == 0
+    )
+
+    monkeypatch.setenv("LHMSB_LIVE_QUALIFICATION", "1")
+    assert (
+        main(
+            [
+                "run-task",
+                "--run-dir",
+                str(run_dir),
+                "--task-index",
+                "0",
+            ]
+        )
+        == 2
+    )
+    report = run_dir / "report"
+    assert (report / "summary.json").is_file()
+    summary = json.loads((report / "summary.json").read_text(encoding="utf-8"))
+    assert summary["task_status_counts"] == {"failed": 1}
+    task_id = json.loads(
+        (run_dir / "tasks.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )["task_id"]
+    result = json.loads(
+        (run_dir / "results" / f"{task_id}.json").read_text(encoding="utf-8")
+    )
+    assert result["result"]["error_class"] == "provider_auth_failure"
 
 
 def test_run_contract_identity_mismatch_is_rejected(
