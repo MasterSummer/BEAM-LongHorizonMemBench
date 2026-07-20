@@ -68,7 +68,9 @@ class MemOSLLMConfig:
     endpoint: str
     api_key: str
     temperature: float = 0.0
-    max_output_tokens: int = 512
+    # MemOS' reader can emit several structured memory objects in one call.
+    # The former 512-token cap truncated otherwise valid JSON in live runs.
+    max_output_tokens: int = 4096
     provider: str = "deepseek"
 
     def __post_init__(self) -> None:
@@ -319,7 +321,7 @@ class MemOSTreeQualificationAdapter:
                 endpoint=policy.endpoint,
                 api_key=api_key,
                 temperature=0.0,
-                max_output_tokens=512,
+                max_output_tokens=4096,
             )
             for name in ("reader", "extractor", "reorganizer", "dispatcher")
         )

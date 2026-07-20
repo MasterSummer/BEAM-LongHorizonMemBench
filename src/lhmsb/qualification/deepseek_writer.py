@@ -160,25 +160,42 @@ class DeepSeekJSONBridge:
         request_hash = _canonical_hash(body)
         started = time.perf_counter()
         started_at = datetime.now(UTC).isoformat()
-        raw, retries = self._post(body)
-        returned_model = raw.get("model")
-        if returned_model != self.model_id:
-            raise DeepSeekWriterError(
-                "provider_model_unavailable",
-                f"requested {self.model_id!r}, provider returned {returned_model!r}",
-            )
-        content = _response_content(raw)
-        try:
-            decoded = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise DeepSeekWriterError(
-                "structured_output_failure", "DeepSeek response content is not JSON"
-            ) from exc
-        if not isinstance(decoded, Mapping):
-            raise DeepSeekWriterError(
-                "structured_output_failure", "DeepSeek JSON response must be an object"
-            )
-        _validate_schema(decoded, schema)
+        retries = 0
+        raw: dict[str, object]
+        decoded: Mapping[object, object]
+        for structured_attempt in range(self.max_retries + 1):
+            raw, transport_retries = self._post(body)
+            retries += transport_retries
+            returned_model = raw.get("model")
+            if returned_model != self.model_id:
+                raise DeepSeekWriterError(
+                    "provider_model_unavailable",
+                    f"requested {self.model_id!r}, provider returned {returned_model!r}",
+                )
+            content = _response_content(raw)
+            try:
+                parsed = json.loads(content)
+                if not isinstance(parsed, Mapping):
+                    raise DeepSeekWriterError(
+                        "structured_output_failure",
+                        "DeepSeek JSON response must be an object",
+                    )
+                _validate_schema(parsed, schema)
+            except (json.JSONDecodeError, DeepSeekWriterError) as exc:
+                if structured_attempt < self.max_retries:
+                    retries += 1
+                    self._delay()
+                    continue
+                if isinstance(exc, DeepSeekWriterError):
+                    raise
+                raise DeepSeekWriterError(
+                    "structured_output_failure",
+                    "DeepSeek response content is not JSON",
+                ) from exc
+            decoded = parsed
+            break
+        else:  # pragma: no cover - the bounded loop always returns or raises
+            raise DeepSeekWriterError("structured_output_failure", "unreachable retry state")
         response_hash = _canonical_hash(raw)
         ended_at = datetime.now(UTC).isoformat()
         usage = _usage_fields(raw)
@@ -258,6 +275,10 @@ class DeepSeekJSONBridge:
                     continue
                 raise DeepSeekWriterError("provider_timeout", str(exc)) from exc
             except httpx.HTTPError as exc:
+                if attempt < self.max_retries:
+                    retries += 1
+                    self._delay()
+                    continue
                 raise DeepSeekWriterError("provider_connection_failure", str(exc)) from exc
             if response.status_code in {429, 500, 502, 503, 504} and attempt < self.max_retries:
                 retries += 1

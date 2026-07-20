@@ -94,3 +94,82 @@ def test_bridge_rejects_openai_endpoint_and_bad_schema_response() -> None:
     with pytest.raises(DeepSeekWriterError, match="required"):
         bridge.generate_json(({"role": "user", "content": "x"},), response_format=_SCHEMA)
     bridge.close()
+
+
+def test_bridge_retries_truncated_structured_output() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        content = (
+            '{"keywords":["memory"],"context":"truncated'
+            if attempts == 1
+            else json.dumps({"keywords": ["memory"], "context": "ok", "tags": []})
+        )
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-v4-pro",
+                "choices": [{"message": {"content": content}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+            },
+            request=request,
+        )
+
+    bridge = DeepSeekJSONBridge(
+        api_key="deepseek-secret",
+        endpoint="https://api.deepseek.com",
+        transport=httpx.MockTransport(handler),
+        max_retries=1,
+    )
+    result = bridge.generate_json(
+        ({"role": "user", "content": "make a note"},), response_format=_SCHEMA
+    )
+    assert result.payload["context"] == "ok"
+    assert result.retry_count == 1
+    assert attempts == 2
+    bridge.close()
+
+
+def test_bridge_retries_provider_disconnect() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.RemoteProtocolError(
+                "server disconnected without a response",
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-v4-pro",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {"keywords": [], "context": "ok", "tags": []}
+                            )
+                        }
+                    }
+                ],
+            },
+            request=request,
+        )
+
+    bridge = DeepSeekJSONBridge(
+        api_key="deepseek-secret",
+        endpoint="https://api.deepseek.com",
+        transport=httpx.MockTransport(handler),
+        max_retries=1,
+    )
+    result = bridge.generate_json(
+        ({"role": "user", "content": "make a note"},), response_format=_SCHEMA
+    )
+    assert result.payload["context"] == "ok"
+    assert result.retry_count == 1
+    assert attempts == 2
+    bridge.close()

@@ -259,6 +259,7 @@ def test_official_reader_uses_registered_openai_embedding_provider(monkeypatch) 
         endpoint="https://api.deepseek.com",
         api_key="secret",
     )
+    assert component.max_output_tokens == 4096
     _build_official_reader(
         SimpleNamespace(SimpleStructMemReader=FakeReader),
         component,
