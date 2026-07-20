@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from lhmsb.datasets.mem0_stateful_pipeline import (
     freeze_mem0_stateful,
     generate_mem0_stateful_to_staging,
@@ -141,6 +143,41 @@ def test_episode_limit_binds_a_distinct_one_episode_smoke_identity(
     assert smoke["preparation_task_count"] == 4
     assert full["preparation_task_count"] == 8
     assert smoke["run_identity"] != full["run_identity"]
+
+
+def test_formal_worker_requires_the_planned_clean_commit(monkeypatch) -> None:
+    from lhmsb.qualification import multisystem_cli
+
+    manifest = {"code_commit": "planned", "code_dirty": False}
+    monkeypatch.setattr(
+        multisystem_cli,
+        "_git_identity",
+        lambda: ("planned", False, "main"),
+    )
+    assert multisystem_cli._assert_planned_code_identity(manifest) == (
+        "planned",
+        False,
+        "main",
+    )
+
+    monkeypatch.setattr(
+        multisystem_cli,
+        "_git_identity",
+        lambda: ("other", False, "main"),
+    )
+    with pytest.raises(
+        multisystem_cli.MultisystemCliError,
+        match="differs from the immutable run plan",
+    ):
+        multisystem_cli._assert_planned_code_identity(manifest)
+
+    monkeypatch.setattr(
+        multisystem_cli,
+        "_git_identity",
+        lambda: ("planned", True, "main"),
+    )
+    with pytest.raises(multisystem_cli.MultisystemCliError, match="checkout is dirty"):
+        multisystem_cli._assert_planned_code_identity(manifest)
 
 
 def test_manifest_hash_rejects_non_digest_environment_values(tmp_path: Path) -> None:

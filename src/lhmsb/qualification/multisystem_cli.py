@@ -170,6 +170,26 @@ def _git_identity() -> tuple[str, bool, str]:
     return commit, dirty, ref
 
 
+def _assert_planned_code_identity(manifest: Mapping[str, object]) -> tuple[str, bool, str]:
+    """Reject formal workers that no longer execute the planned clean commit."""
+    current_commit, current_dirty, current_ref = _git_identity()
+    planned_dirty = bool(manifest.get("code_dirty", False))
+    if planned_dirty:
+        # Non-formal runs created with --allow-dirty remain useful for unit and
+        # operator diagnostics, but are never accepted by the paper protocol.
+        return current_commit, current_dirty, current_ref
+    planned_commit = _text(manifest.get("code_commit"), "code_commit")
+    if current_dirty:
+        raise MultisystemCliError(
+            "formal worker checkout is dirty; restore the planned clean commit"
+        )
+    if current_commit != planned_commit:
+        raise MultisystemCliError(
+            "formal worker code commit differs from the immutable run plan"
+        )
+    return current_commit, current_dirty, current_ref
+
+
 _HASH_HEX = frozenset("0123456789abcdef")
 
 
@@ -481,6 +501,7 @@ def _load_tasks(run_directory: Path) -> tuple[EvaluationTask, ...]:
 
 def finalize_systems_run(run_directory: Path) -> dict[str, object]:
     manifest, config, specs, preparations, templates = _load_contract(run_directory)
+    _assert_planned_code_identity(manifest)
     storage = QualificationStorage(
         run_directory / "cells",
         run_identity=_text(manifest.get("run_identity"), "run_identity"),
@@ -555,6 +576,7 @@ def _prepare_live_task(
     from lhmsb.qualification.prepare import prepare_prefix
 
     manifest, config, specs, preparations, _ = _load_contract(run_directory)
+    _assert_planned_code_identity(manifest)
     if task_index < 0 or task_index >= len(preparations):
         raise MultisystemCliError("preparation task index is out of range")
     task = preparations[task_index]
@@ -651,6 +673,9 @@ def _evaluate_live_task(
     from lhmsb.qualification.providers import PolicyClient
 
     manifest, config, specs, preparations, _ = _load_contract(run_directory)
+    evaluation_commit, evaluation_dirty, evaluation_ref = (
+        _assert_planned_code_identity(manifest)
+    )
     tasks = _load_tasks(run_directory)
     if task_index < 0 or task_index >= len(tasks):
         raise MultisystemCliError("evaluation task index is out of range")
@@ -698,6 +723,9 @@ def _evaluate_live_task(
         "run_identity": manifest["run_identity"],
         "task_id": task.task_id,
         "task_payload_hash": task.task_payload_hash,
+        "evaluation_code_commit": evaluation_commit,
+        "evaluation_code_dirty": evaluation_dirty,
+        "evaluation_code_ref": evaluation_ref,
         "result_hash": result.result_hash,
         "result": result.to_dict(),
     }
@@ -1096,6 +1124,11 @@ def _load_evaluation_matrix(
         envelope = _read_json(path)
         if envelope.get("run_identity") != expected_identity:
             raise MultisystemCliError(f"result run identity mismatch: {path.name}")
+        worker_commit = envelope.get("evaluation_code_commit")
+        if worker_commit is not None and worker_commit != manifest.get("code_commit"):
+            raise MultisystemCliError(f"result code commit mismatch: {path.name}")
+        if envelope.get("evaluation_code_dirty") is True:
+            raise MultisystemCliError(f"result came from a dirty worker: {path.name}")
         result_raw = _mapping_value(envelope.get("result"), f"result envelope {path.name}")
         task_id = _text(result_raw.get("task_id"), f"result task_id {path.name}")
         if task_id not in task_map:
