@@ -8,15 +8,15 @@ REPO_ROOT="$(systems_repo_root)"
 DATA_ROOT="${LHMSB_DATA_ROOT:-/data/lhmsb}"
 ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
 RUN_NAME="${LHMSB_SMOKE_RUN_NAME:-systems-smoke}"
-DATASET="${LHMSB_SYSTEM_DATASET:-${DATA_ROOT}/datasets/software_v3}"
-CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only.yaml"
+DATASET="${LHMSB_SYSTEM_DATASET:-${DATA_ROOT}/datasets/software_v4}"
+CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only_aaai.yaml"
 DRY_RUN=0
 
 usage() {
   cat <<'EOF'
 Usage: scripts/run_systems_smoke.sh [options]
 
-Run the four-session native multisystem smoke.
+Run one full-horizon episode from the frozen native multisystem dataset.
 
 Options:
   --data-root PATH  persistent root (default: /data/lhmsb)
@@ -31,7 +31,7 @@ EOF
 
 while (($#)); do
   case "$1" in
-    --data-root) systems_require_value "$1" "${2:-}" || exit 2; DATA_ROOT="$2"; DATASET="${DATA_ROOT}/datasets/software_v3"; shift 2 ;;
+    --data-root) systems_require_value "$1" "${2:-}" || exit 2; DATA_ROOT="$2"; DATASET="${DATA_ROOT}/datasets/software_v4"; shift 2 ;;
     --env-file) systems_require_value "$1" "${2:-}" || exit 2; ENV_FILE="$2"; shift 2 ;;
     --dataset) systems_require_value "$1" "${2:-}" || exit 2; DATASET="$2"; shift 2 ;;
     --config) systems_require_value "$1" "${2:-}" || exit 2; CONFIG="$2"; shift 2 ;;
@@ -47,7 +47,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   systems_print_command "${SCRIPT_DIR}/verify_system_runtime.sh" --dry-run --data-root "${DATA_ROOT}"
   systems_print_command systems_start_all_services "${DATA_ROOT}"
   systems_print_command "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification plan-systems \
-    --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}" --n-sessions 4
+    --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}" --episode-limit 1
   for pair in "core 0" "mem0 1" "amem 2" "memos 3"; do
     read -r environment task_index <<<"${pair}"
     systems_print_command "${DATA_ROOT}/venvs/${environment}/bin/python" -m lhmsb.qualification \
@@ -82,7 +82,7 @@ trap cleanup EXIT INT TERM
 systems_write_runtime_env "${DATA_ROOT}"
 
 systems_run_cli "${DATA_ROOT}" core plan-systems --dataset "${DATASET}" \
-  --config "${CONFIG}" --out "${RUN_DIR}" --n-sessions 4
+  --config "${CONFIG}" --out "${RUN_DIR}" --episode-limit 1
 for pair in "core 0" "mem0 1" "amem 2" "memos 3"; do
   read -r environment task_index <<<"${pair}"
   systems_run_cli "${DATA_ROOT}" "${environment}" prepare-task \

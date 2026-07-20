@@ -37,8 +37,8 @@ dependency or runtime installation.
 
 ## Validate and run
 
-Create the preregistered GPT-only release before the smoke (the smoke may use a
-four-session fixture with the same schema):
+Create the preregistered GPT-only release before the smoke. The smoke selects
+one full 16-session episode from this same immutable release:
 
 ```bash
 SEEDS=$(seq 0 49)
@@ -76,15 +76,18 @@ sbatch --export=ALL,LHMSB_SLURM_MODE=smoke \
   deploy/slurm/systems_qualification.sbatch
 ```
 
-The four-session smoke must produce four prefix artifacts and a valid report.
+The one-episode smoke must produce four prefix artifacts and a valid report.
 After inspection, submit the 16-session qualification:
 
 ```bash
-scripts/run_systems_qualification.sh --prepare-only \
-  --data-root /data/lhmsb --env-file /data/lhmsb/env/operator.env \
-  --config configs/experiments/systems_controlled_gpt_only_aaai.yaml \
-  --run-name gpt-only-v4
-sbatch --array=0-349%16 \
+PREP_JOB=$(sbatch --parsable \
+  --output="${LHMSB_DATA_ROOT}/logs/slurm-prepare-%j.out" \
+  --error="${LHMSB_DATA_ROOT}/logs/slurm-prepare-%j.err" \
+  --export=ALL,LHMSB_SLURM_MODE=prepare,LHMSB_RUN_NAME=gpt-only-v4 \
+  deploy/slurm/systems_qualification.sbatch)
+sbatch --array=0-349%16 --dependency="afterok:${PREP_JOB}" \
+  --output="${LHMSB_DATA_ROOT}/logs/slurm-eval-%A_%a.out" \
+  --error="${LHMSB_DATA_ROOT}/logs/slurm-eval-%A_%a.err" \
   --export=ALL,LHMSB_RUN_NAME=gpt-only-v4 \
   deploy/slurm/systems_evaluate_task.sbatch
 "${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \

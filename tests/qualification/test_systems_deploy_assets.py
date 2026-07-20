@@ -37,7 +37,6 @@ def test_slurm_uses_two_gpus_and_native_lifecycle() -> None:
     assert "LHMSB_REQUIRE_A100=1" in text
     for marker in (
         "systems_select_devices",
-        "systems_acquire_run_lock",
         "systems_start_all_services",
         "systems_stop_all_services",
         "run_systems_smoke.sh",
@@ -46,6 +45,18 @@ def test_slurm_uses_two_gpus_and_native_lifecycle() -> None:
     ):
         assert marker in text
     assert "trap cleanup" in text
+    assert "systems_acquire_run_lock" not in text
+    assert 'smoke|prepare|qualification)' in text
+    assert "--prepare-only" in text
+    assert "/data/lhmsb/logs" not in text
+
+
+def test_evaluation_array_matches_fifty_episode_plan_and_has_portable_logs() -> None:
+    text = (
+        ROOT / "deploy" / "slurm" / "systems_evaluate_task.sbatch"
+    ).read_text(encoding="utf-8")
+    assert "--array=0-349%16" in text
+    assert "/data/lhmsb/logs" not in text
 
 
 def test_current_slurm_scripts_resolve_repo_outside_slurm_spool() -> None:

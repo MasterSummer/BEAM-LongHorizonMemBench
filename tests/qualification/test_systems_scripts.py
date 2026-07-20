@@ -104,6 +104,19 @@ def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
             "--keep-going",
         ):
             assert marker in text
+    assert "--episode-limit 1" in smoke
+    assert "datasets/software_v4" in smoke
+    assert "systems_controlled_gpt_only_aaai.yaml" in smoke
+
+
+def test_preflight_and_bootstrap_default_to_the_confirmatory_release() -> None:
+    for path in (
+        ROOT / "scripts" / "preflight_systems.sh",
+        ROOT / "scripts" / "bootstrap_systems_server.sh",
+    ):
+        text = path.read_text(encoding="utf-8")
+        assert "datasets/software_v4" in text
+        assert "systems_controlled_gpt_only_aaai.yaml" in text
 
 
 def test_qualification_prepares_every_episode_backend_prefix() -> None:

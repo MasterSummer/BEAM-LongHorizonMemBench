@@ -107,6 +107,42 @@ def test_plan_binds_native_runtime_and_model_bundle_manifests(tmp_path: Path) ->
     assert manifest["run_identity"] == payload["run_identity"]
 
 
+def test_episode_limit_binds_a_distinct_one_episode_smoke_identity(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    dataset = tmp_path / "dataset"
+    generate_mem0_stateful_to_staging(
+        stage,
+        seeds=(42, 43),
+        n_sessions=4,
+    )
+    freeze_mem0_stateful(stage, dataset)
+    from lhmsb.qualification.multisystem_cli import plan_systems_run
+
+    smoke = plan_systems_run(
+        dataset,
+        Path("configs/experiments/systems_controlled_zen.yaml"),
+        tmp_path / "smoke",
+        allow_dirty=True,
+        n_sessions=4,
+        episode_limit=1,
+    )
+    full = plan_systems_run(
+        dataset,
+        Path("configs/experiments/systems_controlled_zen.yaml"),
+        tmp_path / "full",
+        allow_dirty=True,
+        n_sessions=4,
+    )
+
+    assert smoke["episode_ids"] == ["software-mem0-42"]
+    assert smoke["episode_limit"] == 1
+    assert smoke["preparation_task_count"] == 4
+    assert full["preparation_task_count"] == 8
+    assert smoke["run_identity"] != full["run_identity"]
+
+
 def test_manifest_hash_rejects_non_digest_environment_values(tmp_path: Path) -> None:
     dataset = _dataset(tmp_path)
     from lhmsb.qualification.multisystem_cli import MultisystemCliError, plan_systems_run

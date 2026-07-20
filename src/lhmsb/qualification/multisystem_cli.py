@@ -342,15 +342,26 @@ def plan_systems_run(
     allow_dirty: bool = False,
     force: bool = False,
     n_sessions: int | None = None,
+    episode_limit: int | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Write the immutable Stage-A preparation/template contract."""
     config = _config(config_path)
-    specs = _specs(dataset)
-    if not specs:
+    all_specs = _specs(dataset)
+    if not all_specs:
         raise MultisystemCliError("frozen dataset contains no episodes")
-    if n_sessions is not None and any(spec.plan.n_sessions != n_sessions for spec in specs):
+    if n_sessions is not None and any(
+        spec.plan.n_sessions != n_sessions for spec in all_specs
+    ):
         raise MultisystemCliError("dataset session count does not match --n-sessions")
+    if episode_limit is not None and episode_limit < 1:
+        raise MultisystemCliError("--episode-limit must be positive")
+    specs = (
+        all_specs
+        if episode_limit is None
+        else all_specs[:episode_limit]
+    )
+    selected_episode_ids = tuple(spec.plan.episode_id for spec in specs)
     commit, dirty, ref = _git_identity()
     if dirty and not allow_dirty:
         raise MultisystemCliError("Git worktree is dirty; pass --allow-dirty")
@@ -372,6 +383,9 @@ def plan_systems_run(
         "model_bundle_hash": model_bundle_hash,
         # Prefix artifacts use the historical ``model_files_hash`` name.
         "model_files_hash": model_bundle_hash,
+        # A smoke subset and the full run share the same frozen dataset hash,
+        # so the selected episode identities must also bind the run identity.
+        "episode_ids": list(selected_episode_ids),
         "policy_profiles": [asdict(item) for item in config.policy_profiles],
         "writer_profile": asdict(config.writer_profile),
         "retrieval": asdict(config.retrieval),
@@ -379,12 +393,12 @@ def plan_systems_run(
     run_identity = canonical_hash(identity)
     preparations = build_preparation_tasks(
         config,
-        episode_ids=tuple(spec.plan.episode_id for spec in specs),
+        episode_ids=selected_episode_ids,
         run_identity=run_identity,
     )
     templates = build_evaluation_task_templates(
         config,
-        episode_ids=tuple(spec.plan.episode_id for spec in specs),
+        episode_ids=selected_episode_ids,
         run_identity=run_identity,
     )
     payload = {
@@ -399,7 +413,8 @@ def plan_systems_run(
         "preparation_task_count": len(preparations),
         "evaluation_template_count": len(templates),
         "scored_cell_count": sum(len(item.scored_conditions) for item in templates),
-        "episode_ids": [spec.plan.episode_id for spec in specs],
+        "episode_ids": list(selected_episode_ids),
+        "episode_limit": episode_limit,
         "n_sessions": specs[0].plan.n_sessions,
         "required_secret_env": list(config.required_secret_env),
         "finalized": False,
@@ -1225,7 +1240,7 @@ def _validate_systems(report: Path, expected_run_identity: str | None) -> dict[s
 
 def _dry_run_lines() -> tuple[str, ...]:
     return (
-        "plan-systems --n-sessions 4",
+        "plan-systems --episode-limit 1",
         "prepare-task 0 (flat_retrieval)",
         "prepare-task 1 (mem0)",
         "prepare-task 2 (amem)",
@@ -1247,6 +1262,7 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--allow-dirty", action="store_true")
     plan.add_argument("--force", action="store_true")
     plan.add_argument("--n-sessions", type=int)
+    plan.add_argument("--episode-limit", type=int)
     plan.add_argument("--json", type=Path)
 
     prep = sub.add_parser("prepare-task")
@@ -1309,6 +1325,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 allow_dirty=args.allow_dirty,
                 force=args.force,
                 n_sessions=args.n_sessions,
+                episode_limit=args.episode_limit,
             )
             if args.json:
                 _atomic_json(args.json, payload)

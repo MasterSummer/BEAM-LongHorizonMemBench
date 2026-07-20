@@ -7,8 +7,8 @@
 #SBATCH --mem=96G
 #SBATCH --time=2-00:00:00
 #SBATCH --signal=B:USR1@120
-#SBATCH --output=/data/lhmsb/logs/slurm-%x-%j.out
-#SBATCH --error=/data/lhmsb/logs/slurm-%x-%j.err
+#SBATCH --output=slurm-%x-%j.out
+#SBATCH --error=slurm-%x-%j.err
 set -euo pipefail
 
 REPO_ROOT="${LHMSB_REPO_ROOT:-${SLURM_SUBMIT_DIR:-${PWD}}}"
@@ -26,6 +26,14 @@ MODE="${LHMSB_SLURM_MODE:-qualification}"
 RUN_NAME="${LHMSB_RUN_NAME:-systems-${SLURM_JOB_ID:-manual}}"
 DRY_RUN="${LHMSB_SLURM_DRY_RUN:-0}"
 
+case "${MODE}" in
+  smoke|prepare|qualification) ;;
+  *)
+    printf 'unknown LHMSB_SLURM_MODE: %s\n' "${MODE}" >&2
+    exit 2
+    ;;
+esac
+
 cleanup() {
   local status="$?"
   trap - EXIT INT TERM USR1
@@ -38,13 +46,16 @@ trap cleanup EXIT INT TERM USR1
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   systems_print_command systems_select_devices
-  systems_print_command systems_acquire_run_lock "${DATA_ROOT}" "${RUN_NAME}"
   systems_print_command systems_start_all_services "${DATA_ROOT}"
   systems_print_command "${SCRIPT_DIR}/preflight_systems.sh" --dry-run \
     --data-root "${DATA_ROOT}" --env-file "${ENV_FILE}"
   if [[ "${MODE}" == "smoke" ]]; then
     systems_print_command "${SCRIPT_DIR}/run_systems_smoke.sh" --dry-run \
       --data-root "${DATA_ROOT}" --env-file "${ENV_FILE}" --run-name "${RUN_NAME}"
+  elif [[ "${MODE}" == "prepare" ]]; then
+    systems_print_command "${SCRIPT_DIR}/run_systems_qualification.sh" --dry-run \
+      --data-root "${DATA_ROOT}" --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" \
+      --prepare-only
   else
     systems_print_command "${SCRIPT_DIR}/run_systems_qualification.sh" --dry-run \
       --data-root "${DATA_ROOT}" --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" \
@@ -55,7 +66,6 @@ fi
 
 systems_load_env "${ENV_FILE}"
 systems_configure_gpus
-systems_acquire_run_lock "${DATA_ROOT}" "${RUN_NAME}"
 systems_write_host_manifest "${DATA_ROOT}"
 export LHMSB_DATA_ROOT="${DATA_ROOT}" LHMSB_REPO_ROOT="${REPO_ROOT}"
 export LHMSB_RUN_NAME="${RUN_NAME}"
@@ -64,6 +74,9 @@ export LHMSB_SERVICE_INSTANCE="${RUN_NAME}-${SLURM_JOB_ID:-manual}"
 if [[ "${MODE}" == "smoke" ]]; then
   "${SCRIPT_DIR}/run_systems_smoke.sh" --data-root "${DATA_ROOT}" \
     --env-file "${ENV_FILE}" --run-name "${RUN_NAME}"
+elif [[ "${MODE}" == "prepare" ]]; then
+  "${SCRIPT_DIR}/run_systems_qualification.sh" --data-root "${DATA_ROOT}" \
+    --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" --prepare-only
 else
   "${SCRIPT_DIR}/run_systems_qualification.sh" --data-root "${DATA_ROOT}" \
     --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" --keep-going
