@@ -32,6 +32,7 @@ def _transport(payload: dict[str, object]) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         assert body["response_format"] == {"type": "json_object"}
+        assert body["thinking"] == {"type": "disabled"}
         assert "keywords" in body["messages"][0]["content"]
         assert request.headers["authorization"] == "Bearer deepseek-secret"
         return httpx.Response(

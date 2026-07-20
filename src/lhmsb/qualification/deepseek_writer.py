@@ -239,6 +239,10 @@ class DeepSeekJSONBridge:
             "messages": prompt_messages,
             "temperature": temperature,
             "max_tokens": self.max_output_tokens,
+            # Native memory writers consume ``message.content`` as JSON.
+            # Reasoning-capable routes can otherwise spend the budget on
+            # hidden reasoning and leave content empty or non-JSON.
+            "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
         }
 
