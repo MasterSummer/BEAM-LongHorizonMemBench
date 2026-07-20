@@ -422,7 +422,7 @@ class SoftwareMem0VerticalFamily:
         actions: tuple[ActionSpec, ...],
     ) -> tuple[ContinuationOpportunity, ...]:
         early = min(n_sessions - 1, max(0, phases["leakage"] - 1))
-        late = min(n_sessions - 1, phases["p2"])
+        post = min(n_sessions - 1, max(phases["p2"], phases["update"]))
         local = min(n_sessions - 1, phases["local"])
         fresh = min(n_sessions - 1, phases["update"])
         common_request = "Select an implementation for the next pipeline step."
@@ -438,8 +438,18 @@ class SoftwareMem0VerticalFamily:
                 matched_group="matched-early-late",
             ),
             ContinuationOpportunity(
+                opportunity_id="opp-premature-v2",
+                checkpoint_session=early,
+                focal_state_ids=("G0", "P1", "U1", "P2"),
+                challenge_type="premature-v2",
+                request="Choose the branch that is valid at this checkpoint.",
+                action_catalog=actions,
+                valid_action_ids=("stale_v1",),
+                matched_group="premature-update",
+            ),
+            ContinuationOpportunity(
                 opportunity_id="opp-late",
-                checkpoint_session=late,
+                checkpoint_session=post,
                 focal_state_ids=("G0", "C1", "C2", "P2"),
                 challenge_type="matched-branch",
                 request=common_request,
@@ -448,19 +458,49 @@ class SoftwareMem0VerticalFamily:
                 matched_group="matched-early-late",
             ),
             ContinuationOpportunity(
+                opportunity_id="opp-stale-v1",
+                checkpoint_session=post,
+                focal_state_ids=("U1", "P2", "C1"),
+                challenge_type="stale-after-revoke",
+                request="Continue the pipeline after the branch review.",
+                action_catalog=actions,
+                valid_action_ids=("safe_v2_offline",),
+                matched_group="stale-revocation",
+            ),
+            ContinuationOpportunity(
                 opportunity_id="opp-local-only",
                 checkpoint_session=local,
-                focal_state_ids=("L1", "C1"),
+                focal_state_ids=("L1", "C1", "G0"),
                 challenge_type="scope-conflict",
-                request="Select an implementation for the profiling task.",
+                request="Choose an implementation for one local profiling run.",
                 action_catalog=actions,
                 valid_action_ids=("safe_v2_offline",),
                 matched_group="local-only-control",
                 control_kind="wrong",
             ),
             ContinuationOpportunity(
+                opportunity_id="opp-local-valid",
+                checkpoint_session=local,
+                focal_state_ids=("L1", "C1"),
+                challenge_type="valid-local-accelerator",
+                request="Choose an implementation for the explicitly scoped local profiler.",
+                action_catalog=actions,
+                valid_action_ids=("cloud_shortcut",),
+                matched_group="local-accelerator-validity",
+            ),
+            ContinuationOpportunity(
+                opportunity_id="opp-local-valid-recheck",
+                checkpoint_session=post,
+                focal_state_ids=("L1", "C1"),
+                challenge_type="valid-local-accelerator",
+                request="Re-run the explicitly scoped local profiler.",
+                action_catalog=actions,
+                valid_action_ids=("cloud_shortcut",),
+                matched_group="local-accelerator-validity",
+            ),
+            ContinuationOpportunity(
                 opportunity_id="opp-valid-update",
-                checkpoint_session=late,
+                checkpoint_session=fresh,
                 focal_state_ids=("U1", "P2", "C1", "C2"),
                 challenge_type="valid-update",
                 request="Select an implementation after the validation update.",
@@ -483,6 +523,16 @@ class SoftwareMem0VerticalFamily:
                 valid_action_ids=("safe_v2_offline",),
                 matched_group="fresh-reminder-control",
                 control_kind="fresh_reminder",
+            ),
+            ContinuationOpportunity(
+                opportunity_id="opp-global-local-conflict",
+                checkpoint_session=local,
+                focal_state_ids=("G0", "C1", "L1"),
+                challenge_type="global-local-conflict",
+                request="Resolve the local convenience request under the project policy.",
+                action_catalog=actions,
+                valid_action_ids=("safe_v2_offline",),
+                matched_group="global-local-conflict",
             ),
         )
 

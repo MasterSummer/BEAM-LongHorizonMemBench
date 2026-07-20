@@ -61,6 +61,9 @@ class StateCheckpointMetricInput:
     n_live: int
     write_latency_seconds: float = 0.0
     is_final_checkpoint: bool = True
+    new_memory_provenance: tuple[str, ...] = ()
+    live_memory_provenance: tuple[str, ...] = ()
+    provenance_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,9 @@ class BehaviorMetricInput:
     intervention_labels: tuple[str, ...] = ()
     leave_one_out_count: int = 0
     leave_one_out_action_flips: int = 0
+    count_contrast_count: int = 0
+    count_contrast_action_flips: int = 0
+    count_contrast_behavior_changes: int = 0
     drift_flags: tuple[str, ...] = ()
     matched_group: str = ""
     checkpoint_session: int = 0
@@ -127,6 +133,13 @@ def compute_metric_collection(
     """Compute the complete qualification metric namespace from flat records."""
     values: dict[str, MetricValue] = {}
     _state_metrics(values, state_checkpoints)
+    for mode, prefix in (
+        ("native/exact", "storage_exact_"),
+        ("inferred", "storage_inferred_"),
+    ):
+        filtered = _filter_state_observations(state_checkpoints, mode)
+        if filtered:
+            _state_metrics(values, filtered, prefix=prefix)
     _retrieval_metrics(values, retrievals)
     _behavior_metrics(values, behaviors)
     _usage_metrics(values, usages)
@@ -193,8 +206,22 @@ def compute_qualification_metrics(
             new_memory_ids = {
                 event.memory_id
                 for event in write.events
-                if event.native_event in {"ADD", "UPDATE", "OBSERVED_ADD"}
+                if event.normalized_event in {"add", "update"}
             }
+            event_by_memory = {
+                event.memory_id: event for event in write.events
+            }
+            new_provenance = tuple(
+                (
+                    "inferred"
+                    if event_by_memory[memory_id].source
+                    in {"inventory_diff", "inventory_delta"}
+                    or event_by_memory[memory_id].native_event.startswith("INFERRED")
+                    else "native/exact"
+                )
+                for memory_id in sorted(new_memory_ids)
+                if memory_id in event_by_memory
+            )
             future_needed = tuple(
                 state_id
                 for state_id, state in replay.current.items()
@@ -224,6 +251,14 @@ def compute_qualification_metrics(
                     n_live=write.inventory.n_live,
                     write_latency_seconds=write.latency_seconds,
                     is_final_checkpoint=index == len(task.writes) - 1,
+                    new_memory_provenance=new_provenance,
+                    live_memory_provenance=tuple(
+                        _attribution_mode(alignment.attributions, item.memory_id)
+                        for item in write.inventory.items
+                    ),
+                    provenance_complete=not (
+                        write.n_write > 0 and not write.events
+                    ),
                 )
             )
 
@@ -268,6 +303,11 @@ def compute_qualification_metrics(
                     item.evaluations[0].selected_action_id != baseline_action
                     for item in loo
                 )
+                count_contrasts = tuple(
+                    item
+                    for item in row.interventions
+                    if item.count_contrast in {"delete_one", "add_one"}
+                )
                 opportunity = opportunity_by_id[row.opportunity_id]
                 checkpoint_replay = replay_plan(
                     spec.plan,
@@ -291,12 +331,27 @@ def compute_qualification_metrics(
                         ),
                         leave_one_out_count=len(loo),
                         leave_one_out_action_flips=action_flips,
+                        count_contrast_count=len(count_contrasts),
+                        count_contrast_action_flips=sum(
+                            item.classification.action_changed
+                            for item in count_contrasts
+                        ),
+                        count_contrast_behavior_changes=sum(
+                            item.classification.action_changed
+                            or item.classification.checker_changed
+                            for item in count_contrasts
+                        ),
                         drift_flags=row.normalized_drift_flags,
                         matched_group=row.matched_group,
                         checkpoint_session=row.checkpoint_session,
                         is_conflict_opportunity=_is_state_conflict_opportunity(
                             opportunity,
                             checkpoint_replay.invalidated,
+                            pre_update_state_ids=tuple(
+                                state.state_id
+                                for state in spec.plan.state_units
+                                if state.valid_from > row.checkpoint_session
+                            ),
                         ),
                     )
                 )
@@ -375,9 +430,131 @@ def compute_qualification_metrics(
     )
 
 
+def _attribution_mode(
+    attributions: Sequence[object],
+    memory_id: str,
+) -> str:
+    for item in attributions:
+        if getattr(item, "memory_id", None) == memory_id:
+            mode = getattr(item, "provenance_mode", "unavailable")
+            return str(mode)
+    return "unavailable"
+
+
+def _filter_state_observations(
+    observations: Sequence[StateCheckpointMetricInput],
+    mode: str,
+) -> tuple[StateCheckpointMetricInput, ...]:
+    """Project checkpoint records onto one provenance track.
+
+    A checkpoint with no object on the requested track contributes no write
+    denominator.  This keeps exact metrics undefined for backends that expose
+    only inferred snapshots instead of silently turning missing native events
+    into a zero-quality claim.
+    """
+    projected: list[StateCheckpointMetricInput] = []
+    for item in observations:
+        new_pairs = tuple(
+            pair
+            for pair, provenance in zip(
+                item.new_memory_state_ids,
+                item.new_memory_provenance,
+                strict=False,
+            )
+            if provenance == mode
+        )
+        live_pairs = tuple(
+            pair
+            for pair, provenance in zip(
+                item.live_memory_state_ids,
+                item.live_memory_provenance,
+                strict=False,
+            )
+            if provenance == mode
+        )
+        if not new_pairs and not live_pairs:
+            continue
+        projected.append(
+            StateCheckpointMetricInput(
+                eligible_write_state_ids=(
+                    item.eligible_write_state_ids if new_pairs else ()
+                ),
+                new_memory_state_ids=new_pairs,
+                current_state_ids=item.current_state_ids,
+                future_needed_state_ids=item.future_needed_state_ids,
+                retired_state_ids=item.retired_state_ids,
+                live_memory_state_ids=live_pairs,
+                live_content_hashes=tuple(
+                    content_hash
+                    for content_hash, provenance in zip(
+                        item.live_content_hashes,
+                        item.live_memory_provenance,
+                        strict=False,
+                    )
+                    if provenance == mode
+                ),
+                n_write=item.n_write,
+                n_live=len(live_pairs),
+                write_latency_seconds=item.write_latency_seconds,
+                is_final_checkpoint=item.is_final_checkpoint,
+                new_memory_provenance=(mode,) * len(new_pairs),
+                live_memory_provenance=(mode,) * len(live_pairs),
+                provenance_complete=item.provenance_complete,
+            )
+        )
+    return tuple(projected)
+
+
+def provenance_diagnostics(
+    matrix: QualificationMatrixResult,
+) -> dict[str, object]:
+    """Summarize exact/inferred lifecycle coverage for the report manifest."""
+    n_writes = 0
+    n_events = 0
+    native_events = 0
+    inferred_events = 0
+    incomplete: list[dict[str, object]] = []
+    by_source: Counter[str] = Counter()
+    for task in matrix.task_results:
+        for write in task.writes:
+            n_writes += 1
+            n_events += len(write.events)
+            for event in write.events:
+                source = (
+                    "inferred"
+                    if event.source in {"inventory_diff", "inventory_delta"}
+                    or event.native_event.startswith("INFERRED")
+                    else "native/exact"
+                )
+                by_source[source] += 1
+                if source == "inferred":
+                    inferred_events += 1
+                else:
+                    native_events += 1
+            if write.n_write > 0 and not write.events:
+                incomplete.append(
+                    {
+                        "task_id": task.task_id,
+                        "session_index": write.session_index,
+                        "n_write": write.n_write,
+                    }
+                )
+    return {
+        "n_write_sessions": n_writes,
+        "n_lifecycle_events": n_events,
+        "native_exact_event_count": native_events,
+        "inferred_event_count": inferred_events,
+        "event_source_counts": dict(sorted(by_source.items())),
+        "incomplete_write_sessions": incomplete,
+        "status": "incomplete" if incomplete else "complete",
+    }
+
+
 def _state_metrics(
     values: dict[str, MetricValue],
     observations: Sequence[StateCheckpointMetricInput],
+    *,
+    prefix: str = "",
 ) -> None:
     write_covered = 0
     write_eligible = 0
@@ -434,45 +611,48 @@ def _state_metrics(
             final_write_count += item.n_write
             final_live_count += item.n_live
 
-    values["write_coverage"] = safe_ratio(write_covered, write_eligible)
-    values["write_selectivity"] = safe_ratio(selective_objects, written_objects)
+    def metric(name: str) -> str:
+        return f"{prefix}{name}" if prefix else name
+
+    values[metric("write_coverage")] = safe_ratio(write_covered, write_eligible)
+    values[metric("write_selectivity")] = safe_ratio(selective_objects, written_objects)
     precision = safe_ratio(current_objects, live_objects)
     recall = safe_ratio(represented_current, current_states)
-    values["current_state_storage_precision"] = precision
-    values["current_state_storage_recall"] = recall
-    values["current_state_storage_f1"] = _f1(precision, recall)
-    values["stale_state_retention_rate"] = safe_ratio(stale_objects, live_objects)
-    values["duplicate_live_memory_rate"] = safe_ratio(
+    values[metric("current_state_storage_precision")] = precision
+    values[metric("current_state_storage_recall")] = recall
+    values[metric("current_state_storage_f1")] = _f1(precision, recall)
+    values[metric("stale_state_retention_rate")] = safe_ratio(stale_objects, live_objects)
+    values[metric("duplicate_live_memory_rate")] = safe_ratio(
         duplicate_objects,
         aligned_live_objects,
     )
-    values["update_delete_responsiveness"] = safe_ratio(
+    values[metric("update_delete_responsiveness")] = safe_ratio(
         responsive_retired,
         retired_states,
     )
-    values["write_to_continuation_alignment"] = safe_ratio(
+    values[metric("write_to_continuation_alignment")] = safe_ratio(
         aligned_future,
         future_states,
     )
-    values["memory_write_count"] = safe_ratio(
+    values[metric("memory_write_count")] = safe_ratio(
         final_write_count,
         final_checkpoints,
     )
-    values["memory_write_count_total"] = (
+    values[metric("memory_write_count_total")] = (
         safe_ratio(final_write_count, 1)
         if final_checkpoints
         else safe_ratio(0, 0)
     )
-    values["live_memory_count"] = safe_ratio(
+    values[metric("live_memory_count")] = safe_ratio(
         final_live_count,
         final_checkpoints,
     )
-    values["live_memory_count_total"] = (
+    values[metric("live_memory_count_total")] = (
         safe_ratio(final_live_count, 1)
         if final_checkpoints
         else safe_ratio(0, 0)
     )
-    values["mean_write_latency_seconds"] = safe_ratio(
+    values[metric("mean_write_latency_seconds")] = safe_ratio(
         write_latency,
         len(observations),
     )
@@ -612,6 +792,21 @@ def _behavior_metrics(
         loo_flips,
         loo_count,
     )
+    count_contrasts = sum(item.count_contrast_count for item in observations)
+    count_action_flips = sum(
+        item.count_contrast_action_flips for item in observations
+    )
+    count_behavior_changes = sum(
+        item.count_contrast_behavior_changes for item in observations
+    )
+    values["memory_count_contrast_rate"] = safe_ratio(
+        count_action_flips,
+        count_contrasts,
+    )
+    values["memory_count_behavior_change_rate"] = safe_ratio(
+        count_behavior_changes,
+        count_contrasts,
+    )
     flag_names = (
         "constraint_loss",
         "plan_deviation",
@@ -652,11 +847,27 @@ def _behavior_metrics(
 def _is_state_conflict_opportunity(
     opportunity: ContinuationOpportunity,
     invalidated_state_ids: Collection[str],
+    *,
+    pre_update_state_ids: Collection[str] = (),
 ) -> bool:
-    if opportunity.challenge_type in {"scope-conflict", "valid-update"}:
+    if opportunity.challenge_type in {
+        "scope-conflict",
+        "valid-update",
+        "global-local-conflict",
+        "premature-v2",
+        "stale-after-revoke",
+    }:
         return True
     if opportunity.challenge_type != "matched-branch":
         return False
+    if set(pre_update_state_ids) & {
+        state_id
+        for action in opportunity.action_catalog
+        for state_id in action.satisfies_state_ids
+    }:
+        # The early matched branch is a conflict-resolution probe: an action
+        # that adopts a future branch is not valid yet.
+        return True
     invalidated = set(invalidated_state_ids)
     valid_actions = set(opportunity.valid_action_ids)
     return any(
@@ -977,5 +1188,6 @@ __all__ = [
     "UsageMetricInput",
     "compute_metric_collection",
     "compute_qualification_metrics",
+    "provenance_diagnostics",
     "safe_ratio",
 ]

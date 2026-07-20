@@ -17,6 +17,7 @@ from lhmsb.longhorizon.attribution import (
     AttributionMethod,
     FactSignature,
     MemoryAttribution,
+    ProvenanceMode,
     attribute_memory,
     build_software_fact_signatures,
     eligible_write_state_ids,
@@ -44,6 +45,7 @@ from lhmsb.qualification.config import canonical_hash
 from lhmsb.qualification.memory_runtime import (
     CandidateSearch,
     InventorySnapshot,
+    MemoryMutationEvent,
     MemoryRuntime,
     MemoryTraceValidationError,
     ProviderUsageEvent,
@@ -107,6 +109,7 @@ class BehaviorChecker(Protocol):
         *,
         checkpoint_session: int,
         visible_state_ids: tuple[str, ...] | None = None,
+        opportunity_id: str | None = None,
     ) -> BehaviorResult: ...
 
 
@@ -149,6 +152,11 @@ class MemoryAlignmentSnapshot:
     checkpoint_session: int
     inventory_store_hash: str
     attributions: tuple[MemoryAttribution, ...]
+
+    @property
+    def provenance_modes(self) -> tuple[str, ...]:
+        """Return the provenance modes represented at this checkpoint."""
+        return tuple(sorted({item.provenance_mode for item in self.attributions}))
 
 
 @dataclass(frozen=True)
@@ -194,6 +202,9 @@ class InterventionRun:
     replacement_memory_id: str | None
     evaluations: tuple[PolicyEvaluation, PolicyEvaluation]
     classification: CausalUseResult
+    baseline_memory_count: int = 0
+    intervention_memory_count: int = 0
+    count_contrast: str = "delete_one"
 
 
 @dataclass(frozen=True)
@@ -393,6 +404,9 @@ def run_qualification_task(
                     components.memory,
                     storage,
                     session_index=session_index,
+                    previous_inventory=(
+                        writes[-1].inventory if writes else None
+                    ),
                 )
                 writes.append(write)
                 latest_inventory = write.inventory
@@ -402,6 +416,8 @@ def run_qualification_task(
                     write.inventory,
                     signatures,
                     storage,
+                    lifecycle_events=write.events,
+                    prior_attributions=latest_alignment,
                 )
                 alignments.append(alignment)
                 latest_alignment = {
@@ -581,6 +597,7 @@ def _write_or_load(
     storage: QualificationStorage,
     *,
     session_index: int,
+    previous_inventory: InventorySnapshot | None = None,
 ) -> WriteSessionResult:
     transcript = spec.write_transcript(session_index)
     input_hash = canonical_hash(
@@ -595,15 +612,21 @@ def _write_or_load(
     if stored is not None:
         result = _write_result_from_dict(_mapping(stored, relative))
         memory.restore_write_count(result.n_write)
-        return result
-    result = memory.write_session(
-        [{"role": "user", "content": transcript}],
-        session_index=session_index,
-        metadata={
-            "write_origin": "system_managed_extraction",
-            "episode_id": task.episode_id,
-        },
+    else:
+        result = memory.write_session(
+            [{"role": "user", "content": transcript}],
+            session_index=session_index,
+            metadata={
+                "write_origin": "system_managed_extraction",
+                "episode_id": task.episode_id,
+            },
+        )
+    completed = _complete_write_provenance(
+        result,
+        previous_inventory=previous_inventory,
     )
+    if completed != result:
+        result = completed
     storage.save_cell(
         task,
         relative,
@@ -613,12 +636,136 @@ def _write_or_load(
     return result
 
 
+def _complete_write_provenance(
+    result: WriteSessionResult,
+    *,
+    previous_inventory: InventorySnapshot | None,
+) -> WriteSessionResult:
+    """Complete lifecycle provenance whenever inventory makes it observable.
+
+    Native adapters are authoritative when they return mutation events.  When a
+    backend only exposes before/after inventory, the deterministic diff is kept
+    as an ``INFERRED_*`` event with an explicit source marker.  If a backend
+    reports a write but exposes neither a native event nor an inventory delta,
+    the empty event list is retained and the report marks that write
+    ``incomplete`` rather than inventing a memory object.
+    """
+    before = {
+        item.memory_id: item for item in previous_inventory.items
+    } if previous_inventory is not None else {}
+    after = {item.memory_id: item for item in result.inventory.items}
+    events = list(result.events)
+    represented = {event.memory_id for event in events}
+    operation_index = len(events)
+
+    def add_event(
+        *,
+        native_event: str,
+        memory_id: str,
+        memory_text: str,
+        old_hash: str | None,
+        new_hash: str | None,
+    ) -> None:
+        nonlocal operation_index
+        events.append(
+            MemoryMutationEvent(
+                operation_id=(
+                    f"session-{result.session_index:03d}-inferred-"
+                    f"{operation_index:04d}"
+                ),
+                session_index=result.session_index,
+                native_event=native_event,
+                memory_id=memory_id,
+                memory_text=memory_text,
+                old_content_hash=old_hash,
+                new_content_hash=new_hash,
+                source="inventory_diff",
+                latency_seconds=0.0,
+            )
+        )
+        operation_index += 1
+
+    for memory_id in sorted(set(after) - set(before)):
+        if memory_id in represented:
+            continue
+        item = after[memory_id]
+        add_event(
+            native_event="INFERRED_ADD",
+            memory_id=memory_id,
+            memory_text=item.content,
+            old_hash=None,
+            new_hash=item.content_hash,
+        )
+    for memory_id in sorted(set(before) - set(after)):
+        if memory_id in represented:
+            continue
+        item = before[memory_id]
+        add_event(
+            native_event="INFERRED_DELETE",
+            memory_id=memory_id,
+            memory_text=item.content,
+            old_hash=item.content_hash,
+            new_hash=None,
+        )
+    for memory_id in sorted(set(before) & set(after)):
+        if memory_id in represented:
+            continue
+        old = before[memory_id]
+        new = after[memory_id]
+        if old.content_hash != new.content_hash:
+            add_event(
+                native_event="INFERRED_UPDATE",
+                memory_id=memory_id,
+                memory_text=new.content,
+                old_hash=old.content_hash,
+                new_hash=new.content_hash,
+            )
+
+    mutation_count = sum(
+        event.normalized_event in {"add", "update", "delete"}
+        for event in events
+    )
+    inferred_n_write = max(
+        result.n_write,
+        (previous_inventory.n_write if previous_inventory is not None else 0)
+        + mutation_count,
+    )
+    if not events and inferred_n_write == 0:
+        return result
+    if (
+        tuple(events) == result.events
+        and inferred_n_write == result.n_write
+    ):
+        return result
+    inventory = result.inventory
+    if inventory.n_write != inferred_n_write:
+        inventory = InventorySnapshot(
+            checkpoint_session=inventory.checkpoint_session,
+            n_write=inferred_n_write,
+            n_live=inventory.n_live,
+            items=inventory.items,
+            store_hash=inventory.store_hash,
+            backend_count=inventory.backend_count,
+        )
+    return WriteSessionResult(
+        session_index=result.session_index,
+        events=tuple(events),
+        inventory=inventory,
+        n_write=inferred_n_write,
+        latency_seconds=result.latency_seconds,
+        usage_events=result.usage_events,
+    )
+
+
 def _alignment_snapshot(
     task: QualificationTask,
     spec: SoftwareMem0VerticalSpec,
     inventory: InventorySnapshot,
     signatures: tuple[FactSignature, ...],
     storage: QualificationStorage,
+    *,
+    lifecycle_events: Sequence[MemoryMutationEvent] = (),
+    prior_attributions: Mapping[str, MemoryAttribution] | None = None,
 ) -> MemoryAlignmentSnapshot:
     attributions: list[MemoryAttribution] = []
     events_by_session: dict[int, tuple[str, ...]] = {}
@@ -627,6 +774,11 @@ def _alignment_snapshot(
             spec.plan,
             session,
         )
+    previous = prior_attributions or {}
+    event_by_memory: dict[str, MemoryMutationEvent] = {}
+    for event in lifecycle_events:
+        event_by_memory.setdefault(event.memory_id, event)
+    signature_by_state = {signature.state_id: signature for signature in signatures}
     for item in inventory.items:
         metadata = dict(item.metadata)
         source_session = metadata.get("session_index")
@@ -635,14 +787,67 @@ def _alignment_snapshot(
             if isinstance(source_session, int)
             else ()
         )
-        attributions.append(
-            attribute_memory(
-                item.memory_id,
-                item.content,
-                signatures,
-                unique_write_state_ids=eligible,
+        lifecycle = event_by_memory.get(item.memory_id)
+        prior = previous.get(item.memory_id)
+        mode: ProvenanceMode
+        if lifecycle is not None:
+            mode = (
+                "inferred"
+                if lifecycle.source in {"inventory_diff", "inventory_delta"}
+                or lifecycle.native_event.startswith("INFERRED")
+                else "native/exact"
+            )
+            source_session_value: int | None = lifecycle.session_index
+            lifecycle_ids: tuple[str, ...] = (lifecycle.operation_id,)
+        elif prior is not None:
+            mode = prior.provenance_mode
+            source_session_value = prior.source_session
+            lifecycle_ids = prior.source_event_ids
+        else:
+            mode = "unavailable"
+            source_session_value = (
+                source_session if isinstance(source_session, int) else None
+            )
+            lifecycle_ids = ()
+        attribution = attribute_memory(
+            item.memory_id,
+            item.content,
+            signatures,
+            unique_write_state_ids=eligible,
+            provenance_mode=mode,
+            source_event_ids=lifecycle_ids,
+            source_session=source_session_value,
+        )
+        gold_event_ids = tuple(
+            sorted(
+                {
+                    event_id
+                    for state_id in attribution.state_ids
+                    for event_id in (
+                        signature_by_state[state_id].source_event_ids
+                        if state_id in signature_by_state
+                        else ()
+                    )
+                }
             )
         )
+        # Keep both the lifecycle operation and evaluator state event IDs.  The
+        # former answers “which backend mutation?”, the latter answers “which
+        # latent fact did it represent?”.
+        if gold_event_ids:
+            attribution = MemoryAttribution(
+                memory_id=attribution.memory_id,
+                state_ids=attribution.state_ids,
+                method=attribution.method,
+                contributes_positive_coverage=attribution.contributes_positive_coverage,
+                reason=attribution.reason,
+                provenance_mode=attribution.provenance_mode,
+                source_event_ids=tuple(
+                    sorted(set(attribution.source_event_ids) | set(gold_event_ids))
+                ),
+                source_session=attribution.source_session,
+            )
+        attributions.append(attribution)
     snapshot = MemoryAlignmentSnapshot(
         checkpoint_session=inventory.checkpoint_session,
         inventory_store_hash=inventory.store_hash,
@@ -796,7 +1001,11 @@ def _run_sceu_branch(
     )
     workspace_hash = canonical_hash(_workspace_payload(surface))
     visible_state_ids = _visible_state_ids(visible_ids, alignments)
-    baseline_count = 2 if task.condition.startswith("mem0_") else 1
+    # Every memory-backed condition gets the same repeated baseline and
+    # matched interventions.  The old prefix check only recognized legacy
+    # ``mem0_*`` names, silently disabling causal/count probes for the v2
+    # canonical ``flat_retrieval``, ``mem0``, ``amem`` and ``memos`` cells.
+    baseline_count = 2 if components.memory is not None else 1
     baseline = tuple(
         _policy_evaluation(
             task,
@@ -874,6 +1083,9 @@ def _run_sceu_branch(
                         intervention_evaluations[1],
                     ),
                     classification=classification,
+                    baseline_memory_count=len(visible_candidates),
+                    intervention_memory_count=len(remaining),
+                    count_contrast="delete_one",
                 )
             )
             if role != "contradicts_current_state":
@@ -935,6 +1147,59 @@ def _run_sceu_branch(
                         replacement_evaluations[1],
                     ),
                     classification=replacement_classification,
+                    baseline_memory_count=len(visible_candidates),
+                    intervention_memory_count=len(replacement_tuple),
+                    count_contrast="replace_one",
+                )
+            )
+        if visible_candidates:
+            add_candidate = _count_control_candidate(spec, sceu)
+            added_candidates = (*visible_candidates, add_candidate)
+            add_evaluations = tuple(
+                _policy_evaluation(
+                    task,
+                    scored,
+                    spec,
+                    components,
+                    storage,
+                    sceu=sceu,
+                    public=public,
+                    surface=surface,
+                    call_kind="count_add",
+                    call_key=(
+                        f"count-add-{_slug(add_candidate.memory_id)}-{repeat}"
+                    ),
+                    visible_candidates=added_candidates,
+                    additional_context=oracle_context,
+                    workspace_hash=workspace_hash,
+                    visible_state_ids=_visible_state_ids(
+                        tuple(item.memory_id for item in added_candidates),
+                        alignments,
+                    ),
+                    max_output_tokens=max_output_tokens,
+                )
+                for repeat in range(2)
+            )
+            add_classification = classify_causal_use(
+                memory_id=add_candidate.memory_id,
+                intervention_kind="count_add",
+                memory_role="supports_current_state",
+                baseline=baseline_outcomes,
+                intervention=(
+                    add_evaluations[0].outcome,
+                    add_evaluations[1].outcome,
+                ),
+            )
+            interventions.append(
+                InterventionRun(
+                    intervention_kind="count_add",
+                    target_memory_id=add_candidate.memory_id,
+                    replacement_memory_id=None,
+                    evaluations=(add_evaluations[0], add_evaluations[1]),
+                    classification=add_classification,
+                    baseline_memory_count=len(visible_candidates),
+                    intervention_memory_count=len(added_candidates),
+                    count_contrast="add_one",
                 )
             )
     primary = baseline[0]
@@ -1079,11 +1344,23 @@ def _policy_evaluation(
     )
     if stored_evaluation is None:
         try:
-            checker_result = components.checker.check_action(
-                selected_action_id,
-                checkpoint_session=sceu.checkpoint_session,
-                visible_state_ids=visible_state_ids,
-            )
+            try:
+                checker_result = components.checker.check_action(
+                    selected_action_id,
+                    checkpoint_session=sceu.checkpoint_session,
+                    visible_state_ids=visible_state_ids,
+                    opportunity_id=sceu.opportunity_id,
+                )
+            except TypeError as exc:
+                # Keep old checker/test doubles executable while enabling
+                # opportunity-specific validity for the v0.3 local exception.
+                if "opportunity_id" not in str(exc):
+                    raise
+                checker_result = components.checker.check_action(
+                    selected_action_id,
+                    checkpoint_session=sceu.checkpoint_session,
+                    visible_state_ids=visible_state_ids,
+                )
         except Exception as exc:
             raise QualificationRunError("checker_failure", str(exc)) from exc
         action = spec.action_map[selected_action_id]
@@ -1092,6 +1369,7 @@ def _policy_evaluation(
             action,
             checker_result,
             checkpoint_session=sceu.checkpoint_session,
+            opportunity_id=sceu.opportunity_id,
         )
         outcome = ContinuationOutcome(
             action_id=selected_action_id,
@@ -1158,6 +1436,7 @@ def _normalized_drift(
     behavior: BehaviorResult,
     *,
     checkpoint_session: int,
+    opportunity_id: str | None = None,
 ) -> tuple[str, ...]:
     replay = replay_plan(spec.plan, checkpoint_session)
     current = replay.current
@@ -1175,6 +1454,12 @@ def _normalized_drift(
             "local" in state_map[state_id].scope
             or state_map[state_id].authority == "local-operator"
         )
+    )
+    future_ids = tuple(
+        state.state_id
+        for state in spec.plan.state_units
+        if state.valid_from > checkpoint_session
+        and state.state_id in action.satisfies_state_ids
     )
     result = classify_long_horizon_drift(
         DriftEvidence(
@@ -1203,6 +1488,7 @@ def _normalized_drift(
                 for state_id, state in current.items()
                 if state.kind in {"global_goal", "constraint"}
             ),
+            future_state_ids=future_ids,
         )
     )
     return tuple(str(flag) for flag in result.flags)
@@ -1268,6 +1554,45 @@ def _memory_blocks(
     return tuple(
         f"Retrieved memory {index}:\n{candidate.content}"
         for index, candidate in enumerate(candidates, start=1)
+    )
+
+
+def _count_control_candidate(
+    spec: SoftwareMem0VerticalSpec,
+    sceu: SCEU,
+) -> SearchCandidate:
+    """Build one deterministic evaluator-side add-one memory object."""
+    current = replay_plan(spec.plan, sceu.checkpoint_session).current
+    preferred = [
+        state_id
+        for state_id in sceu.required_state_ids
+        if state_id in current
+    ] or list(sceu.focal_state_ids)
+    lines: list[str] = []
+    for state_id in preferred:
+        state = current.get(state_id)
+        if state is None:
+            continue
+        if isinstance(state.value, dict):
+            text = state.value.get("text")
+            lines.append(str(text) if isinstance(text, str) else str(state.value))
+        else:
+            lines.append(str(state.value))
+    content = "Controlled count intervention: " + " ".join(lines)
+    memory_id = f"__count_add__{sceu.sceu_id}"
+    return SearchCandidate(
+        memory_id=memory_id,
+        content=content,
+        content_hash=hash_text(content),
+        native_rank=10_000,
+        score=0.0,
+        score_details=(("count_control", 0.0),),
+        metadata=(
+            ("lhmsb.provenance", {"mode": "inferred", "sceu_id": sceu.sceu_id}),
+            ("lhmsb.candidate_origin", "count_control"),
+        ),
+        created_at="evaluator",
+        updated_at="evaluator",
     )
 
 
@@ -1660,6 +1985,9 @@ def _intervention_run_from_dict(
                 classification_data.get("checker_changed", False)
             ),
         ),
+        baseline_memory_count=_integer(data.get("baseline_memory_count", 0)),
+        intervention_memory_count=_integer(data.get("intervention_memory_count", 0)),
+        count_contrast=str(data.get("count_contrast", "delete_one")),
     )
 
 
@@ -1681,6 +2009,16 @@ def _alignment_from_dict(
                     item.get("contributes_positive_coverage", False)
                 ),
                 reason=str(item.get("reason", "")),
+                provenance_mode=cast(
+                    Literal["native/exact", "inferred", "unavailable"],
+                    str(item.get("provenance_mode", "unavailable")),
+                ),
+                source_event_ids=_string_tuple(item.get("source_event_ids")),
+                source_session=(
+                    None
+                    if item.get("source_session") is None
+                    else _integer(item.get("source_session"))
+                ),
             )
             for item in _mapping_sequence(data.get("attributions"))
         ),

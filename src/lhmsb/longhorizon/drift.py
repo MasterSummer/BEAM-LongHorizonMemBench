@@ -29,6 +29,7 @@ class DriftEvidence:
     stale_state_ids: tuple[str, ...] = ()
     selected_local_state_ids: tuple[str, ...] = ()
     global_state_ids: tuple[str, ...] = ()
+    future_state_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,7 @@ def classify_long_horizon_drift(
     )
     plan_deviation = bool(
         violated.intersection(evidence.current_plan_state_ids)
+        or used.intersection(evidence.future_state_ids)
     ) or _has_flag(
         flags,
         (
@@ -122,6 +124,8 @@ def classify_long_horizon_drift(
             "plan-deviation",
             "plan_deviation",
             "current-plan-overwritten",
+            "future-state-adoption",
+            "future_state_adoption",
         ),
     )
     local_over_global = bool(

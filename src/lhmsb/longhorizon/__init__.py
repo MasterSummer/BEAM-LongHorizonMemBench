@@ -14,6 +14,7 @@ from lhmsb.longhorizon.public_surface import (
     render_public_continuation,
     validate_public_payload,
 )
+from lhmsb.longhorizon.attribution import ProvenanceMode
 from lhmsb.longhorizon.render import render_surfaces, surfaces_hash
 from lhmsb.longhorizon.replay import ReplayResult, StateReplayError, plan_hash, replay_plan
 from lhmsb.longhorizon.schema import (
@@ -40,6 +41,7 @@ __all__ = [
     "EvaluatorContinuation",
     "PublicActionOption",
     "PublicContinuation",
+    "ProvenanceMode",
     "ReplayResult",
     "SCEU",
     "SessionSurface",

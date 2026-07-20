@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
-from lhmsb.qualification.metrics import compute_qualification_metrics
+from lhmsb.qualification.metrics import (
+    compute_qualification_metrics,
+    provenance_diagnostics,
+)
 from lhmsb.qualification.runner import (
     PolicyEvaluation,
     QualificationMatrixResult,
@@ -69,6 +72,7 @@ _SCORECARD_FIELDS = (
     "stale_state_action_rate",
     "local_over_global_rate",
     "aggregate_drift_rate",
+    "memory_count_contrast_rate",
 )
 
 
@@ -168,6 +172,9 @@ def _flatten_rows(
     seen_calls: set[str] = set()
     for task in matrix.task_results:
         task_context = _task_context(task)
+        alignment_by_session = {
+            item.checkpoint_session: item for item in task.alignments
+        }
         rows["tasks.jsonl"].append(
             {
                 **task_context,
@@ -191,12 +198,39 @@ def _flatten_rows(
                     {
                         **write_context,
                         **_jsonable(asdict(event)),
+                        "provenance_mode": (
+                            "inferred"
+                            if event.source in {"inventory_diff", "inventory_delta"}
+                            or event.native_event.startswith("INFERRED")
+                            else "native/exact"
+                        ),
                     }
                 )
             rows["memory_inventory.jsonl"].append(
                 {
                     **write_context,
                     **_jsonable(asdict(write.inventory)),
+                    "provenance_mode_by_memory": {
+                        attribution.memory_id: attribution.provenance_mode
+                        for attribution in (
+                            alignment_by_session[write.session_index].attributions
+                            if write.session_index in alignment_by_session
+                            else ()
+                        )
+                    },
+                    "attribution_by_memory": {
+                        attribution.memory_id: {
+                            "state_ids": list(attribution.state_ids),
+                            "source_event_ids": list(attribution.source_event_ids),
+                            "source_session": attribution.source_session,
+                            "provenance_mode": attribution.provenance_mode,
+                        }
+                        for attribution in (
+                            alignment_by_session[write.session_index].attributions
+                            if write.session_index in alignment_by_session
+                            else ()
+                        )
+                    },
                 }
             )
             for usage in write.usage_events:
@@ -429,6 +463,11 @@ def _summary(
         statuses[task.status] += 1
         for condition in task.condition_results:
             condition_statuses[condition.status] += 1
+    count_rows = [
+        row
+        for row in rows["interventions.jsonl"]
+        if row.get("count_contrast") in {"delete_one", "add_one"}
+    ]
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "run_identity": matrix.run_identity,
@@ -440,7 +479,18 @@ def _summary(
         "n_inventory_snapshots": len(rows["memory_inventory.jsonl"]),
         "n_retrieval_traces": len(rows["retrieval_trace.jsonl"]),
         "n_interventions": len(rows["interventions.jsonl"]),
+        "n_memory_count_contrasts": len(count_rows),
+        "n_memory_count_action_flips": sum(
+            bool(
+                _mapping_value(
+                    row.get("classification"),
+                    "action_changed",
+                )
+            )
+            for row in count_rows
+        ),
         "n_api_calls": len(rows["api_usage.jsonl"]),
+        "storage_provenance": provenance_diagnostics(matrix),
         "n_policy_calls": sum(
             row.get("call_kind") not in {
                 "memory_internal_llm",
@@ -462,6 +512,12 @@ def _summary(
             for row in rows["api_usage.jsonl"]
         ),
     }
+
+
+def _mapping_value(value: object, key: str) -> object:
+    if isinstance(value, Mapping):
+        return value.get(key)
+    return None
 
 
 def _scorecard_rows(
@@ -505,6 +561,11 @@ def _scorecard_rows(
         intervention_labels = [
             intervention.classification.label
             for intervention in interventions
+        ]
+        count_contrasts = [
+            intervention
+            for intervention in interventions
+            if intervention.count_contrast in {"delete_one", "add_one"}
         ]
         drift_flags = [
             flag
@@ -579,6 +640,13 @@ def _scorecard_rows(
                 "aggregate_drift_rate": _ratio_value(
                     sum(bool(row.normalized_drift_flags) for row in rows),
                     len(rows),
+                ),
+                "memory_count_contrast_rate": _ratio_value(
+                    sum(
+                        intervention.classification.action_changed
+                        for intervention in count_contrasts
+                    ),
+                    len(count_contrasts),
                 ),
             }
         )

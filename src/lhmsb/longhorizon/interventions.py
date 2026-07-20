@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-InterventionKind = Literal["leave_one_out", "stale_replacement"]
+InterventionKind = Literal[
+    "leave_one_out",
+    "stale_replacement",
+    "count_add",
+]
 MemoryRole = Literal[
     "supports_current_state",
     "contradicts_current_state",
@@ -81,7 +85,11 @@ def classify_causal_use(
     """Classify use only when both repeated pairs are internally stable."""
     if not memory_id:
         raise ValueError("memory_id must be non-empty")
-    if intervention_kind not in {"leave_one_out", "stale_replacement"}:
+    if intervention_kind not in {
+        "leave_one_out",
+        "stale_replacement",
+        "count_add",
+    }:
         raise ValueError(f"unknown intervention kind: {intervention_kind!r}")
     if memory_role not in {
         "supports_current_state",

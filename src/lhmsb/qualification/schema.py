@@ -445,11 +445,17 @@ class SystemsQualificationConfig:
     def __post_init__(self) -> None:
         if self.schema_version != 2:
             raise ValueError("SystemsQualificationConfig requires schema_version=2")
-        if len(self.policy_profiles) != 3:
-            raise ValueError("schema-v2 requires exactly three continuation policy profiles")
-        if len({profile.profile_id for profile in self.policy_profiles}) != 3:
+        if len(self.policy_profiles) not in {1, 3}:
+            raise ValueError(
+                "schema-v2 requires one GPT-only or three continuation policy profiles"
+            )
+        if len({profile.profile_id for profile in self.policy_profiles}) != len(
+            self.policy_profiles
+        ):
             raise ValueError("policy profile IDs must be unique")
-        if len({profile.model_id for profile in self.policy_profiles}) != 3:
+        if len({profile.model_id for profile in self.policy_profiles}) != len(
+            self.policy_profiles
+        ):
             raise ValueError("policy model IDs must be unique")
         if (
             self.writer_profile.provider != "deepseek"

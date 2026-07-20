@@ -10,6 +10,7 @@ from lhmsb.longhorizon.replay import replay_plan
 from lhmsb.longhorizon.schema import EpisodePlan
 
 AttributionMethod = Literal["exact_signature", "unique_provenance", "ambiguous"]
+ProvenanceMode = Literal["native/exact", "inferred", "unavailable"]
 FactPolarity = Literal["positive", "negative"]
 _POSITIVE_WRITE_EVENT_TYPES = frozenset(
     {"add", "replace", "priority_change", "scope_change", "reopen"}
@@ -76,6 +77,9 @@ class MemoryAttribution:
     method: AttributionMethod
     contributes_positive_coverage: bool
     reason: str
+    provenance_mode: ProvenanceMode = "unavailable"
+    source_event_ids: tuple[str, ...] = ()
+    source_session: int | None = None
 
 
 def eligible_write_state_ids(
@@ -115,6 +119,9 @@ def attribute_memory(
     signatures: tuple[FactSignature, ...],
     *,
     unique_write_state_ids: tuple[str, ...] = (),
+    provenance_mode: ProvenanceMode = "unavailable",
+    source_event_ids: tuple[str, ...] = (),
+    source_session: int | None = None,
 ) -> MemoryAttribution:
     """Attribute one memory without an LLM or embedding threshold."""
     normalized = normalize_fact_text(text)
@@ -132,6 +139,9 @@ def attribute_memory(
             method="exact_signature",
             contributes_positive_coverage=True,
             reason="memory text uniquely satisfies a complete fact signature",
+            provenance_mode=provenance_mode,
+            source_event_ids=source_event_ids,
+            source_session=source_session,
         )
     if len(exact) > 1:
         return MemoryAttribution(
@@ -140,6 +150,9 @@ def attribute_memory(
             method="ambiguous",
             contributes_positive_coverage=False,
             reason="memory text satisfies multiple complete fact signatures",
+            provenance_mode=provenance_mode,
+            source_event_ids=source_event_ids,
+            source_session=source_session,
         )
 
     provenance_ids = tuple(sorted(set(unique_write_state_ids)))
@@ -161,6 +174,9 @@ def attribute_memory(
             method="unique_provenance",
             contributes_positive_coverage=True,
             reason="one eligible write source and one uncontested partial signature match",
+            provenance_mode=provenance_mode,
+            source_event_ids=source_event_ids,
+            source_session=source_session,
         )
     return MemoryAttribution(
         memory_id=memory_id,
@@ -168,6 +184,9 @@ def attribute_memory(
         method="ambiguous",
         contributes_positive_coverage=False,
         reason="zero, contradictory, or multiple state assignments remain possible",
+        provenance_mode=provenance_mode,
+        source_event_ids=source_event_ids,
+        source_session=source_session,
     )
 
 
@@ -354,6 +373,7 @@ __all__ = [
     "FactPolarity",
     "FactSignature",
     "MemoryAttribution",
+    "ProvenanceMode",
     "attribute_memory",
     "build_software_fact_signatures",
     "eligible_write_state_ids",

@@ -24,6 +24,8 @@ from lhmsb.longhorizon.replay import plan_hash
 MEM0_STATEFUL_SCHEMA_VERSION = 2
 MEM0_STATEFUL_GENERATOR_VERSION = "software-project-mem0-vertical-0.2"
 MEM0_STATEFUL_RELEASE_ID = "software-vertical-mem0-v0.2.0"
+MEM0_STATEFUL_GENERATOR_VERSION_V3 = "software-project-mem0-vertical-0.3"
+MEM0_STATEFUL_RELEASE_ID_V3 = "software-vertical-mem0-v0.3.0"
 _RELEASE_TIMESTAMP = "2026-07-16T00:00:00Z"
 
 
@@ -156,8 +158,10 @@ def freeze_mem0_stateful(src: Path, out: Path) -> Mem0StatefulManifest:
     shutil.copytree(src, out)
     manifest = Mem0StatefulManifest(
         schema_version=MEM0_STATEFUL_SCHEMA_VERSION,
-        generator_version=MEM0_STATEFUL_GENERATOR_VERSION,
-        release_id=MEM0_STATEFUL_RELEASE_ID,
+        generator_version=str(
+            metadata.get("generator_version", MEM0_STATEFUL_GENERATOR_VERSION)
+        ),
+        release_id=str(metadata.get("release_id", MEM0_STATEFUL_RELEASE_ID)),
         git_sha=_git_sha(),
         semantic_seeds=_int_tuple(metadata["semantic_seeds"]),
         trajectory_seeds=_int_tuple(metadata["trajectory_seeds"]),
@@ -353,8 +357,13 @@ def _write_stage(out: Path, generated: Sequence[Mem0StatefulGenerated]) -> None:
     _write_jsonl(evaluator_root / "sceu.jsonl", all_sceu)
     _write_jsonl(evaluator_root / "continuation_mappings.jsonl", mappings)
     _write_json(evaluator_root / "dependencies.json", dependencies)
+    release_id, generator_version = _release_for_generation(
+        n_episodes=len(generated),
+        n_sessions=(generated[0].spec.plan.n_sessions if generated else 0),
+    )
     metadata = {
-        "release_id": MEM0_STATEFUL_RELEASE_ID,
+        "release_id": release_id,
+        "generator_version": generator_version,
         "semantic_seeds": sorted({item.semantic_seed for item in generated}),
         "trajectory_seeds": [item.trajectory_seed for item in generated],
         "n_episodes": len(generated),
@@ -427,7 +436,7 @@ def _audit_spec(spec: SoftwareMem0VerticalSpec) -> None:
 
 def _dataset_card(manifest: Mem0StatefulManifest) -> str:
     return (
-        "# Software Mem0 qualification vertical v0.2.0\n\n"
+        f"# Software Mem0 qualification vertical {manifest.release_id}\n\n"
         f"- schema version: `{manifest.schema_version}`\n"
         f"- generator version: `{manifest.generator_version}`\n"
         f"- release: `{manifest.release_id}`\n"
@@ -437,6 +446,22 @@ def _dataset_card(manifest: Mem0StatefulManifest) -> str:
         "Public policy surfaces and evaluator gold are stored in separate trees. "
         "The release is generated without model or memory-backend calls.\n"
     )
+
+
+def _release_for_generation(
+    *,
+    n_episodes: int,
+    n_sessions: int,
+) -> tuple[str, str]:
+    """Select the release contract without changing legacy CI fixtures.
+
+    The 30-episode pilot is the first v0.3 release.  Small 4-session fixtures
+    retain the v0.2 identifiers so existing compatibility tests and archived
+    artifacts remain readable.
+    """
+    if n_episodes >= 30:
+        return MEM0_STATEFUL_RELEASE_ID_V3, MEM0_STATEFUL_GENERATOR_VERSION_V3
+    return MEM0_STATEFUL_RELEASE_ID, MEM0_STATEFUL_GENERATOR_VERSION
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -551,7 +576,9 @@ def _str_dict(value: object) -> dict[str, str]:
 
 __all__ = [
     "MEM0_STATEFUL_GENERATOR_VERSION",
+    "MEM0_STATEFUL_GENERATOR_VERSION_V3",
     "MEM0_STATEFUL_RELEASE_ID",
+    "MEM0_STATEFUL_RELEASE_ID_V3",
     "MEM0_STATEFUL_SCHEMA_VERSION",
     "Mem0StatefulDatasetError",
     "Mem0StatefulGenerated",
