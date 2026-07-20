@@ -285,6 +285,11 @@ systems_start_tei() {
 
 systems_start_all_services() {
   local data_root="$1"
+  # MemOS otherwise defaults to ``$PWD/.memos`` and dirties the clean source
+  # checkout before the immutable run identity is recorded.
+  export MEMOS_BASE_PATH="${MEMOS_BASE_PATH:-${data_root}/memos}"
+  export LHMSB_MEMOS_TOKENIZER_PATH="${LHMSB_MEMOS_TOKENIZER_PATH:-character}"
+  mkdir -p "${MEMOS_BASE_PATH}"
   systems_stop_all_services "${data_root}"
   systems_allocate_ports "${data_root}"
   systems_start_qdrant "${data_root}"

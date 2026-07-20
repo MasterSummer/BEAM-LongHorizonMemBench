@@ -223,6 +223,13 @@ def test_qdrant_process_starts_inside_its_isolated_state_directory() -> None:
     assert 'exec env -i HOME="${HOME}"' in text
 
 
+def test_native_services_keep_memos_state_out_of_source_checkout() -> None:
+    text = SERVICES.read_text(encoding="utf-8")
+
+    assert 'MEMOS_BASE_PATH="${MEMOS_BASE_PATH:-${data_root}/memos}"' in text
+    assert 'mkdir -p "${MEMOS_BASE_PATH}"' in text
+
+
 def test_runtime_verifier_is_native() -> None:
     text = (ROOT / "scripts" / "verify_system_runtime.sh").read_text(encoding="utf-8")
     assert "native-runtime.json" in text
