@@ -1061,7 +1061,7 @@ def _qdrant_collection_snapshot_size(
 ) -> int:
     """Measure the compressed bytes of one isolated Qdrant collection."""
     try:
-        from qdrant_client import QdrantClient  # type: ignore[import-not-found]
+        from qdrant_client import QdrantClient
     except ImportError as exc:  # pragma: no cover - qualification extra gate
         raise QualificationRunError(
             "resource_measurement_failure",

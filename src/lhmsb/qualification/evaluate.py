@@ -91,6 +91,8 @@ class EvaluationRetrievalTrace:
     visible_memory_ids: tuple[str, ...]
     candidate_shortfall: bool
     query_hash: str
+    backend_retrieved_memory_ids: tuple[str, ...] = ()
+    selected_memory_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -101,6 +103,10 @@ class EvaluationRetrievalTrace:
             "visible_memory_ids": list(self.visible_memory_ids),
             "candidate_shortfall": self.candidate_shortfall,
             "query_hash": self.query_hash,
+            "backend_retrieved_memory_ids": list(
+                self.backend_retrieved_memory_ids
+            ),
+            "selected_memory_ids": list(self.selected_memory_ids),
         }
 
 
@@ -210,6 +216,16 @@ class EvaluationSCEUResult:
     transcript_hash: str
     model_visible_context_hash: str
     candidate_shortfall: bool = False
+    # Explicit retrieval lifecycle.  Legacy ``candidate_memory_ids`` and
+    # ``retrieved_memory_ids`` remain serialized for schema-v2 readers.
+    # ``backend_retrieved_memory_ids`` is the backend-returned ranked list;
+    # ``selected_memory_ids`` is the native truncation or common reranker
+    # selection before prompt rendering.
+    backend_retrieved_memory_ids: tuple[str, ...] = ()
+    selected_memory_ids: tuple[str, ...] = ()
+    behaviorally_used_memory_ids: tuple[str, ...] = ()
+    drift_eligible_categories: tuple[str, ...] | None = None
+    current_state_signature: str = ""
 
     @property
     def behavior_score(self) -> float:
@@ -245,6 +261,19 @@ class EvaluationSCEUResult:
             "transcript_hash": self.transcript_hash,
             "model_visible_context_hash": self.model_visible_context_hash,
             "candidate_shortfall": self.candidate_shortfall,
+            "backend_retrieved_memory_ids": list(
+                self.backend_retrieved_memory_ids
+            ),
+            "selected_memory_ids": list(self.selected_memory_ids),
+            "behaviorally_used_memory_ids": list(
+                self.behaviorally_used_memory_ids
+            ),
+            "drift_eligible_categories": (
+                None
+                if self.drift_eligible_categories is None
+                else list(self.drift_eligible_categories)
+            ),
+            "current_state_signature": self.current_state_signature,
         }
 
 
@@ -321,6 +350,14 @@ class _Readout:
     visible_candidates: tuple[RetrievalCandidate, ...]
     candidate_shortfall: bool
     trace: CommonRerankTrace | None
+
+    @property
+    def backend_retrieved_memory_ids(self) -> tuple[str, ...]:
+        return self.candidate_memory_ids
+
+    @property
+    def selected_memory_ids(self) -> tuple[str, ...]:
+        return self.retrieved_memory_ids
 
 
 def evaluate_task(
@@ -462,6 +499,29 @@ def evaluate_task(
                     transcript_hash=primary.transcript_hash,
                     model_visible_context_hash=primary.model_visible_context_hash,
                     candidate_shortfall=readout.candidate_shortfall,
+                    backend_retrieved_memory_ids=(
+                        readout.backend_retrieved_memory_ids
+                    ),
+                    selected_memory_ids=readout.selected_memory_ids,
+                    behaviorally_used_memory_ids=tuple(
+                        sorted(
+                            {
+                                item.target_memory_id
+                                for item in interventions
+                                if item.intervention_kind
+                                == "neutral_replacement"
+                                and item.classification.behaviorally_used
+                            }
+                        )
+                    ),
+                    drift_eligible_categories=_drift_eligible_categories(
+                        spec,
+                        sceu,
+                    ),
+                    current_state_signature=_current_state_signature(
+                        spec,
+                        sceu.checkpoint_session,
+                    ),
                 )
             )
         rows.append(
@@ -839,6 +899,120 @@ def _interventions(
                 ),
             )
         )
+        neutral = _neutral_replacement_candidate(
+            sceu,
+            target,
+            control_kind="causal",
+        )
+        neutral_visible = list(readout.visible_candidates)
+        neutral_visible[neutral_visible.index(target)] = neutral
+        neutral_calls = _calls(
+            policy,
+            checker,
+            task,
+            result_id,
+            spec,
+            public,
+            surface,
+            sceu,
+            tuple(neutral_visible),
+            additional_context,
+            workspace_hash,
+            _visible_state_ids(
+                tuple(item.memory_id for item in neutral_visible),
+                attributions,
+            ),
+            "neutral_replacement",
+            repeats,
+            max_output_tokens,
+            actions,
+        )
+        neutral_classification = classify_causal_use(
+            memory_id=target.memory_id,
+            intervention_kind="neutral_replacement",
+            memory_role=role,
+            baseline=_outcome_pair(baselines),
+            intervention=_outcome_pair(neutral_calls),
+        )
+        result.append(
+            EvaluationIntervention(
+                intervention_kind="neutral_replacement",
+                target_memory_id=target.memory_id,
+                replacement_memory_id=neutral.memory_id,
+                evaluations=neutral_calls,
+                classification=neutral_classification,
+                baseline_memory_count=len(readout.visible_candidates),
+                intervention_memory_count=len(neutral_visible),
+                count_contrast="replace_one",
+                provenance_mode=(
+                    "unavailable"
+                    if attributions.get(target.memory_id) is None
+                    else attributions[target.memory_id].provenance_mode
+                ),
+            )
+        )
+        sham = _sham_target(
+            readout.visible_candidates,
+            target=target,
+            attributions=attributions,
+            intervention_target_state_ids=sceu.intervention_target_ids,
+        )
+        if sham is not None:
+            sham_neutral = _neutral_replacement_candidate(
+                sceu,
+                sham,
+                control_kind="sham",
+            )
+            sham_visible = list(readout.visible_candidates)
+            sham_visible[sham_visible.index(sham)] = sham_neutral
+            sham_calls = _calls(
+                policy,
+                checker,
+                task,
+                result_id,
+                spec,
+                public,
+                surface,
+                sceu,
+                tuple(sham_visible),
+                additional_context,
+                workspace_hash,
+                _visible_state_ids(
+                    tuple(item.memory_id for item in sham_visible),
+                    attributions,
+                ),
+                "sham_replacement",
+                repeats,
+                max_output_tokens,
+                actions,
+            )
+            sham_classification = classify_causal_use(
+                memory_id=sham.memory_id,
+                intervention_kind="sham_replacement",
+                memory_role=_memory_role(
+                    attributions.get(sham.memory_id),
+                    current_ids=current_ids,
+                ),
+                baseline=_outcome_pair(baselines),
+                intervention=_outcome_pair(sham_calls),
+            )
+            result.append(
+                EvaluationIntervention(
+                    intervention_kind="sham_replacement",
+                    target_memory_id=sham.memory_id,
+                    replacement_memory_id=sham_neutral.memory_id,
+                    evaluations=sham_calls,
+                    classification=sham_classification,
+                    baseline_memory_count=len(readout.visible_candidates),
+                    intervention_memory_count=len(sham_visible),
+                    count_contrast="replace_one_sham",
+                    provenance_mode=(
+                        "unavailable"
+                        if attributions.get(sham.memory_id) is None
+                        else attributions[sham.memory_id].provenance_mode
+                    ),
+                )
+            )
         if role != "contradicts_current_state":
             continue
         replacement = _replacement_candidate(
@@ -888,6 +1062,9 @@ def _interventions(
                     if attributions.get(target.memory_id) is None
                     else attributions[target.memory_id].provenance_mode
                 ),
+                baseline_memory_count=len(readout.visible_candidates),
+                intervention_memory_count=len(replaced),
+                count_contrast="replace_one_stale_control",
             )
         )
     # The add-one arm is an evaluator-owned, state-neutral object.  It changes
@@ -981,6 +1158,63 @@ def _count_control_candidate(sceu: SCEU, native_rank: int) -> RetrievalCandidate
         created_at="evaluator-controlled",
         updated_at="evaluator-controlled",
     )
+
+
+def _neutral_replacement_candidate(
+    sceu: SCEU,
+    target: RetrievalCandidate,
+    *,
+    control_kind: str,
+) -> RetrievalCandidate:
+    """Return evaluator-owned non-semantic text with matched count/position/size."""
+    seed = (
+        "Routine administrative note. Workspace housekeeping completed. "
+        "No project requirement, decision, implementation branch, or policy "
+        "was changed by this note. "
+    )
+    target_chars = len(target.content)
+    repeated = (seed * ((target_chars // len(seed)) + 1))[:target_chars]
+    content = repeated if target_chars else ""
+    target_digest = hashlib.sha256(target.memory_id.encode("utf-8")).hexdigest()[:16]
+    return RetrievalCandidate(
+        memory_id=(
+            f"{control_kind}-replacement:{sceu.sceu_id}:{target_digest}"
+        ),
+        content=content,
+        content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        native_rank=target.native_rank,
+        score=target.score,
+        score_details=target.score_details,
+        metadata=(
+            ("lhmsb.control", f"{control_kind}-neutral-replacement"),
+            ("lhmsb.replaces", target.memory_id),
+        ),
+        created_at=target.created_at,
+        updated_at=target.updated_at,
+    )
+
+
+def _sham_target(
+    visible: Sequence[RetrievalCandidate],
+    *,
+    target: RetrievalCandidate,
+    attributions: Mapping[str, MemoryAttribution],
+    intervention_target_state_ids: Sequence[str],
+) -> RetrievalCandidate | None:
+    """Choose a visible object with no evaluator-attributed target-state overlap."""
+    target_states = set(intervention_target_state_ids)
+    for candidate in visible:
+        if candidate.memory_id == target.memory_id:
+            continue
+        attribution = attributions.get(candidate.memory_id)
+        attributed = (
+            set(attribution.state_ids)
+            if attribution is not None and attribution.contributes_positive_coverage
+            else set()
+        )
+        if not attributed.intersection(target_states):
+            return candidate
+    return None
 
 
 def _submit(policy: PolicyClient, request: PolicyRequest) -> PolicyResponse:
@@ -1200,6 +1434,56 @@ def _normalized_drift(
         )
     )
     return result.flags
+
+
+def _drift_eligible_categories(
+    spec: SoftwareMem0VerticalSpec,
+    sceu: SCEU,
+) -> tuple[str, ...]:
+    """Return drift types that at least one invalid available action can express."""
+    opportunity = next(
+        item
+        for item in spec.plan.opportunities
+        if item.opportunity_id == sceu.opportunity_id
+    )
+    valid = set(opportunity.valid_action_ids)
+    flags: set[str] = set()
+    for action in opportunity.action_catalog:
+        if action.action_id in valid:
+            continue
+        synthetic = BehaviorResult(
+            score=0.0,
+            is_correct=False,
+            violated_state_ids=action.violates_state_ids,
+            drift_flags=(),
+        )
+        flags.update(
+            _normalized_drift(
+                spec,
+                action,
+                synthetic,
+                sceu.checkpoint_session,
+            )
+        )
+    return tuple(sorted(flags))
+
+
+def _current_state_signature(
+    spec: SoftwareMem0VerticalSpec,
+    checkpoint_session: int,
+) -> str:
+    replay = replay_plan(spec.plan, checkpoint_session)
+    payload = [
+        {
+            "state_id": state_id,
+            "version": state.version,
+            "value": state.value,
+            "authority": state.authority,
+            "scope": state.scope,
+        }
+        for state_id, state in sorted(replay.current.items())
+    ]
+    return canonical_hash(payload)
 
 
 def _check_action(

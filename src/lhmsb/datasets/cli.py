@@ -50,6 +50,7 @@ from lhmsb.families.research import (
     ArxivSearch,
     LocalArxivSearch,
     OpenAlexSearch,
+    TraceSearch,
     WideTraceError,
     attach_wide_traces,
     build_arxiv_metadata_index,
@@ -282,6 +283,7 @@ def _cmd_wide_questions(args: argparse.Namespace) -> int:
 
 def _cmd_wide_traces(args: argparse.Namespace) -> int:
     try:
+        search: TraceSearch
         if args.search_backend == "local":
             if args.index is None:
                 raise WideTraceError("--index is required for --search-backend local")

@@ -32,6 +32,8 @@ def _row(
         visible_memory_count=1,
         live_memory_count=live_count,
         causal_labels=("beneficial",),
+        behaviorally_used_memory_ids=("memory-C1",),
+        behavioral_use_probe_count=1,
         intervention_labels=("beneficial",),
         leave_one_out_count=1,
         leave_one_out_action_flips=1,
@@ -91,6 +93,9 @@ def test_schema_v2_state_retrieval_and_memory_count_metrics() -> None:
     assert metrics["stale_visible_exposure"].value == 0.0
     assert metrics["retrieval_to_visible_yield"].value == 0.5
     assert metrics["behavior_correct_rate_live_memory_count_2"].value == 1.0
+    assert metrics["behavioral_use_probe_coverage"].value == 1.0
+    assert metrics["probed_memory_causal_use_rate"].value == 1.0
+    assert metrics["model_visible_behavioral_use_lower_bound"].value == 1.0
 
 
 def test_cell_groups_and_scorecard_do_not_mix_native_and_common() -> None:
@@ -109,3 +114,45 @@ def test_cell_groups_and_scorecard_do_not_mix_native_and_common() -> None:
     assert {item["status"] for item in scorecard} == {"complete"}
     assert {item["baseline_stability_rate"] for item in scorecard} == {1.0}
     assert {item["unstable_intervention_rate"] for item in scorecard} == {0.0}
+
+
+def test_drift_rates_use_category_eligible_denominators() -> None:
+    rows = (
+        MultisystemMetricInput(
+            policy_profile_id="policy-a",
+            condition="mem0",
+            readout="native",
+            result_id="r",
+            behavior_score=0.0,
+            is_correct=False,
+            drift_flags=("stale_state",),
+            drift_eligible_categories=("stale_state",),
+        ),
+        MultisystemMetricInput(
+            policy_profile_id="policy-a",
+            condition="mem0",
+            readout="native",
+            result_id="r",
+            behavior_score=1.0,
+            is_correct=True,
+            drift_eligible_categories=("constraint_loss",),
+        ),
+        MultisystemMetricInput(
+            policy_profile_id="policy-a",
+            condition="mem0",
+            readout="native",
+            result_id="r",
+            behavior_score=1.0,
+            is_correct=True,
+            drift_eligible_categories=(),
+        ),
+    )
+    metrics = compute_multisystem_metrics(rows)
+    assert metrics["stale_state_action_rate"].value == 1.0
+    assert metrics["stale_state_action_rate"].denominator == 1
+    assert metrics["constraint_loss_rate"].value == 0.0
+    assert metrics["constraint_loss_rate"].denominator == 1
+    assert metrics["aggregate_drift_rate"].denominator == 2
+    scorecard = compute_multisystem_scorecard(rows)[0]
+    assert scorecard["stale_state_eligible_n"] == 1
+    assert scorecard["aggregate_drift_eligible_n"] == 2

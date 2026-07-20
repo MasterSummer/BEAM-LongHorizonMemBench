@@ -341,3 +341,78 @@ def test_flat_prefix_readout_is_reused_without_memory_runtime(tmp_path) -> None:
         for item in row.interventions
         if item.intervention_kind == "leave_one_out"
     )
+    for row in result.sceu_results:
+        assert row.backend_retrieved_memory_ids == row.candidate_memory_ids
+        assert row.selected_memory_ids == row.retrieved_memory_ids
+        assert set(row.model_visible_memory_ids).issubset(row.selected_memory_ids)
+        neutral = [
+            item
+            for item in row.interventions
+            if item.intervention_kind == "neutral_replacement"
+        ]
+        for item in neutral:
+            assert item.baseline_memory_count == item.intervention_memory_count
+            assert item.count_contrast == "replace_one"
+            assert (
+                item.evaluations[0].visible_object_chars
+                == row.baseline_evaluations[0].visible_object_chars
+            )
+
+
+def test_drift_eligibility_and_invariant_state_pairs_are_explicit(tmp_path) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=16)
+    preparation_task_id = "prepare-flat-drift"
+    task = PreparationTask(
+        task_index=0,
+        task_id=preparation_task_id,
+        episode_id=spec.plan.episode_id,
+        backend="flat_retrieval",
+        profile_id="flat_controlled",
+        run_identity="1" * 64,
+        config_hash="2" * 64,
+        task_payload_hash=canonical_hash(
+            {
+                "stage": "prepare_prefix",
+                "task_index": 0,
+                "task_id": preparation_task_id,
+                "episode_id": spec.plan.episode_id,
+                "backend": "flat_retrieval",
+                "profile_id": "flat_controlled",
+                "run_identity": "1" * 64,
+                "config_hash": "2" * 64,
+            }
+        ),
+    )
+    artifact = prepare_prefix(
+        task,
+        spec,
+        _Runtime(spec),
+        _Reranker(),
+        QualificationStorage(tmp_path / "run", run_identity="1" * 64),
+    )
+    evaluated = evaluate_task(
+        _task(
+            spec,
+            "flat_retrieval",
+            "common_rerank",
+            prefix_hash=artifact.artifact_hash,
+        ),
+        spec,
+        artifact,
+        _Policy(),
+        _Checker(),
+    )
+    by_opportunity = {row.opportunity_id: row for row in evaluated.sceu_results}
+    assert "plan_deviation" in (
+        by_opportunity["opp-premature-v2"].drift_eligible_categories or ()
+    )
+    assert "stale_state" in (
+        by_opportunity["opp-stale-v1"].drift_eligible_categories or ()
+    )
+    assert {"constraint_loss", "local_over_global"}.issubset(
+        by_opportunity["opp-local-only"].drift_eligible_categories or ()
+    )
+    assert (
+        by_opportunity["opp-local-valid"].current_state_signature
+        == by_opportunity["opp-local-valid-recheck"].current_state_signature
+    )

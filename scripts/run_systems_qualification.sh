@@ -8,8 +8,8 @@ REPO_ROOT="$(systems_repo_root)"
 DATA_ROOT="${LHMSB_DATA_ROOT:-/data/lhmsb}"
 ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
 RUN_NAME="${LHMSB_RUN_NAME:-systems-qualification}"
-DATASET="${LHMSB_SYSTEM_DATASET:-${DATA_ROOT}/datasets/software_v3}"
-CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only.yaml"
+DATASET="${LHMSB_SYSTEM_DATASET:-${DATA_ROOT}/datasets/software_v4}"
+CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only_aaai.yaml"
 DRY_RUN=0
 FORCE=0
 KEEP_GOING=0
@@ -39,7 +39,7 @@ EOF
 
 while (($#)); do
   case "$1" in
-    --data-root) systems_require_value "$1" "${2:-}" || exit 2; DATA_ROOT="$2"; DATASET="${DATA_ROOT}/datasets/software_v3"; shift 2 ;;
+    --data-root) systems_require_value "$1" "${2:-}" || exit 2; DATA_ROOT="$2"; DATASET="${DATA_ROOT}/datasets/software_v4"; shift 2 ;;
     --env-file) systems_require_value "$1" "${2:-}" || exit 2; ENV_FILE="$2"; shift 2 ;;
     --dataset) systems_require_value "$1" "${2:-}" || exit 2; DATASET="$2"; shift 2 ;;
     --config) systems_require_value "$1" "${2:-}" || exit 2; CONFIG="$2"; shift 2 ;;
@@ -55,6 +55,52 @@ while (($#)); do
 done
 
 RUN_DIR="${DATA_ROOT}/runs/systems/${RUN_NAME}"
+
+prepare_all_prefixes() {
+  local task_file="${RUN_DIR}/preparation_tasks.jsonl"
+  local task_count task_index backend environment prepared
+  [[ -s "${task_file}" ]] || {
+    printf 'missing preparation task matrix: %s\n' "${task_file}" >&2
+    return 1
+  }
+  task_count="$(wc -l < "${task_file}")"
+  [[ "${task_count}" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'invalid preparation task count: %s\n' "${task_count}" >&2
+    return 1
+  }
+  prepared=0
+  while IFS=$'\t' read -r task_index backend; do
+    case "${backend}" in
+      flat_retrieval) environment="core" ;;
+      mem0) environment="mem0" ;;
+      amem) environment="amem" ;;
+      memos) environment="memos" ;;
+      *)
+        printf 'unknown preparation backend at task %s: %s\n' \
+          "${task_index}" "${backend}" >&2
+        return 1
+        ;;
+    esac
+    systems_run_cli "${DATA_ROOT}" "${environment}" prepare-task \
+      --run-dir "${RUN_DIR}" --task-index "${task_index}"
+    prepared=$((prepared + 1))
+  done < <(
+    "${DATA_ROOT}/venvs/core/bin/python" -c \
+      'import json, sys
+for index, line in enumerate(open(sys.argv[1], encoding="utf-8")):
+    row = json.loads(line)
+    if row.get("task_index") != index:
+        raise SystemExit("non-contiguous preparation task index: {!r}".format(row.get("task_index")))
+    print("{}\t{}".format(index, row.get("backend", "")))' \
+      "${task_file}"
+  )
+  [[ "${prepared}" -eq "${task_count}" ]] || {
+    printf 'preparation matrix parse mismatch: expected %s, got %s\n' \
+      "${task_count}" "${prepared}" >&2
+    return 1
+  }
+}
+
 if [[ "${DRY_RUN}" == "1" ]]; then
   systems_print_command "${SCRIPT_DIR}/verify_system_runtime.sh" --dry-run --data-root "${DATA_ROOT}"
   systems_print_command systems_start_all_services "${DATA_ROOT}"
@@ -62,11 +108,9 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   [[ "${FORCE}" == "1" ]] && PLAN+=(--force)
   [[ "${ALLOW_DIRTY}" == "1" ]] && PLAN+=(--allow-dirty)
   systems_print_command "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification "${PLAN[@]}"
-  for pair in "core 0" "mem0 1" "amem 2" "memos 3"; do
-    read -r environment task_index <<<"${pair}"
-    systems_print_command "${DATA_ROOT}/venvs/${environment}/bin/python" -m lhmsb.qualification \
-      prepare-task --run-dir "${RUN_DIR}" --task-index "${task_index}"
-  done
+  systems_print_command "${DATA_ROOT}/venvs/{core,mem0,amem,memos}/bin/python" \
+    -m lhmsb.qualification prepare-task --run-dir "${RUN_DIR}" \
+    --task-index '<every row in preparation_tasks.jsonl>'
   systems_print_command "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
     finalize-evaluation-plan --run-dir "${RUN_DIR}"
   if [[ "${PREPARE_ONLY}" == "1" ]]; then
@@ -102,11 +146,7 @@ PLAN=(plan-systems --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}
 [[ "${FORCE}" == "1" ]] && PLAN+=(--force)
 [[ "${ALLOW_DIRTY}" == "1" ]] && PLAN+=(--allow-dirty)
 systems_run_cli "${DATA_ROOT}" core "${PLAN[@]}"
-for pair in "core 0" "mem0 1" "amem 2" "memos 3"; do
-  read -r environment task_index <<<"${pair}"
-  systems_run_cli "${DATA_ROOT}" "${environment}" prepare-task \
-    --run-dir "${RUN_DIR}" --task-index "${task_index}"
-done
+prepare_all_prefixes
 systems_run_cli "${DATA_ROOT}" core finalize-evaluation-plan --run-dir "${RUN_DIR}"
 if [[ "${PREPARE_ONLY}" == "1" ]]; then
   exit 0

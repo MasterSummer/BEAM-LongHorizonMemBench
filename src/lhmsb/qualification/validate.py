@@ -144,6 +144,37 @@ def validate_qualification_artifacts(
             f"{key} model_visible_memory_ids",
             errors,
         )
+        backend_retrieved = _string_list(
+            row.get("backend_retrieved_memory_ids", candidates),
+            f"{key} backend_retrieved_memory_ids",
+            errors,
+        )
+        selected = _string_list(
+            row.get("selected_memory_ids", retrieved),
+            f"{key} selected_memory_ids",
+            errors,
+        )
+        behaviorally_used = _string_list(
+            row.get("behaviorally_used_memory_ids", []),
+            f"{key} behaviorally_used_memory_ids",
+            errors,
+        )
+        if not set(backend_retrieved).issubset(candidates):
+            errors.append(
+                f"backend-retrieved memories are not a subset of candidates for {key}"
+            )
+        if not set(selected).issubset(backend_retrieved):
+            errors.append(
+                f"selected memories are not a subset of backend retrieval for {key}"
+            )
+        if not set(visible).issubset(selected):
+            errors.append(
+                f"model-visible memories are not a subset of selection for {key}"
+            )
+        if not set(behaviorally_used).issubset(visible):
+            errors.append(
+                f"behaviorally-used memories are not model-visible for {key}"
+            )
         if not set(retrieved).issubset(candidates):
             errors.append(
                 f"retrieved memories are not a subset of candidates for {key}"

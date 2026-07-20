@@ -15,6 +15,7 @@ from typing import Any
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.qualification.metrics import (
+    MultisystemMetricInput,
     StateCheckpointMetricInput,
     UsageMetricInput,
     _artifact_attributions,
@@ -32,6 +33,10 @@ from lhmsb.qualification.runner import (
     QualificationTaskResult,
     RetrievalTrace,
     SCEURunResult,
+)
+from lhmsb.qualification.statistics import (
+    compute_episode_cluster_statistics,
+    statistics_markdown,
 )
 
 REPORT_SCHEMA_VERSION = 2
@@ -53,6 +58,8 @@ REQUIRED_REPORT_ARTIFACTS: tuple[str, ...] = (
     "summary.json",
     "scorecard.csv",
     "scorecard.md",
+    "statistics.json",
+    "statistics.md",
     "validation.json",
 )
 _JSONL_ARTIFACTS = (
@@ -83,11 +90,19 @@ _SCORECARD_FIELDS = (
     "beneficial_intervention_rate",
     "harmful_intervention_rate",
     "unstable_intervention_rate",
+    "sham_replacement_action_flip_rate",
+    "behavioral_use_probe_coverage",
+    "probed_memory_causal_use_rate",
     "constraint_loss_rate",
+    "constraint_loss_eligible_n",
     "current_plan_deviation_rate",
+    "plan_deviation_eligible_n",
     "stale_state_action_rate",
+    "stale_state_eligible_n",
     "local_over_global_rate",
+    "local_over_global_eligible_n",
     "aggregate_drift_rate",
+    "aggregate_drift_eligible_n",
     "memory_count_contrast_rate",
     "memory_count_behavior_change_rate",
 )
@@ -166,6 +181,16 @@ def write_qualification_report(
         metrics = compute_qualification_metrics(matrix, specs)
         metrics_by_cell = ()
         scorecard_rows = _scorecard_rows(matrix)
+        observations = ()
+    episode_observations = (
+        observations
+        if observations
+        else multisystem_observations_from_results(
+            matrix,
+            specs,
+            prefix_artifacts=prefix_artifacts,
+        )
+    )
     _atomic_write(
         output_directory / "metrics.json",
         _json_bytes(metrics.to_dict()),
@@ -195,6 +220,20 @@ def write_qualification_report(
         output_directory / "scorecard.md",
         _scorecard_markdown(scorecard_rows).encode("utf-8"),
     )
+    statistics_payload = compute_episode_cluster_statistics(observations)
+    _atomic_write(
+        output_directory / "statistics.json",
+        _json_bytes(statistics_payload),
+    )
+    _atomic_write(
+        output_directory / "statistics.md",
+        statistics_markdown(statistics_payload).encode("utf-8"),
+    )
+    episode_artifacts = _write_episode_reports(
+        output_directory,
+        episode_observations,
+        matrix=matrix,
+    )
     _atomic_write(
         output_directory / "validation.json",
         _json_bytes(
@@ -206,10 +245,12 @@ def write_qualification_report(
         ),
     )
 
+    artifact_names = tuple(
+        name for name in REQUIRED_REPORT_ARTIFACTS if name != "run_manifest.json"
+    ) + episode_artifacts
     artifact_hashes = tuple(
         (name, _sha256_file(output_directory / name))
-        for name in REQUIRED_REPORT_ARTIFACTS
-        if name != "run_manifest.json"
+        for name in sorted(artifact_names)
     )
     metadata = dict(run_metadata or {})
     for reserved in (
@@ -231,6 +272,95 @@ def write_qualification_report(
         artifact_hashes=artifact_hashes,
         manifest_sha256=_sha256_file(manifest_path),
     )
+
+
+def _write_episode_reports(
+    output_directory: Path,
+    observations: Sequence[MultisystemMetricInput],
+    *,
+    matrix: QualificationMatrixResult,
+) -> tuple[str, ...]:
+    """Write descriptive, independently auditable reports for every episode."""
+    grouped: dict[str, list[MultisystemMetricInput]] = defaultdict(list)
+    for observation in observations:
+        if observation.episode_id:
+            grouped[observation.episode_id].append(observation)
+    root = output_directory / "episodes"
+    root.mkdir(parents=True, exist_ok=True)
+    artifacts: list[str] = []
+    index: list[dict[str, object]] = []
+    for episode_id in sorted(grouped):
+        episode_rows = tuple(grouped[episode_id])
+        directory_name = _episode_directory_name(episode_id)
+        episode_root = root / directory_name
+        episode_root.mkdir(parents=True, exist_ok=True)
+        metrics = compute_multisystem_metrics(episode_rows)
+        metrics_by_cell = compute_multisystem_metrics_by_cell(episode_rows)
+        scorecard = list(compute_multisystem_scorecard(episode_rows))
+        statuses = tuple(row.status for row in episode_rows)
+        summary = {
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "episode_id": episode_id,
+            "analysis_scope": "single_episode_descriptive",
+            "n_sceu": len(episode_rows),
+            "n_tasks": sum(
+                str(getattr(task, "episode_id", "")) == episode_id
+                for task in matrix.task_results
+            ),
+            "status": _aggregate_status(statuses),
+            "conditions": sorted({row.condition for row in episode_rows}),
+            "readouts": sorted({row.readout for row in episode_rows}),
+            "note": (
+                "Inferential statistics are reported only at aggregate episode level; "
+                "this file is descriptive and audit-oriented."
+            ),
+        }
+        payloads = {
+            "metrics.json": _json_bytes(metrics.to_dict()),
+            "metrics_by_cell.json": _json_bytes(
+                {
+                    "schema_version": REPORT_SCHEMA_VERSION,
+                    "groups": list(metrics_by_cell),
+                }
+            ),
+            "scorecard.csv": _scorecard_csv(scorecard).encode("utf-8"),
+            "scorecard.md": _scorecard_markdown(scorecard).encode("utf-8"),
+            "summary.json": _json_bytes(summary),
+        }
+        for name, payload in payloads.items():
+            path = episode_root / name
+            _atomic_write(path, payload)
+            artifacts.append(path.relative_to(output_directory).as_posix())
+        index.append(
+            {
+                "episode_id": episode_id,
+                "directory": f"episodes/{directory_name}",
+                "n_sceu": len(episode_rows),
+                "status": summary["status"],
+            }
+        )
+    index_path = root / "index.json"
+    _atomic_write(
+        index_path,
+        _json_bytes(
+            {
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "episode_count": len(index),
+                "episodes": index,
+            }
+        ),
+    )
+    artifacts.append(index_path.relative_to(output_directory).as_posix())
+    return tuple(sorted(artifacts))
+
+
+def _episode_directory_name(episode_id: str) -> str:
+    slug = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "-"
+        for character in episode_id
+    ).strip("-")
+    digest = hashlib.sha256(episode_id.encode("utf-8")).hexdigest()[:8]
+    return f"{slug or 'episode'}--{digest}"
 
 
 def _flatten_rows(
@@ -482,6 +612,26 @@ def _flatten_rows(
                             "query": "",
                             "query_hash": "",
                             "candidate_memory_ids": list(row.candidate_memory_ids),
+                            "backend_retrieved_memory_ids": list(
+                                getattr(
+                                    row,
+                                    "backend_retrieved_memory_ids",
+                                    row.candidate_memory_ids,
+                                )
+                            ),
+                            "selected_memory_ids": list(
+                                getattr(
+                                    row,
+                                    "selected_memory_ids",
+                                    row.retrieved_memory_ids,
+                                )
+                            ),
+                            "model_visible_memory_ids": list(
+                                row.model_visible_memory_ids
+                            ),
+                            "behaviorally_used_memory_ids": list(
+                                getattr(row, "behaviorally_used_memory_ids", ())
+                            ),
                             "native_retrieved_memory_ids": list(
                                 row.retrieved_memory_ids
                                 if condition.readout == "native"
@@ -1128,6 +1278,22 @@ def _scorecard_rows(
                         for label in intervention_labels
                     ),
                     len(intervention_labels),
+                ),
+                "sham_replacement_action_flip_rate": _ratio_value(
+                    sum(
+                        bool(getattr(item.classification, "action_changed", False))
+                        for row in rows
+                        for item in row.interventions
+                        if getattr(item, "intervention_kind", "")
+                        == "sham_replacement"
+                    ),
+                    sum(
+                        1
+                        for row in rows
+                        for item in row.interventions
+                        if getattr(item, "intervention_kind", "")
+                        == "sham_replacement"
+                    ),
                 ),
                 "constraint_loss_rate": _flag_rate(
                     drift_flags,

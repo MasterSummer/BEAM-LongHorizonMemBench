@@ -26,6 +26,8 @@ MEM0_STATEFUL_GENERATOR_VERSION = "software-project-mem0-vertical-0.2"
 MEM0_STATEFUL_RELEASE_ID = "software-vertical-mem0-v0.2.0"
 MEM0_STATEFUL_GENERATOR_VERSION_V3 = "software-project-mem0-vertical-0.3"
 MEM0_STATEFUL_RELEASE_ID_V3 = "software-vertical-mem0-v0.3.0"
+MEM0_STATEFUL_GENERATOR_VERSION_V4 = "software-project-mem0-vertical-0.4"
+MEM0_STATEFUL_RELEASE_ID_V4 = "software-vertical-mem0-v0.4.0"
 _RELEASE_TIMESTAMP = "2026-07-16T00:00:00Z"
 
 
@@ -417,6 +419,14 @@ def _audit_spec(spec: SoftwareMem0VerticalSpec) -> None:
         policy,
     )
     variant = spec.plan.metadata_dict["recoverability_variant"]
+    state_by_id = {state.state_id: state for state in spec.plan.state_units}
+    constraint_value = state_by_id["C1"].value
+    if not isinstance(constraint_value, Mapping):
+        raise Mem0StatefulDatasetError("C1 must expose a structured text value")
+    constraint_text = constraint_value.get("text")
+    if not isinstance(constraint_text, str) or not constraint_text.strip():
+        raise Mem0StatefulDatasetError("C1 must expose non-empty constraint text")
+    normalized_constraint = constraint_text.strip().casefold()
     for latent, public in zip(spec.plan.workspaces, spec.plan.sessions, strict=True):
         declared = latent.recoverability["C1"]
         if declared != variant:
@@ -424,12 +434,12 @@ def _audit_spec(spec: SoftwareMem0VerticalSpec) -> None:
                 f"C1 recoverability mismatch in session {latent.checkpoint_session}"
             )
         text = "\n".join(artifact.content for artifact in public.workspace.artifacts).casefold()
-        if variant == "explicit" and not ("offline" in text and "cloud services" in text):
+        if variant == "explicit" and normalized_constraint not in text:
             raise Mem0StatefulDatasetError("explicit C1 workspace does not state the constraint")
         if variant == "derivable" and "network_access = false" not in text:
             raise Mem0StatefulDatasetError("derivable C1 workspace lacks the configured evidence")
-        if variant == "absent" and any(
-            phrase in text for phrase in ("offline", "do not call cloud", "network_access")
+        if variant == "absent" and (
+            normalized_constraint in text or "network_access = false" in text
         ):
             raise Mem0StatefulDatasetError("absent C1 workspace still exposes the constraint")
 
@@ -455,10 +465,11 @@ def _release_for_generation(
 ) -> tuple[str, str]:
     """Select the release contract without changing legacy CI fixtures.
 
-    Full 16-session trajectories and the 30-episode pilot use the v0.3
-    contract.  Small 4-session CI fixtures retain the v0.2 identifiers so
-    existing compatibility tests and archived artifacts remain readable.
+    The 50-episode diversified release uses v0.4.  Earlier 16-session and
+    30-episode pilots retain v0.3, while small CI fixtures retain v0.2.
     """
+    if n_episodes >= 50:
+        return MEM0_STATEFUL_RELEASE_ID_V4, MEM0_STATEFUL_GENERATOR_VERSION_V4
     if n_sessions >= 16 or n_episodes >= 30:
         return MEM0_STATEFUL_RELEASE_ID_V3, MEM0_STATEFUL_GENERATOR_VERSION_V3
     return MEM0_STATEFUL_RELEASE_ID, MEM0_STATEFUL_GENERATOR_VERSION
@@ -577,8 +588,10 @@ def _str_dict(value: object) -> dict[str, str]:
 __all__ = [
     "MEM0_STATEFUL_GENERATOR_VERSION",
     "MEM0_STATEFUL_GENERATOR_VERSION_V3",
+    "MEM0_STATEFUL_GENERATOR_VERSION_V4",
     "MEM0_STATEFUL_RELEASE_ID",
     "MEM0_STATEFUL_RELEASE_ID_V3",
+    "MEM0_STATEFUL_RELEASE_ID_V4",
     "MEM0_STATEFUL_SCHEMA_VERSION",
     "Mem0StatefulDatasetError",
     "Mem0StatefulGenerated",

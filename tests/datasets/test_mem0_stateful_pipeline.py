@@ -9,7 +9,9 @@ from lhmsb.datasets.cli import main
 from lhmsb.datasets.mem0_stateful_pipeline import (
     MEM0_STATEFUL_GENERATOR_VERSION,
     MEM0_STATEFUL_GENERATOR_VERSION_V3,
+    MEM0_STATEFUL_GENERATOR_VERSION_V4,
     MEM0_STATEFUL_RELEASE_ID_V3,
+    MEM0_STATEFUL_RELEASE_ID_V4,
     build_mem0_release_archive,
     freeze_mem0_stateful,
     generate_mem0_stateful_to_staging,
@@ -96,6 +98,25 @@ def test_full_horizon_smoke_uses_v03_release_contract(tmp_path: Path) -> None:
 
     assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V3
     assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V3
+
+
+def test_fifty_episode_release_passes_all_audits_and_uses_v04(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    frozen = tmp_path / "frozen"
+    generated = generate_mem0_stateful_to_staging(
+        stage,
+        seeds=range(50),
+        n_sessions=16,
+    )
+    manifest = freeze_mem0_stateful(stage, frozen)
+
+    assert len(generated) == 50
+    assert len({item.plan_hash for item in generated}) == 50
+    assert len({item.surface_hash for item in generated}) == 50
+    assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V4
+    assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V4
+    assert verify_mem0_stateful(frozen).ok
+    assert regen_check_mem0_stateful(frozen).ok
 
 
 def test_verify_detects_public_tampering(tmp_path: Path) -> None:

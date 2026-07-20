@@ -213,3 +213,23 @@ def test_matched_early_late_pair_detects_behavioral_decay() -> None:
     assert result.score_delta == -0.75
     assert result.action_changed
     assert result.drift_emerged
+
+
+def test_count_preserving_intervention_kinds_are_supported() -> None:
+    baseline = (
+        _outcome("safe_v2_offline", 1.0, correct=True),
+        _outcome("safe_v2_offline", 1.0, correct=True),
+    )
+    changed = (
+        _outcome("stale_v1", 0.0, correct=False),
+        _outcome("stale_v1", 0.0, correct=False),
+    )
+    result = classify_causal_use(
+        memory_id="m1",
+        intervention_kind="neutral_replacement",
+        memory_role="supports_current_state",
+        baseline=baseline,
+        intervention=changed,
+    )
+    assert result.behaviorally_used
+    assert result.label == "beneficial"

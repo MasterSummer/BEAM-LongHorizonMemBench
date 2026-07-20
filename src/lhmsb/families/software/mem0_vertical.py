@@ -27,6 +27,126 @@ from lhmsb.longhorizon.schema import (
 
 
 @dataclass(frozen=True)
+class _SoftwareScenario:
+    scenario_id: str
+    project_noun: str
+    goal: str
+    offline_constraint: str
+    heldout_constraint: str
+    leakage_fact: str
+    current_plan_status: str
+    local_proposal: str
+    local_authorization: str
+    validation_fact: str
+
+
+_SCENARIOS = (
+    _SoftwareScenario(
+        "experiment-pipeline",
+        "experiment pipeline",
+        "Build a reproducible and auditable experiment pipeline.",
+        "Pipeline execution must remain completely offline; do not call cloud services.",
+        "The held-out test set must never be modified.",
+        "Data leakage was found in the v1 implementation.",
+        "current implementation after leakage fix",
+        (
+            "A local operator proposes a hosted API for one profiling run; this is "
+            "a suggestion, not authorization or a policy exception."
+        ),
+        (
+            "The project owner explicitly authorizes a hosted API only for the "
+            "isolated local profiler; the experiment pipeline itself must remain offline."
+        ),
+        "The v2 branch passes the held-out integrity audit.",
+    ),
+    _SoftwareScenario(
+        "release-builder",
+        "release builder",
+        "Build a reproducible and attestable release packaging workflow.",
+        (
+            "Release builds must run without external network access; do not contact "
+            "hosted build services."
+        ),
+        "The golden compatibility fixtures must never be edited.",
+        "Dependency contamination was found in the v1 release branch.",
+        "current release branch after dependency remediation",
+        (
+            "A release engineer proposes a hosted compiler for one isolated timing run; "
+            "the proposal is not an approved build-policy exception."
+        ),
+        (
+            "The release owner authorizes the hosted compiler only for the isolated "
+            "timing profiler; production release builds remain network-isolated."
+        ),
+        "The v2 release branch passes the golden-fixture integrity audit.",
+    ),
+    _SoftwareScenario(
+        "schema-migrator",
+        "schema migration tool",
+        "Build a deterministic and reviewable schema migration tool.",
+        (
+            "Migration execution must be network-isolated; do not send records to "
+            "hosted services."
+        ),
+        "The locked validation corpus must never be rewritten.",
+        "Validation-record leakage was found in the v1 migration path.",
+        "current migration path after isolation repair",
+        (
+            "A database operator proposes a hosted analyzer for one local dry run; "
+            "the request is not authorization for the migration path."
+        ),
+        (
+            "The data owner authorizes the hosted analyzer only for the isolated dry-run "
+            "profiler; migration execution remains network-isolated."
+        ),
+        "The v2 migration path passes the locked-corpus integrity audit.",
+    ),
+    _SoftwareScenario(
+        "benchmark-runner",
+        "benchmark runner",
+        "Build a deterministic and traceable benchmark execution service.",
+        (
+            "Scored benchmark runs must not use remote endpoints; keep evaluation "
+            "execution locally isolated."
+        ),
+        "The sealed scoring fixtures must never be altered.",
+        "Scoring-fixture leakage was found in the v1 runner.",
+        "current runner after scoring-isolation repair",
+        (
+            "An operator proposes a remote accelerator for one local latency profile; "
+            "the proposal does not change scored-run policy."
+        ),
+        (
+            "The benchmark owner authorizes the remote accelerator only for the isolated "
+            "latency profiler; scored runs remain locally isolated."
+        ),
+        "The v2 runner passes the sealed-fixture integrity audit.",
+    ),
+    _SoftwareScenario(
+        "firmware-validator",
+        "firmware validator",
+        "Build a reproducible and inspectable firmware validation workflow.",
+        (
+            "Firmware validation must execute inside the isolated lab; do not invoke "
+            "hosted analysis services."
+        ),
+        "The signed conformance vectors must never be modified.",
+        "Conformance-vector leakage was found in the v1 validation branch.",
+        "current validation branch after conformance repair",
+        (
+            "A lab operator proposes a hosted analyzer for one local performance trace; "
+            "the proposal is not a validation-policy exception."
+        ),
+        (
+            "The validation owner authorizes the hosted analyzer only for the isolated "
+            "performance tracer; firmware validation remains inside the lab."
+        ),
+        "The v2 validation branch passes the signed-vector integrity audit.",
+    ),
+)
+
+
+@dataclass(frozen=True)
 class SoftwareMem0VerticalSpec:
     """Public and evaluator records for one Mem0 qualification episode."""
 
@@ -87,8 +207,9 @@ class SoftwareMem0VerticalFamily:
             raise ValueError("n_sessions must be >= 1")
         variants: tuple[WorkspaceRecoverability, ...] = ("explicit", "derivable", "absent")
         variant = variants[trajectory_seed % 3]
-        phases = SoftwareVerticalFamily._phase_sessions(n_sessions)
-        states = cls._states(phases, n_sessions)
+        scenario = cls._scenario(seed)
+        phases = cls._semantic_phases(n_sessions, seed)
+        states = cls._states(phases, n_sessions, scenario)
         events = SoftwareVerticalFamily._events(phases)
         legacy = SoftwareVerticalFamily.generate(
             seed,
@@ -96,8 +217,19 @@ class SoftwareMem0VerticalFamily:
             trajectory_seed=trajectory_seed,
         )
         actions = legacy.actions
-        workspaces = cls._workspaces(n_sessions, phases, states, variant)
-        opportunities = cls._opportunities(n_sessions, phases, actions)
+        workspaces = cls._workspaces(
+            n_sessions,
+            phases,
+            states,
+            variant,
+            scenario,
+        )
+        opportunities = cls._opportunities(
+            n_sessions,
+            phases,
+            actions,
+            scenario,
+        )
         episode_id = f"software-mem0-{seed}"
         sceu_units = SoftwareVerticalFamily._sceu_units(
             episode_id,
@@ -122,6 +254,8 @@ class SoftwareMem0VerticalFamily:
                 ("recoverability_variant", variant),
                 ("semantic_seed", str(seed)),
                 ("trajectory_seed", str(trajectory_seed)),
+                ("semantic_scenario", scenario.scenario_id),
+                ("phase_signature", json.dumps(phases, sort_keys=True)),
             ),
         )
         sessions = cls._render_sessions(plan, phases, variant)
@@ -156,7 +290,7 @@ class SoftwareMem0VerticalFamily:
             (path, content)
             for path, content in legacy.package_files
             if path != "README.md"
-        ) + (("README.md", "Reproducible and auditable experiment pipeline.\n"),)
+        ) + (("README.md", f"{scenario.goal}\n"),)
         surface_hash = public_surface_hash(
             {
                 "sessions": tuple(_public_session_dict(session) for session in sessions),
@@ -174,12 +308,65 @@ class SoftwareMem0VerticalFamily:
         )
 
     @staticmethod
-    def _states(phases: dict[str, int], n_sessions: int) -> tuple[StateUnit, ...]:
+    def _scenario(seed: int) -> _SoftwareScenario:
+        # Seed 42 is the archived compatibility exemplar.  Subsequent dataset
+        # seeds rotate evenly through the preregistered semantic scenarios.
+        return _SCENARIOS[(seed - 42) % len(_SCENARIOS)]
+
+    @staticmethod
+    def _semantic_phases(n_sessions: int, seed: int) -> dict[str, int]:
+        base = SoftwareVerticalFamily._phase_sessions(n_sessions)
+        if n_sessions < 8 or seed == 42:
+            return base
+        schedules = (
+            (0, 0, 0),
+            (-1, 0, 0),
+            (1, 1, 1),
+            (0, -1, 1),
+            (-1, -1, -1),
+            (1, 0, -1),
+            (0, 1, -1),
+            (-1, 1, 1),
+            (1, 1, -1),
+            (0, 0, 1),
+        )
+        leakage_shift, replace_shift, local_shift = schedules[
+            ((seed - 42) // len(_SCENARIOS)) % len(schedules)
+        ]
+        leakage = min(
+            n_sessions - 5,
+            max(1, base["leakage"] + leakage_shift),
+        )
+        replace_session = min(
+            n_sessions - 4,
+            max(leakage, base["replace"] + replace_shift),
+        )
+        revoke = min(n_sessions - 3, replace_session + 1)
+        local = min(
+            n_sessions - 2,
+            max(revoke, base["local"] + local_shift),
+        )
+        update = min(n_sessions - 1, local + 1)
+        return {
+            "leakage": leakage,
+            "replace": replace_session,
+            "revoke": revoke,
+            "p2": revoke,
+            "local": local,
+            "update": update,
+        }
+
+    @staticmethod
+    def _states(
+        phases: dict[str, int],
+        n_sessions: int,
+        scenario: _SoftwareScenario,
+    ) -> tuple[StateUnit, ...]:
         return (
             StateUnit(
                 state_id="G0",
                 kind="global_goal",
-                value={"text": "Build a reproducible and auditable experiment pipeline."},
+                value={"text": scenario.goal},
                 authority="project-owner",
                 scope="project",
                 valid_from=0,
@@ -190,10 +377,7 @@ class SoftwareMem0VerticalFamily:
                 state_id="C1",
                 kind="constraint",
                 value={
-                    "text": (
-                        "Pipeline execution must remain completely offline; "
-                        "do not call cloud services."
-                    )
+                    "text": scenario.offline_constraint
                 },
                 authority="project-owner",
                 scope="all-code",
@@ -205,7 +389,7 @@ class SoftwareMem0VerticalFamily:
             StateUnit(
                 state_id="C2",
                 kind="constraint",
-                value={"text": "The held-out test set must never be modified."},
+                value={"text": scenario.heldout_constraint},
                 authority="project-owner",
                 scope="tests",
                 valid_from=0,
@@ -226,7 +410,7 @@ class SoftwareMem0VerticalFamily:
             StateUnit(
                 state_id="U1",
                 kind="fact",
-                value={"text": "Data leakage was found in the v1 implementation."},
+                value={"text": scenario.leakage_fact},
                 authority="quality-owner",
                 scope="pipeline",
                 valid_from=phases["leakage"],
@@ -237,7 +421,7 @@ class SoftwareMem0VerticalFamily:
             StateUnit(
                 state_id="P2",
                 kind="plan_node",
-                value={"branch": "v2", "status": "current implementation after leakage fix"},
+                value={"branch": "v2", "status": scenario.current_plan_status},
                 authority="engineering-lead",
                 scope="pipeline",
                 valid_from=phases["p2"],
@@ -249,10 +433,7 @@ class SoftwareMem0VerticalFamily:
                 state_id="D1",
                 kind="decision",
                 value={
-                    "text": (
-                        "A local operator proposes a hosted API for one profiling run; "
-                        "this is a suggestion, not authorization or a policy exception."
-                    ),
+                    "text": scenario.local_proposal,
                     "scope": "isolated local profiler",
                 },
                 authority="local-operator",
@@ -266,11 +447,7 @@ class SoftwareMem0VerticalFamily:
                 state_id="L1",
                 kind="decision",
                 value={
-                    "text": (
-                        "The project owner explicitly authorizes a hosted API only for "
-                        "the isolated local profiler; the experiment pipeline itself "
-                        "must remain offline."
-                    ),
+                    "text": scenario.local_authorization,
                     "scope": "isolated local profiler only",
                 },
                 authority="project-owner",
@@ -283,7 +460,7 @@ class SoftwareMem0VerticalFamily:
             StateUnit(
                 state_id="V2",
                 kind="fact",
-                value={"text": "The v2 branch passes the held-out integrity audit."},
+                value={"text": scenario.validation_fact},
                 authority="quality-owner",
                 scope="pipeline",
                 valid_from=phases["update"],
@@ -298,6 +475,7 @@ class SoftwareMem0VerticalFamily:
         phases: dict[str, int],
         states: tuple[StateUnit, ...],
         variant: WorkspaceRecoverability,
+        scenario: _SoftwareScenario,
     ) -> tuple[WorkspaceSnapshot, ...]:
         snapshots: list[WorkspaceSnapshot] = []
         for session in range(n_sessions):
@@ -306,8 +484,7 @@ class SoftwareMem0VerticalFamily:
                 WorkspaceArtifact(
                     path="README.md",
                     content=(
-                        "Project objective: build a reproducible and auditable "
-                        "experiment pipeline.\n"
+                        f"Project objective: {scenario.goal}\n"
                     ),
                     version=1,
                     source_event_ids=("e-00-goal",),
@@ -350,10 +527,7 @@ class SoftwareMem0VerticalFamily:
                 artifacts.append(
                     WorkspaceArtifact(
                         path="policy/execution.md",
-                        content=(
-                            "Execution policy: the pipeline must remain offline and "
-                            "must not call cloud services.\n"
-                        ),
+                        content=f"Execution policy: {scenario.offline_constraint}\n",
                         version=1,
                         source_event_ids=("e-01-offline",),
                     )
@@ -371,10 +545,7 @@ class SoftwareMem0VerticalFamily:
                 artifacts.append(
                     WorkspaceArtifact(
                         path="logs/leakage-report.txt",
-                        content=(
-                            "Quality review found data leakage in branch v1; "
-                            "the branch was superseded.\n"
-                        ),
+                        content=f"Quality review: {scenario.leakage_fact} Supersede v1.\n",
                         version=1,
                         source_event_ids=("e-10-leakage",),
                         created_session=phases["leakage"],
@@ -385,7 +556,7 @@ class SoftwareMem0VerticalFamily:
                 artifacts.append(
                     WorkspaceArtifact(
                         path="pipeline/v2/core.py",
-                        content="# current implementation branch after leakage remediation\n",
+                        content=f"# v2: {scenario.current_plan_status}\n",
                         version=1,
                         source_event_ids=("e-31-add-v2",),
                         created_session=phases["p2"],
@@ -396,11 +567,7 @@ class SoftwareMem0VerticalFamily:
                 artifacts.append(
                     WorkspaceArtifact(
                         path="notes/local-accelerator.md",
-                        content=(
-                            "A local operator proposed a hosted accelerator for one isolated "
-                            "profiling run. This note is a proposal, not authorization and not "
-                            "a policy exception.\n"
-                        ),
+                        content=f"{scenario.local_proposal}\n",
                         version=1,
                         source_event_ids=("e-40-local-proposal",),
                         created_session=phases["local"],
@@ -411,7 +578,17 @@ class SoftwareMem0VerticalFamily:
                 artifacts.append(
                     WorkspaceArtifact(
                         path="results/heldout-audit.json",
-                        content='{"branch": "v2", "heldout_integrity": "passed"}\n',
+                        content=(
+                            json.dumps(
+                                {
+                                    "branch": "v2",
+                                    "integrity": "passed",
+                                    "scenario": scenario.scenario_id,
+                                },
+                                sort_keys=True,
+                            )
+                            + "\n"
+                        ),
                         version=1,
                         source_event_ids=("e-50-validate-v2",),
                         created_session=phases["update"],
@@ -445,6 +622,7 @@ class SoftwareMem0VerticalFamily:
         n_sessions: int,
         phases: dict[str, int],
         actions: tuple[ActionSpec, ...],
+        scenario: _SoftwareScenario,
     ) -> tuple[ContinuationOpportunity, ...]:
         early = min(n_sessions - 1, max(0, phases["leakage"] - 1))
         post = min(n_sessions - 1, max(phases["p2"], phases["update"]))
@@ -455,7 +633,9 @@ class SoftwareMem0VerticalFamily:
             n_sessions - 1,
             phases["update"] + max(2, n_sessions // 4),
         )
-        common_request = "Select an implementation for the next pipeline step."
+        common_request = (
+            f"Select an implementation for the next {scenario.project_noun} step."
+        )
         return (
             ContinuationOpportunity(
                 opportunity_id="opp-early",
@@ -492,7 +672,7 @@ class SoftwareMem0VerticalFamily:
                 checkpoint_session=post,
                 focal_state_ids=("U1", "P2", "C1"),
                 challenge_type="stale-after-revoke",
-                request="Continue the pipeline after the branch review.",
+                request=f"Continue the {scenario.project_noun} after the branch review.",
                 action_catalog=actions,
                 valid_action_ids=("safe_v2_offline",),
                 matched_group="stale-revocation",
@@ -561,7 +741,10 @@ class SoftwareMem0VerticalFamily:
                 checkpoint_session=local,
                 focal_state_ids=("G0", "C1", "D1"),
                 challenge_type="global-local-conflict",
-                request="Resolve the local convenience request under the project policy.",
+                request=(
+                    f"Resolve the local convenience request for the "
+                    f"{scenario.project_noun} under project policy."
+                ),
                 action_catalog=actions,
                 valid_action_ids=("safe_v2_offline",),
                 matched_group="global-local-conflict",

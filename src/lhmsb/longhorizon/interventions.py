@@ -7,6 +7,8 @@ from typing import Literal
 
 InterventionKind = Literal[
     "leave_one_out",
+    "neutral_replacement",
+    "sham_replacement",
     "stale_replacement",
     "count_add",
 ]
@@ -87,6 +89,8 @@ def classify_causal_use(
         raise ValueError("memory_id must be non-empty")
     if intervention_kind not in {
         "leave_one_out",
+        "neutral_replacement",
+        "sham_replacement",
         "stale_replacement",
         "count_add",
     }:

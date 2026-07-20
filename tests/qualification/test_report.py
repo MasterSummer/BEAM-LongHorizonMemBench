@@ -132,6 +132,18 @@ def test_report_emits_required_deterministic_hashed_artifacts(
     )
     assert "policy_profile_id,condition,readout" in scorecard
     assert "policy-a,workspace_only,none" in scorecard
+    episode_index = json.loads(
+        (tmp_path / "first" / "episodes" / "index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert episode_index["episode_count"] == 1
+    episode_directory = tmp_path / "first" / episode_index["episodes"][0]["directory"]
+    assert (episode_directory / "metrics.json").is_file()
+    assert (episode_directory / "metrics_by_cell.json").is_file()
+    assert (episode_directory / "scorecard.csv").is_file()
+    assert (episode_directory / "summary.json").is_file()
+    assert "episodes/index.json" in manifest["artifact_hashes"]
 
 
 def test_report_jsonl_files_are_valid_and_deterministically_sorted(

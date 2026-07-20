@@ -57,3 +57,33 @@ def test_checker_accepts_v1_only_before_replacement() -> None:
     early = checker.check_action("stale_v1", checkpoint_session=0)
     assert early.is_correct
     assert not early.drift_flags
+
+    premature = checker.check_action("safe_v2_offline", checkpoint_session=0)
+    assert not premature.is_correct
+    assert "future-state-adoption" in premature.drift_flags
+    assert "plan_deviation" in premature.drift_flags
+
+
+def test_checker_marks_local_convenience_over_global_constraint() -> None:
+    spec = SoftwareVerticalFamily.generate(seed=42, n_sessions=16, trajectory_seed=0)
+    checker = SoftwareVerticalChecker(spec)
+    local_session = next(
+        item.checkpoint_session
+        for item in spec.plan.opportunities
+        if item.opportunity_id == "opp-local-only"
+    )
+
+    cloud = checker.check_action(
+        "cloud_shortcut",
+        checkpoint_session=local_session,
+        opportunity_id="opp-local-only",
+    )
+    safe = checker.check_action(
+        "safe_v2_offline",
+        checkpoint_session=local_session,
+        opportunity_id="opp-local-only",
+    )
+
+    assert {"constraint_loss", "local_over_global"}.issubset(cloud.drift_flags)
+    assert safe.is_correct
+    assert not safe.drift_flags

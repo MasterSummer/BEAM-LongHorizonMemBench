@@ -93,6 +93,8 @@ class RetrievalMetricInput:
     candidate_shortfall: bool
     retrieval_latency_seconds: float
     rerank_latency_seconds: float | None = None
+    backend_retrieved_memory_state_ids: tuple[tuple[str, ...], ...] = ()
+    selected_memory_state_ids: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -118,6 +120,12 @@ class BehaviorMetricInput:
     count_contrast_count: int = 0
     count_contrast_action_flips: int = 0
     count_contrast_behavior_changes: int = 0
+    sham_replacement_count: int = 0
+    sham_replacement_action_flips: int = 0
+    behaviorally_used_memory_count: int = 0
+    behavioral_use_probe_count: int = 0
+    drift_eligible_categories: tuple[str, ...] | None = None
+    current_state_signature: str = ""
 
 
 @dataclass(frozen=True)
@@ -159,6 +167,15 @@ class MultisystemMetricInput:
     rerank_latency_seconds: float | None = None
     status: str = "complete"
     baseline_stable: bool = True
+    backend_retrieved_memory_state_ids: tuple[tuple[str, ...], ...] = ()
+    selected_memory_state_ids: tuple[tuple[str, ...], ...] = ()
+    behaviorally_used_memory_ids: tuple[str, ...] = ()
+    behavioral_use_probe_count: int = 0
+    sham_replacement_count: int = 0
+    sham_replacement_action_flips: int = 0
+    drift_eligible_categories: tuple[str, ...] | None = None
+    current_state_signature: str = ""
+    episode_id: str = ""
 
     def behavior_input(self) -> BehaviorMetricInput:
         return BehaviorMetricInput(
@@ -181,6 +198,14 @@ class MultisystemMetricInput:
             count_contrast_count=self.count_contrast_count,
             count_contrast_action_flips=self.count_contrast_action_flips,
             count_contrast_behavior_changes=self.count_contrast_behavior_changes,
+            sham_replacement_count=self.sham_replacement_count,
+            sham_replacement_action_flips=self.sham_replacement_action_flips,
+            behaviorally_used_memory_count=len(
+                self.behaviorally_used_memory_ids
+            ),
+            behavioral_use_probe_count=self.behavioral_use_probe_count,
+            drift_eligible_categories=self.drift_eligible_categories,
+            current_state_signature=self.current_state_signature,
         )
 
     def retrieval_input(self) -> RetrievalMetricInput:
@@ -193,6 +218,10 @@ class MultisystemMetricInput:
             candidate_shortfall=self.candidate_shortfall,
             retrieval_latency_seconds=self.retrieval_latency_seconds,
             rerank_latency_seconds=self.rerank_latency_seconds,
+            backend_retrieved_memory_state_ids=(
+                self.backend_retrieved_memory_state_ids
+            ),
+            selected_memory_state_ids=self.selected_memory_state_ids,
         )
 
 
@@ -321,7 +350,18 @@ def compute_multisystem_scorecard(
         rows = grouped[key]
         labels = [label for row in rows for label in row.intervention_labels]
         causal = [label for row in rows for label in row.causal_labels]
-        flags = [flag for row in rows for flag in row.drift_flags]
+        eligible_by_flag = {
+            flag: [row for row in rows if _drift_is_eligible(row, flag)]
+            for flag in (
+                "constraint_loss",
+                "plan_deviation",
+                "stale_state",
+                "local_over_global",
+            )
+        }
+        aggregate_eligible = [
+            row for row in rows if _any_drift_is_eligible(row)
+        ]
         output.append(
             {
                 "policy_profile_id": key[0],
@@ -364,13 +404,51 @@ def compute_multisystem_scorecard(
                     ),
                     len(labels),
                 ),
-                "constraint_loss_rate": _flag_rate(flags, "constraint_loss", len(rows)),
-                "current_plan_deviation_rate": _flag_rate(flags, "plan_deviation", len(rows)),
-                "stale_state_action_rate": _flag_rate(flags, "stale_state", len(rows)),
-                "local_over_global_rate": _flag_rate(flags, "local_over_global", len(rows)),
-                "aggregate_drift_rate": _ratio_value(
-                    sum(bool(row.drift_flags) for row in rows), len(rows)
+                "sham_replacement_action_flip_rate": _ratio_value(
+                    sum(row.sham_replacement_action_flips for row in rows),
+                    sum(row.sham_replacement_count for row in rows),
                 ),
+                "behavioral_use_probe_coverage": _ratio_value(
+                    sum(row.behavioral_use_probe_count for row in rows),
+                    sum(row.visible_memory_count for row in rows),
+                ),
+                "probed_memory_causal_use_rate": _ratio_value(
+                    sum(len(row.behaviorally_used_memory_ids) for row in rows),
+                    sum(row.behavioral_use_probe_count for row in rows),
+                ),
+                "constraint_loss_rate": _eligible_flag_rate(
+                    eligible_by_flag["constraint_loss"],
+                    "constraint_loss",
+                ),
+                "constraint_loss_eligible_n": len(
+                    eligible_by_flag["constraint_loss"]
+                ),
+                "current_plan_deviation_rate": _eligible_flag_rate(
+                    eligible_by_flag["plan_deviation"],
+                    "plan_deviation",
+                ),
+                "plan_deviation_eligible_n": len(
+                    eligible_by_flag["plan_deviation"]
+                ),
+                "stale_state_action_rate": _eligible_flag_rate(
+                    eligible_by_flag["stale_state"],
+                    "stale_state",
+                ),
+                "stale_state_eligible_n": len(
+                    eligible_by_flag["stale_state"]
+                ),
+                "local_over_global_rate": _eligible_flag_rate(
+                    eligible_by_flag["local_over_global"],
+                    "local_over_global",
+                ),
+                "local_over_global_eligible_n": len(
+                    eligible_by_flag["local_over_global"]
+                ),
+                "aggregate_drift_rate": _ratio_value(
+                    sum(bool(row.drift_flags) for row in aggregate_eligible),
+                    len(aggregate_eligible),
+                ),
+                "aggregate_drift_eligible_n": len(aggregate_eligible),
                 "memory_count_contrast_rate": _ratio_value(
                     sum(row.count_contrast_action_flips for row in rows),
                     sum(row.count_contrast_count for row in rows),
@@ -390,6 +468,31 @@ def _ratio_value(numerator: float, denominator: float) -> float | None:
 
 def _flag_rate(flags: Sequence[str], name: str, denominator: int) -> float | None:
     return _ratio_value(flags.count(name), denominator)
+
+
+def _eligible_flag_rate(
+    rows: Sequence[MultisystemMetricInput],
+    flag: str,
+) -> float | None:
+    return _ratio_value(
+        sum(flag in row.drift_flags for row in rows),
+        len(rows),
+    )
+
+
+def _drift_is_eligible(
+    row: BehaviorMetricInput | MultisystemMetricInput,
+    flag: str,
+) -> bool:
+    eligible = row.drift_eligible_categories
+    return eligible is None or flag in eligible
+
+
+def _any_drift_is_eligible(
+    row: BehaviorMetricInput | MultisystemMetricInput,
+) -> bool:
+    eligible = row.drift_eligible_categories
+    return eligible is None or bool(eligible)
 
 
 def _aggregate_observation_status(statuses: Sequence[str]) -> str:
@@ -755,15 +858,37 @@ def multisystem_observations_from_results(
                 candidate_ids = tuple(getattr(row, "candidate_memory_ids", ()))
                 retrieved_ids = tuple(getattr(row, "retrieved_memory_ids", ()))
                 visible_ids = tuple(getattr(row, "model_visible_memory_ids", ()))
+                backend_retrieved_ids = tuple(
+                    getattr(row, "backend_retrieved_memory_ids", ())
+                ) or candidate_ids
+                selected_ids = tuple(
+                    getattr(row, "selected_memory_ids", ())
+                ) or retrieved_ids
+                behaviorally_used_ids = tuple(
+                    getattr(row, "behaviorally_used_memory_ids", ())
+                )
                 intervention_rows = tuple(getattr(row, "interventions", ()))
                 loo_rows = tuple(
                     item
                     for item in intervention_rows
                     if str(getattr(item, "intervention_kind", "")) == "leave_one_out"
                 )
+                neutral_rows = tuple(
+                    item
+                    for item in intervention_rows
+                    if str(getattr(item, "intervention_kind", ""))
+                    == "neutral_replacement"
+                )
+                sham_rows = tuple(
+                    item
+                    for item in intervention_rows
+                    if str(getattr(item, "intervention_kind", ""))
+                    == "sham_replacement"
+                )
+                primary_causal_rows = neutral_rows or loo_rows
                 causal_labels = tuple(
                     str(getattr(getattr(item, "classification", None), "label", "indeterminate"))
-                    for item in loo_rows
+                    for item in primary_causal_rows
                 )
                 intervention_labels = tuple(
                     str(getattr(getattr(item, "classification", None), "label", "indeterminate"))
@@ -773,7 +898,7 @@ def multisystem_observations_from_results(
                     item
                     for item in intervention_rows
                     if str(getattr(item, "count_contrast", ""))
-                    in {"delete_one", "add_one"}
+                    == "add_one"
                     or str(getattr(item, "intervention_kind", "")) == "count_contrast"
                 )
                 selected = str(getattr(row, "selected_action_id", ""))
@@ -813,13 +938,34 @@ def multisystem_observations_from_results(
                             _attributed_state_ids(attribution, memory_id)
                             for memory_id in visible_ids
                         ),
+                        backend_retrieved_memory_state_ids=tuple(
+                            _attributed_state_ids(attribution, memory_id)
+                            for memory_id in backend_retrieved_ids
+                        ),
+                        selected_memory_state_ids=tuple(
+                            _attributed_state_ids(attribution, memory_id)
+                            for memory_id in selected_ids
+                        ),
                         candidate_shortfall=bool(getattr(row, "candidate_shortfall", False)),
                         visible_memory_count=len(visible_ids),
                         live_memory_count=(None if inventory is None else inventory.n_live),
                         causal_labels=causal_labels,
+                        behaviorally_used_memory_ids=behaviorally_used_ids,
+                        behavioral_use_probe_count=len(primary_causal_rows),
                         intervention_labels=intervention_labels,
                         leave_one_out_count=len(loo_rows),
                         leave_one_out_action_flips=flips,
+                        sham_replacement_count=len(sham_rows),
+                        sham_replacement_action_flips=sum(
+                            bool(
+                                getattr(
+                                    getattr(item, "classification", None),
+                                    "action_changed",
+                                    False,
+                                )
+                            )
+                            for item in sham_rows
+                        ),
                         count_contrast_count=len(count_contrasts),
                         count_contrast_action_flips=sum(
                             bool(
@@ -875,6 +1021,15 @@ def multisystem_observations_from_results(
                         baseline_stable=bool(
                             getattr(row, "baseline_stable", True)
                         ),
+                        drift_eligible_categories=getattr(
+                            row,
+                            "drift_eligible_categories",
+                            None,
+                        ),
+                        current_state_signature=str(
+                            getattr(row, "current_state_signature", "")
+                        ),
+                        episode_id=episode_id,
                     )
                 )
     return tuple(output)
@@ -1233,6 +1388,8 @@ def _state_metrics(
     write_latency = 0.0
     final_write_count = 0
     final_live_count = 0
+    final_logical_state_units = 0
+    final_attributed_objects = 0
     final_checkpoints = 0
     for item in observations:
         eligible = set(item.eligible_write_state_ids)
@@ -1274,6 +1431,8 @@ def _state_metrics(
             final_checkpoints += 1
             final_write_count += item.n_write
             final_live_count += item.n_live
+            final_logical_state_units += len(represented)
+            final_attributed_objects += sum(bool(states) for states in live)
 
     values[metric("write_coverage")] = safe_ratio(write_covered, write_eligible)
     values[metric("write_selectivity")] = safe_ratio(selective_objects, written_objects)
@@ -1311,6 +1470,22 @@ def _state_metrics(
     values[metric("live_memory_count")] = safe_ratio(
         final_live_count,
         final_checkpoints,
+    )
+    values[metric("live_native_object_count")] = safe_ratio(
+        final_live_count,
+        final_checkpoints,
+    )
+    values[metric("live_logical_state_unit_count")] = safe_ratio(
+        final_logical_state_units,
+        final_checkpoints,
+    )
+    values[metric("native_objects_per_logical_state_unit")] = safe_ratio(
+        final_live_count,
+        final_logical_state_units,
+    )
+    values[metric("attributed_native_object_rate")] = safe_ratio(
+        final_attributed_objects,
+        final_live_count,
     )
     values[metric("live_memory_count_total")] = (
         safe_ratio(final_live_count, 1)
@@ -1428,15 +1603,37 @@ def _retrieval_metrics(
     retrieval_latency = 0.0
     rerank_latency = 0.0
     rerank_count = 0
+    relevant_backend_objects = 0
+    backend_objects = 0
+    backend_states_found = 0
+    relevant_selected_objects = 0
+    selected_objects = 0
+    selected_states_found = 0
     for item in observations:
         required = set(item.required_state_ids)
         stale = set(item.stale_state_ids)
         candidates = [set(states) for states in item.candidate_memory_state_ids]
         retrieved = [set(states) for states in item.retrieved_memory_state_ids]
         visible = [set(states) for states in item.visible_memory_state_ids]
+        backend = [
+            set(states)
+            for states in (
+                item.backend_retrieved_memory_state_ids
+                or item.candidate_memory_state_ids
+            )
+        ]
+        selected = [
+            set(states)
+            for states in (
+                item.selected_memory_state_ids
+                or item.retrieved_memory_state_ids
+            )
+        ]
         candidate_union = set().union(*candidates) if candidates else set()
         retrieved_union = set().union(*retrieved) if retrieved else set()
         visible_union = set().union(*visible) if visible else set()
+        backend_union = set().union(*backend) if backend else set()
+        selected_union = set().union(*selected) if selected else set()
         candidate_states_found += len(required & candidate_union)
         required_states += len(required)
         relevant_retrieved_objects += sum(bool(states & required) for states in retrieved)
@@ -1455,6 +1652,12 @@ def _retrieval_metrics(
         if item.rerank_latency_seconds is not None:
             rerank_count += 1
             rerank_latency += item.rerank_latency_seconds
+        relevant_backend_objects += sum(bool(states & required) for states in backend)
+        backend_objects += len(backend)
+        backend_states_found += len(required & backend_union)
+        relevant_selected_objects += sum(bool(states & required) for states in selected)
+        selected_objects += len(selected)
+        selected_states_found += len(required & selected_union)
 
     values["candidate_recall"] = safe_ratio(
         candidate_states_found,
@@ -1472,6 +1675,24 @@ def _retrieval_metrics(
     values["retrieval_timeliness"] = safe_ratio(
         retrieved_states_found,
         required_states,
+    )
+    backend_precision = safe_ratio(relevant_backend_objects, backend_objects)
+    backend_recall = safe_ratio(backend_states_found, required_states)
+    values["backend_retrieval_precision"] = backend_precision
+    values["backend_retrieval_recall"] = backend_recall
+    values["backend_retrieval_f1"] = _f1(backend_precision, backend_recall)
+    selection_precision = safe_ratio(relevant_selected_objects, selected_objects)
+    selection_recall = safe_ratio(selected_states_found, required_states)
+    values["selection_precision"] = selection_precision
+    values["selection_recall"] = selection_recall
+    values["selection_f1"] = _f1(selection_precision, selection_recall)
+    values["backend_to_selected_yield"] = safe_ratio(
+        selected_objects,
+        backend_objects,
+    )
+    values["selected_to_visible_yield"] = safe_ratio(
+        visible_objects,
+        selected_objects,
     )
     values["candidate_shortfall_rate"] = safe_ratio(
         shortfalls,
@@ -1538,6 +1759,28 @@ def _behavior_metrics(
         causal_used,
         sum(item.visible_memory_count for item in observations),
     )
+    probe_count = sum(item.behavioral_use_probe_count for item in observations)
+    visible_count = sum(item.visible_memory_count for item in observations)
+    values["behavioral_use_probe_coverage"] = safe_ratio(
+        probe_count,
+        visible_count,
+    )
+    values["probed_memory_causal_use_rate"] = safe_ratio(
+        sum(item.behaviorally_used_memory_count for item in observations),
+        probe_count,
+    )
+    # The benchmark probes one preregistered focal object per SCEU rather than
+    # claiming exhaustive causal attribution over every visible object.  Keep
+    # the historical yield key for compatibility and expose its interpretation
+    # explicitly as a conservative lower bound.
+    values["model_visible_to_behaviorally_used_yield"] = safe_ratio(
+        sum(item.behaviorally_used_memory_count for item in observations),
+        visible_count,
+    )
+    values["model_visible_behavioral_use_lower_bound"] = safe_ratio(
+        sum(item.behaviorally_used_memory_count for item in observations),
+        visible_count,
+    )
     values["beneficial_intervention_rate"] = safe_ratio(
         intervention_labels.count("beneficial"),
         len(intervention_labels),
@@ -1563,6 +1806,11 @@ def _behavior_metrics(
         loo_flips,
         loo_count,
     )
+    sham_count = sum(item.sham_replacement_count for item in observations)
+    values["sham_replacement_action_flip_rate"] = safe_ratio(
+        sum(item.sham_replacement_action_flips for item in observations),
+        sham_count,
+    )
     count_contrasts = sum(item.count_contrast_count for item in observations)
     values["memory_count_contrast_rate"] = safe_ratio(
         sum(item.count_contrast_action_flips for item in observations),
@@ -1584,13 +1832,27 @@ def _behavior_metrics(
         ("stale_state", "stale_state_action_rate"),
         ("local_over_global", "local_over_global_rate"),
     ):
+        eligible = [
+            item for item in observations if _drift_is_eligible(item, flag)
+        ]
         values[metric_name] = safe_ratio(
-            sum(flag in item.drift_flags for item in observations),
-            len(observations),
+            sum(flag in item.drift_flags for item in eligible),
+            len(eligible),
         )
+        values[f"{metric_name}_eligible_n"] = safe_ratio(len(eligible), 1)
+    aggregate_eligible = [
+        item for item in observations if _any_drift_is_eligible(item)
+    ]
     values["aggregate_drift_rate"] = safe_ratio(
-        sum(any(flag in item.drift_flags for flag in flag_names) for item in observations),
-        len(observations),
+        sum(
+            any(flag in item.drift_flags for flag in flag_names)
+            for item in aggregate_eligible
+        ),
+        len(aggregate_eligible),
+    )
+    values["aggregate_drift_rate_eligible_n"] = safe_ratio(
+        len(aggregate_eligible),
+        1,
     )
     values["mean_behavior_score"] = safe_ratio(
         sum(item.behavior_score for item in observations),
@@ -1606,6 +1868,12 @@ def _behavior_metrics(
         len(conflict),
     )
     values["matched_early_late_behavioral_decay"] = _matched_decay(observations)
+    values["long_horizon_invariant_behavioral_drift_rate"] = (
+        _matched_decay(observations, invariant_only=True)
+    )
+    values["state_evolution_late_resolution_accuracy"] = (
+        _state_evolution_resolution(observations)
+    )
     by_live_count: dict[int, list[BehaviorMetricInput]] = defaultdict(list)
     for item in observations:
         if item.live_memory_count is not None:
@@ -1619,8 +1887,12 @@ def _behavior_metrics(
             sum(item.is_correct for item in rows), len(rows)
         )
         values[f"aggregate_drift_rate{suffix}"] = safe_ratio(
-            sum(any(flag in item.drift_flags for flag in flag_names) for item in rows),
-            len(rows),
+            sum(
+                any(flag in item.drift_flags for flag in flag_names)
+                for item in rows
+                if _any_drift_is_eligible(item)
+            ),
+            sum(_any_drift_is_eligible(item) for item in rows),
         )
     _baseline_comparison_metrics(values, observations)
 
@@ -1978,6 +2250,8 @@ def _observed_token_total(
 
 def _matched_decay(
     observations: Sequence[BehaviorMetricInput],
+    *,
+    invariant_only: bool = False,
 ) -> MetricValue:
     grouped: dict[tuple[str, str, str], list[BehaviorMetricInput]] = defaultdict(list)
     for item in observations:
@@ -1991,9 +2265,46 @@ def _matched_decay(
         ordered = sorted(rows, key=lambda item: item.checkpoint_session)
         if len(ordered) < 2:
             continue
+        if invariant_only and (
+            not ordered[0].current_state_signature
+            or ordered[0].current_state_signature
+            != ordered[-1].current_state_signature
+        ):
+            continue
         pairs += 1
-        decays += ordered[-1].behavior_score < ordered[0].behavior_score
+        decays += (
+            ordered[-1].behavior_score < ordered[0].behavior_score
+            or (
+                not ordered[0].drift_flags
+                and bool(ordered[-1].drift_flags)
+            )
+        )
     return safe_ratio(decays, pairs)
+
+
+def _state_evolution_resolution(
+    observations: Sequence[BehaviorMetricInput],
+) -> MetricValue:
+    grouped: dict[tuple[str, str, str], list[BehaviorMetricInput]] = defaultdict(list)
+    for item in observations:
+        if item.matched_group:
+            grouped[(item.policy_profile_id, item.result_id, item.matched_group)].append(item)
+    resolved = 0
+    pairs = 0
+    for rows in grouped.values():
+        ordered = sorted(rows, key=lambda item: item.checkpoint_session)
+        if len(ordered) < 2:
+            continue
+        if (
+            not ordered[0].current_state_signature
+            or not ordered[-1].current_state_signature
+            or ordered[0].current_state_signature
+            == ordered[-1].current_state_signature
+        ):
+            continue
+        pairs += 1
+        resolved += ordered[-1].is_correct
+    return safe_ratio(resolved, pairs)
 
 
 def _stable_difference(left: float, right: float) -> float:

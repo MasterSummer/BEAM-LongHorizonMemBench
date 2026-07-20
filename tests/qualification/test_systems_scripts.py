@@ -106,6 +106,17 @@ def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
             assert marker in text
 
 
+def test_qualification_prepares_every_episode_backend_prefix() -> None:
+    qualification = (ROOT / "scripts" / "run_systems_qualification.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'task_count="$(wc -l < "${task_file}")"' in qualification
+    assert 'while IFS=$\'\\t\' read -r task_index backend' in qualification
+    assert 'flat_retrieval) environment="core"' in qualification
+    assert '"${prepared}" -eq "${task_count}"' in qualification
+    assert 'for pair in "core 0"' not in qualification
+
+
 def test_qualification_forwards_allow_dirty_to_plan(tmp_path: Path) -> None:
     result = _run(
         ROOT / "scripts" / "run_systems_qualification.sh",

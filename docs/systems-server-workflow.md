@@ -37,25 +37,25 @@ dependency or runtime installation.
 
 ## Validate and run
 
-Create the repaired GPT-only release before the smoke (the smoke may use a
+Create the preregistered GPT-only release before the smoke (the smoke may use a
 four-session fixture with the same schema):
 
 ```bash
-SEEDS=$(seq 0 29)
+SEEDS=$(seq 0 49)
 python -m lhmsb.datasets generate-mem0-stateful \
   --seeds ${SEEDS} --n-episodes 1 --n-sessions 16 \
-  --out /data/lhmsb/datasets/software_v3.stage
+  --out /data/lhmsb/datasets/software_v4.stage
 python -m lhmsb.datasets freeze-mem0-stateful \
-  --src /data/lhmsb/datasets/software_v3.stage \
-  --out /data/lhmsb/datasets/software_v3
+  --src /data/lhmsb/datasets/software_v4.stage \
+  --out /data/lhmsb/datasets/software_v4
 python -m lhmsb.datasets verify-mem0-stateful \
-  --frozen /data/lhmsb/datasets/software_v3
+  --frozen /data/lhmsb/datasets/software_v4
 python -m lhmsb.datasets regen-check-mem0-stateful \
-  --frozen /data/lhmsb/datasets/software_v3
+  --frozen /data/lhmsb/datasets/software_v4
 ```
 
-The manifest should report 30 episodes, 16 sessions, and release
-`software-vertical-mem0-v0.3.0`. Do not run the pilot from a dirty checkout.
+The manifest should report 50 episodes, 16 sessions, and release
+`software-vertical-mem0-v0.4.0`. Do not run the pilot from a dirty checkout.
 
 Every wrapper supports a side-effect-free dry run:
 
@@ -82,22 +82,25 @@ After inspection, submit the 16-session qualification:
 ```bash
 scripts/run_systems_qualification.sh --prepare-only \
   --data-root /data/lhmsb --env-file /data/lhmsb/env/operator.env \
-  --run-name gpt-only-v3
-sbatch --array=0-209%16 \
-  --export=ALL,LHMSB_RUN_NAME=gpt-only-v3 \
+  --config configs/experiments/systems_controlled_gpt_only_aaai.yaml \
+  --run-name gpt-only-v4
+sbatch --array=0-349%16 \
+  --export=ALL,LHMSB_RUN_NAME=gpt-only-v4 \
   deploy/slurm/systems_evaluate_task.sbatch
 "${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
-  aggregate-systems --run-dir /data/lhmsb/runs/systems/gpt-only-v3 \
-  --out /data/lhmsb/runs/systems/gpt-only-v3/report
+  aggregate-systems --run-dir /data/lhmsb/runs/systems/gpt-only-v4 \
+  --out /data/lhmsb/runs/systems/gpt-only-v4/report
 "${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
-  validate-systems --report /data/lhmsb/runs/systems/gpt-only-v3/report \
-  --json /data/lhmsb/runs/systems/gpt-only-v3/validation.json
+  validate-systems --report /data/lhmsb/runs/systems/gpt-only-v4/report \
+  --json /data/lhmsb/runs/systems/gpt-only-v4/validation.json
 ```
 
 The preparation job requests two generic NVIDIA GPUs, assigns one to embedding
 and one to reranking, serializes run names with a filesystem lock, starts native
-services, and tears them down after prefixes are frozen. The 210 read-only GPT
-evaluation tasks run as a Slurm array and do not start memory services. Prefixes
+services, and tears them down after prefixes are frozen. The preparation stage
+creates 200 immutable prefix artifacts (four memory backends for each of 50
+episodes). The 350 read-only GPT evaluation tasks run as a Slurm array and do
+not start memory services. Prefixes
 and task results remain on disk so a failed array cell can be retried with the
 same run identity.
 
@@ -116,7 +119,8 @@ same run identity.
     tasks.jsonl
     prefixes/
     results/
-    report/{metrics.json,metrics_by_cell.json,scorecard.csv}
+    report/{metrics.json,metrics_by_cell.json,scorecard.csv,statistics.json}
+    report/episodes/<episode-id>/{metrics.json,scorecard.csv,summary.json}
     validation.json
 ```
 

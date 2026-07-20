@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
@@ -35,6 +36,23 @@ def test_valid_local_accelerator_targets_scoped_authorization_for_intervention()
         "opp-local-valid": ("L1",),
         "opp-local-valid-recheck": ("L1",),
     }
+
+
+def test_gold_actions_are_balanced_against_a_single_default_policy() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=16)
+    counts = Counter(
+        action_id
+        for opportunity in spec.plan.opportunities
+        for action_id in opportunity.valid_action_ids
+    )
+
+    assert counts == {
+        "safe_v2_offline": 6,
+        "stale_v1": 2,
+        "cloud_shortcut": 2,
+    }
+    assert max(counts.values()) / sum(counts.values()) <= 0.60
+    assert min(counts.values()) >= 2
 
 
 def test_recoverability_variants_share_latent_state_but_change_workspace() -> None:
@@ -133,3 +151,38 @@ def test_generation_is_fully_deterministic() -> None:
     first = SoftwareMem0VerticalFamily.generate(42, trajectory_seed=2)
     second = SoftwareMem0VerticalFamily.generate(42, trajectory_seed=2)
     assert first == second
+
+
+def test_formal_episode_seeds_cover_semantic_and_schedule_variants() -> None:
+    specs = tuple(
+        SoftwareMem0VerticalFamily.generate(
+            seed,
+            n_sessions=16,
+            trajectory_seed=seed,
+        )
+        for seed in range(50)
+    )
+    scenarios = {
+        dict(spec.plan.metadata)["semantic_scenario"]
+        for spec in specs
+    }
+    schedules = {
+        dict(spec.plan.metadata)["phase_signature"]
+        for spec in specs
+    }
+    goals = {
+        _state_text(spec, "G0")
+        for spec in specs
+    }
+    assert len(scenarios) == 5
+    assert len(goals) == 5
+    assert len(schedules) == 10
+    assert len(
+        {
+            (
+                dict(spec.plan.metadata)["semantic_scenario"],
+                dict(spec.plan.metadata)["phase_signature"],
+            )
+            for spec in specs
+        }
+    ) == 50

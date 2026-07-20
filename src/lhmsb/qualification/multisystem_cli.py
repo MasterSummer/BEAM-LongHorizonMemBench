@@ -992,6 +992,29 @@ def _evaluation_result_from_dict(raw: Mapping[str, object]) -> EvaluationTaskRes
             transcript_hash=str(data.get("transcript_hash", "")),
             model_visible_context_hash=str(data.get("model_visible_context_hash", "")),
             candidate_shortfall=bool(data.get("candidate_shortfall", False)),
+            backend_retrieved_memory_ids=_string_tuple(
+                data.get(
+                    "backend_retrieved_memory_ids",
+                    data.get("candidate_memory_ids"),
+                )
+            ),
+            selected_memory_ids=_string_tuple(
+                data.get(
+                    "selected_memory_ids",
+                    data.get("retrieved_memory_ids"),
+                )
+            ),
+            behaviorally_used_memory_ids=_string_tuple(
+                data.get("behaviorally_used_memory_ids")
+            ),
+            drift_eligible_categories=(
+                None
+                if data.get("drift_eligible_categories") is None
+                else _string_tuple(data.get("drift_eligible_categories"))
+            ),
+            current_state_signature=str(
+                data.get("current_state_signature", "")
+            ),
         )
 
     raw_conditions = raw.get("condition_results", ())
@@ -1113,15 +1136,26 @@ def _aggregate_systems(run_directory: Path, output: Path | None) -> Path:
     report = output or run_directory / "report"
     matrix, specs, artifacts = _load_evaluation_matrix(run_directory)
     manifest = _read_json(run_directory / "run_manifest.json")
+    aggregation_commit, aggregation_dirty, aggregation_ref = _git_identity()
+    report_metadata = {
+        key: value
+        for key, value in manifest.items()
+        if key not in {"run_identity", "artifact_hashes"}
+    }
+    report_metadata.update(
+        {
+            "evaluation_code_commit": manifest.get("code_commit"),
+            "evaluation_code_dirty": manifest.get("code_dirty"),
+            "aggregation_code_commit": aggregation_commit,
+            "aggregation_code_dirty": aggregation_dirty,
+            "aggregation_code_ref": aggregation_ref,
+        }
+    )
     write_qualification_report(
         matrix,
         specs,
         report,
-        run_metadata={
-            key: value
-            for key, value in manifest.items()
-            if key not in {"run_identity", "artifact_hashes"}
-        },
+        run_metadata=report_metadata,
         prefix_artifacts=artifacts,
     )
     # ``write_qualification_report`` emits a pending validation record before
