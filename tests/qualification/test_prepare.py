@@ -196,6 +196,38 @@ class FakeRuntime:
         return item
 
 
+class NoOpSessionRuntime(FakeRuntime):
+    """Keep cumulative n_write unchanged for one event-free session."""
+
+    def write_session(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        session_index: int,
+        metadata: dict[str, object] | None = None,
+    ) -> WriteSessionResult:
+        if session_index != 1:
+            return super().write_session(
+                messages,
+                session_index=session_index,
+                metadata=metadata,
+            )
+        del messages, metadata
+        self.events.append(("write", session_index))
+        self.writes.append(session_index)
+        inventory = self._inventory(
+            checkpoint_session=session_index,
+            include_current=False,
+        )
+        return WriteSessionResult(
+            session_index=session_index,
+            events=(),
+            inventory=inventory,
+            n_write=inventory.n_write,
+            latency_seconds=0.0,
+        )
+
+
 class FailedWriterRuntime(FakeRuntime):
     def write_session(
         self,
@@ -469,6 +501,31 @@ def test_prepare_replays_public_sessions_and_searches_before_current_write(tmp_p
     assert state_rows[-1].live_memory_provenance == (
         "native/exact",
     ) * state_rows[-1].n_live
+
+
+def test_cumulative_write_count_does_not_mark_noop_session_incomplete(
+    tmp_path: Path,
+) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task(spec.plan.episode_id)
+    storage = QualificationStorage(tmp_path / "run", run_identity=task.run_identity)
+    artifact = prepare_prefix(
+        task,
+        spec,
+        NoOpSessionRuntime(),
+        FakeReranker(),
+        storage,
+    )
+
+    state_rows = multisystem_state_checkpoints_from_artifacts(
+        (SimpleNamespace(episode_id=spec.plan.episode_id, condition="flat_retrieval"),),
+        {spec.plan.episode_id: spec},
+        prefix_artifacts={"flat_retrieval": artifact},
+    )
+
+    assert artifact.checkpoints[2].writes[0].n_write == 1
+    assert artifact.checkpoints[2].writes[0].events == ()
+    assert all(row.provenance_complete for row in state_rows)
 
 
 def test_schema_v2_report_exports_and_scores_prefix_writer_usage(tmp_path: Path) -> None:

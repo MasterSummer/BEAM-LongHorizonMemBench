@@ -438,7 +438,10 @@ def compute_qualification_metrics(
             item.checkpoint_session: item for item in task.alignments
         }
         write_by_session = {item.session_index: item for item in task.writes}
+        previous_n_write = 0
         for index, write in enumerate(task.writes):
+            write_delta = max(0, write.n_write - previous_n_write)
+            previous_n_write = write.n_write
             for event in write.usage_events:
                 if event.call_id in seen_calls:
                     continue
@@ -512,7 +515,7 @@ def compute_qualification_metrics(
                         _attribution_mode(alignment.attributions, item.memory_id)
                         for item in write.inventory.items
                     ),
-                    provenance_complete=not (write.n_write > 0 and not write.events),
+                    provenance_complete=not (write_delta > 0 and not write.events),
                 )
             )
 
@@ -919,10 +922,13 @@ def multisystem_state_checkpoints_from_artifacts(
         artifact = _artifact_for_task(task, artifacts)
         if artifact is None:
             continue
+        previous_n_write = 0
         for checkpoint in artifact.checkpoints:
             inventory = checkpoint.inventory
             if inventory is None:
                 continue
+            write_delta = max(0, inventory.n_write - previous_n_write)
+            previous_n_write = inventory.n_write
             key = (
                 spec.plan.episode_id,
                 str(getattr(artifact, "backend", "")),
@@ -1028,10 +1034,7 @@ def multisystem_state_checkpoints_from_artifacts(
                         )).provenance_mode
                         for item in inventory.items
                     ),
-                    provenance_complete=not (
-                        any(getattr(write, "n_write", 0) > 0 for write in writes)
-                        and not events
-                    ),
+                    provenance_complete=not (write_delta > 0 and not events),
                 )
             )
     return tuple(output)

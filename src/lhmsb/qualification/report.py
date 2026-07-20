@@ -7,7 +7,7 @@ import hashlib
 import io
 import json
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
@@ -862,7 +862,7 @@ def _storage_provenance_diagnostics(
 ) -> dict[str, object]:
     counts: dict[str, int] = {"native/exact": 0, "inferred": 0, "unavailable": 0}
     by_source: dict[str, int] = defaultdict(int)
-    event_tasks: set[str] = set()
+    event_counts_by_checkpoint: Counter[tuple[str, int]] = Counter()
     for row in rows["memory_events.jsonl"]:
         mode = str(row.get("provenance_mode", ""))
         if mode not in counts:
@@ -870,14 +870,40 @@ def _storage_provenance_diagnostics(
         counts[mode] += 1
         source = str(row.get("source", "unknown"))
         by_source[source] += 1
-        event_tasks.add(str(row.get("task_id", "")))
+        event_counts_by_checkpoint[
+            (
+                str(row.get("task_id", "")),
+                _as_int(row.get("session_index", -1)) + 1,
+            )
+        ] += 1
+
+    inventories_by_task: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in rows["memory_inventory.jsonl"]:
+        inventories_by_task[str(row.get("task_id", ""))].append(row)
+    incomplete_checkpoints: list[dict[str, object]] = []
+    for task_id, inventories in sorted(inventories_by_task.items()):
+        previous_n_write = 0
+        for row in sorted(
+            inventories,
+            key=lambda item: _as_int(item.get("checkpoint_session", 0)),
+        ):
+            checkpoint_session = _as_int(row.get("checkpoint_session", 0))
+            current_n_write = _as_int(row.get("n_write", 0))
+            write_delta = max(0, current_n_write - previous_n_write)
+            previous_n_write = current_n_write
+            event_count = event_counts_by_checkpoint[(task_id, checkpoint_session)]
+            if write_delta <= event_count:
+                continue
+            incomplete_checkpoints.append(
+                {
+                    "task_id": task_id,
+                    "checkpoint_session": checkpoint_session,
+                    "write_delta": write_delta,
+                    "event_count": event_count,
+                }
+            )
     incomplete_tasks = sorted(
-        {
-            str(row.get("task_id", ""))
-            for row in rows["memory_inventory.jsonl"]
-            if _as_int(row.get("n_write", 0)) > 0
-            and str(row.get("task_id", "")) not in event_tasks
-        }
+        {str(item["task_id"]) for item in incomplete_checkpoints}
     )
     return {
         "native_exact_event_count": counts["native/exact"],
@@ -885,6 +911,7 @@ def _storage_provenance_diagnostics(
         "unavailable_event_count": counts["unavailable"],
         "event_source_counts": dict(sorted(by_source.items())),
         "incomplete_write_tasks": incomplete_tasks,
+        "incomplete_write_checkpoints": incomplete_checkpoints,
         "status": (
             "complete"
             if counts["unavailable"] == 0 and not incomplete_tasks

@@ -8,6 +8,7 @@ from lhmsb.longhorizon.interventions import ContinuationOutcome
 from lhmsb.qualification.report import (
     REQUIRED_REPORT_ARTIFACTS,
     _evaluation_trace_id,
+    _storage_provenance_diagnostics,
     write_qualification_report,
 )
 from lhmsb.qualification.runner import (
@@ -167,3 +168,42 @@ def test_native_evaluation_trace_id_is_distinct_when_row_has_no_trace() -> None:
         _evaluation_trace_id("task-001", "sceu-00", "native", None)
         == "task-001:sceu-00:native"
     )
+
+
+def test_storage_provenance_uses_checkpoint_write_deltas() -> None:
+    rows = {
+        "memory_events.jsonl": [
+            {
+                "task_id": "task-memory",
+                "session_index": 0,
+                "provenance_mode": "native/exact",
+                "source": "native_response",
+            }
+        ],
+        "memory_inventory.jsonl": [
+            {"task_id": "task-memory", "checkpoint_session": 0, "n_write": 0},
+            {"task_id": "task-memory", "checkpoint_session": 1, "n_write": 1},
+            # A no-op session retains the cumulative write count and needs no
+            # new lifecycle event.
+            {"task_id": "task-memory", "checkpoint_session": 2, "n_write": 1},
+        ],
+    }
+
+    complete = _storage_provenance_diagnostics(rows)
+    assert complete["status"] == "complete"
+    assert complete["incomplete_write_checkpoints"] == []
+
+    rows["memory_inventory.jsonl"].append(
+        {"task_id": "task-memory", "checkpoint_session": 3, "n_write": 2}
+    )
+    incomplete = _storage_provenance_diagnostics(rows)
+    assert incomplete["status"] == "incomplete"
+    assert incomplete["incomplete_write_tasks"] == ["task-memory"]
+    assert incomplete["incomplete_write_checkpoints"] == [
+        {
+            "task_id": "task-memory",
+            "checkpoint_session": 3,
+            "write_delta": 1,
+            "event_count": 0,
+        }
+    ]
