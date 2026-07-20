@@ -11,7 +11,7 @@
 #SBATCH --error=/data/lhmsb/logs/slurm-%x-%j.err
 set -euo pipefail
 
-REPO_ROOT="${LHMSB_REPO_ROOT:-${SLURM_SUBMIT_DIR:-}}"
+REPO_ROOT="${LHMSB_REPO_ROOT:-${SLURM_SUBMIT_DIR:-${PWD}}}"
 if [[ -z "${REPO_ROOT}" || ! -f "${REPO_ROOT}/scripts/lib/systems_common.sh" ]]; then
   printf 'submit from the repository root or export LHMSB_REPO_ROOT\n' >&2
   exit 2
