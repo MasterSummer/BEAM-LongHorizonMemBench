@@ -48,6 +48,14 @@ def test_slurm_uses_two_gpus_and_native_lifecycle() -> None:
     assert "trap cleanup" in text
 
 
+def test_current_slurm_scripts_resolve_repo_outside_slurm_spool() -> None:
+    for name in ("systems_qualification.sbatch", "systems_evaluate_task.sbatch"):
+        text = (ROOT / "deploy" / "slurm" / name).read_text(encoding="utf-8")
+        assert "LHMSB_REPO_ROOT" in text
+        assert "SLURM_SUBMIT_DIR" in text
+        assert 'dirname "${BASH_SOURCE[0]}"' not in text
+
+
 def test_native_services_are_loopback_only() -> None:
     text = (ROOT / "scripts" / "lib" / "systems_services.sh").read_text(
         encoding="utf-8"
