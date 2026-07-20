@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from lhmsb.adapters.memos_qualification import (
+    MemOSDeepSeekBridge,
     MemOSLLMConfig,
     MemOSQualificationError,
     MemOSTreeQualificationAdapter,
@@ -274,6 +276,32 @@ def test_controlled_bridges_replace_every_official_memos_llm_reference() -> None
     assert reader.llm is bridges["reader"]
     assert reader.general_llm is bridges["reader"]
     assert reader.preference_extractor_llm is bridges["reader"]
+
+
+def test_memos_generate_keeps_official_plain_text_protocol() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-v4-pro",
+                "choices": [{"message": {"content": "independent"}}],
+            },
+            request=request,
+        )
+
+    bridge = MemOSDeepSeekBridge(
+        MemOSLLMConfig(
+            component="reorganizer",
+            model_id="deepseek-v4-pro",
+            endpoint="https://api.deepseek.com",
+            api_key="secret",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    assert bridge.generate("classify these memories") == "independent"
+    assert len(bridge.calls) == 1
+    assert bridge.calls[0].error_class is None
+    bridge.close()
 
 
 def test_official_reader_uses_registered_openai_embedding_provider(monkeypatch) -> None:

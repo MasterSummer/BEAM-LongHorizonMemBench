@@ -210,3 +210,62 @@ def test_bridge_retries_provider_disconnect() -> None:
     assert result.retry_count == 1
     assert attempts == 2
     bridge.close()
+
+
+def test_text_completion_preserves_plain_output_and_usage() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "response_format" not in body
+        assert body["thinking"] == {"type": "disabled"}
+        assert body["messages"] == [{"role": "user", "content": "classify"}]
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-v4-pro",
+                "choices": [{"message": {"content": "independent"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+            },
+            request=request,
+        )
+
+    bridge = DeepSeekJSONBridge(
+        api_key="deepseek-secret",
+        endpoint="https://api.deepseek.com",
+        transport=httpx.MockTransport(handler),
+        max_retries=0,
+    )
+    assert bridge.generate_text(({"role": "user", "content": "classify"},)) == "independent"
+    assert bridge.calls[-1].error_class is None
+    assert bridge.calls[-1].output_tokens == 1
+    bridge.close()
+
+
+def test_text_completion_retries_empty_content() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-v4-pro",
+                "choices": [
+                    {"message": {"content": "" if attempts == 1 else "<answer>ok</answer>"}}
+                ],
+            },
+            request=request,
+        )
+
+    bridge = DeepSeekJSONBridge(
+        api_key="deepseek-secret",
+        endpoint="https://api.deepseek.com",
+        transport=httpx.MockTransport(handler),
+        max_retries=1,
+    )
+    assert bridge.generate_text(({"role": "user", "content": "resolve"},)) == (
+        "<answer>ok</answer>"
+    )
+    assert bridge.calls[-1].retry_count == 1
+    assert attempts == 2
+    bridge.close()

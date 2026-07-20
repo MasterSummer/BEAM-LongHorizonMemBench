@@ -147,17 +147,17 @@ class MemOSDeepSeekBridge:
 
     def generate(
         self,
-        messages: Sequence[Mapping[str, str]],
+        messages: Sequence[Mapping[str, str]] | Mapping[str, str] | str,
         **kwargs: object,
     ) -> str:
         del kwargs
-        result = self._bridge.generate_json(
-            messages,
-            response_format={"type": "object"},
-        )
-        return json.dumps(result.payload, ensure_ascii=False, sort_keys=True)
+        return self._bridge.generate_text(_memos_messages(messages))
 
-    def complete(self, messages: Sequence[Mapping[str, str]], **kwargs: object) -> str:
+    def complete(
+        self,
+        messages: Sequence[Mapping[str, str]] | Mapping[str, str] | str,
+        **kwargs: object,
+    ) -> str:
         return self.generate(messages, **kwargs)
 
     def generate_json(
@@ -176,6 +176,17 @@ class MemOSDeepSeekBridge:
 
     def close(self) -> None:
         self._bridge.close()
+
+
+def _memos_messages(
+    value: Sequence[Mapping[str, str]] | Mapping[str, str] | str,
+) -> tuple[Mapping[str, str], ...]:
+    """Normalize the prompt shapes accepted by MemOS' generic LLM API."""
+    if isinstance(value, str):
+        return ({"role": "user", "content": value},)
+    if isinstance(value, Mapping):
+        return (value,)
+    return tuple(value)
 
 
 class MemOSTreeQualificationAdapter:

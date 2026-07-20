@@ -140,6 +140,86 @@ class DeepSeekJSONBridge:
         """Alias for callers that use ``complete_json`` rather than ``generate_json``."""
         return self.generate_json(messages, response_format=response_format)
 
+    def generate_text(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        request_id: str | None = None,
+        temperature: float | None = None,
+    ) -> str:
+        """Generate native text while retaining the controlled provider trace.
+
+        MemOS' official ``LLM.generate`` contract is deliberately not JSON-only:
+        different components request a plain relation label, XML, or JSON in the
+        prompt itself.  Forcing ``response_format=json_object`` at that boundary
+        can produce an empty completion for otherwise valid plain-text prompts.
+        """
+        if temperature is not None and temperature < 0:
+            raise DeepSeekWriterError("invalid_request", "temperature must be non-negative")
+        normalized_messages = _normalize_messages(messages)
+        body = self._text_request_body(
+            normalized_messages,
+            temperature=self.temperature if temperature is None else temperature,
+        )
+        request_hash = _canonical_hash(body)
+        started = time.perf_counter()
+        started_at = datetime.now(UTC).isoformat()
+        retries = 0
+        raw: dict[str, object] = {}
+        content = ""
+        try:
+            for text_attempt in range(self.max_retries + 1):
+                raw, transport_retries = self._post(body)
+                retries += transport_retries
+                returned_model = raw.get("model")
+                if returned_model != self.model_id:
+                    raise DeepSeekWriterError(
+                        "provider_model_unavailable",
+                        f"requested {self.model_id!r}, provider returned {returned_model!r}",
+                    )
+                content = _response_content(raw)
+                if content.strip():
+                    break
+                if text_attempt < self.max_retries:
+                    retries += 1
+                    self._delay()
+                    continue
+                raise DeepSeekWriterError(
+                    "structured_output_failure",
+                    "DeepSeek text response content is empty",
+                )
+            else:  # pragma: no cover - the bounded loop always returns or raises
+                raise DeepSeekWriterError(
+                    "structured_output_failure", "unreachable retry state"
+                )
+        except DeepSeekWriterError as exc:
+            self.calls.append(
+                self._usage_event(
+                    request_id=request_id,
+                    request_hash=request_hash,
+                    raw=raw,
+                    input_count=len(normalized_messages),
+                    started=started,
+                    started_at=started_at,
+                    retries=retries,
+                    error_class=exc.error_class,
+                )
+            )
+            raise
+        self.calls.append(
+            self._usage_event(
+                request_id=request_id,
+                request_hash=request_hash,
+                raw=raw,
+                input_count=len(normalized_messages),
+                started=started,
+                started_at=started_at,
+                retries=retries,
+                error_class=None,
+            )
+        )
+        return content
+
     def generate_json(
         self,
         messages: Sequence[Mapping[str, str]],
@@ -297,6 +377,20 @@ class DeepSeekJSONBridge:
             # hidden reasoning and leave content empty or non-JSON.
             "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
+        }
+
+    def _text_request_body(
+        self,
+        messages: tuple[dict[str, str], ...],
+        *,
+        temperature: float,
+    ) -> dict[str, object]:
+        return {
+            "model": self.model_id,
+            "messages": [dict(message) for message in messages],
+            "temperature": temperature,
+            "max_tokens": self.max_output_tokens,
+            "thinking": {"type": "disabled"},
         }
 
     def _post(self, body: Mapping[str, object]) -> tuple[dict[str, object], int]:
