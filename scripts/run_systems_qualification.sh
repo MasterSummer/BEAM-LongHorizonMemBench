@@ -57,7 +57,7 @@ done
 RUN_DIR="${DATA_ROOT}/runs/systems/${RUN_NAME}"
 
 prepare_all_prefixes() {
-  local task_file="${RUN_DIR}/preparation_tasks.jsonl"
+  local task_file="${RUN_DIR}/prepare_tasks.jsonl"
   local task_count task_index backend environment prepared
   [[ -s "${task_file}" ]] || {
     printf 'missing preparation task matrix: %s\n' "${task_file}" >&2
@@ -110,7 +110,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   systems_print_command "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification "${PLAN[@]}"
   systems_print_command "${DATA_ROOT}/venvs/{core,mem0,amem,memos}/bin/python" \
     -m lhmsb.qualification prepare-task --run-dir "${RUN_DIR}" \
-    --task-index '<every row in preparation_tasks.jsonl>'
+    --task-index '<every row in prepare_tasks.jsonl>'
   systems_print_command "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
     finalize-evaluation-plan --run-dir "${RUN_DIR}"
   if [[ "${PREPARE_ONLY}" == "1" ]]; then

@@ -110,6 +110,7 @@ def test_qualification_prepares_every_episode_backend_prefix() -> None:
     qualification = (ROOT / "scripts" / "run_systems_qualification.sh").read_text(
         encoding="utf-8"
     )
+    assert 'task_file="${RUN_DIR}/prepare_tasks.jsonl"' in qualification
     assert 'task_count="$(wc -l < "${task_file}")"' in qualification
     assert 'while IFS=$\'\\t\' read -r task_index backend' in qualification
     assert 'flat_retrieval) environment="core"' in qualification

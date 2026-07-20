@@ -114,7 +114,7 @@ same run identity.
   services/<run-instance>/
   runs/systems/<run-name>/
     run_manifest.json
-    preparation_tasks.jsonl
+    prepare_tasks.jsonl
     evaluation_task_templates.jsonl
     tasks.jsonl
     prefixes/
