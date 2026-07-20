@@ -188,19 +188,19 @@ def test_env_example_declares_only_expected_provider_and_service_controls() -> N
         "OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen",
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL=https://api.deepseek.com",
-        "LHMSB_QDRANT_URL=http://qdrant:6333",
-        "LHMSB_EMBEDDING_URL=http://embedding:80",
-        "LHMSB_RERANKER_URL=http://reranker:80",
-        "LHMSB_WORKER_UID=",
-        "LHMSB_WORKER_GID=",
-        "QDRANT_RUNTIME_IMAGE_ID=",
-        "TEI_RUNTIME_IMAGE_ID=",
+        "LHMSB_QDRANT_URL=http://127.0.0.1:6333",
+        "LHMSB_EMBEDDING_URL=http://127.0.0.1:8080",
+        "LHMSB_RERANKER_URL=http://127.0.0.1:8081",
+        "LHMSB_NEO4J_URI=bolt://127.0.0.1:7687",
+        "LHMSB_QDRANT_BIN=",
+        "LHMSB_NEO4J_HOME=",
+        "LHMSB_TEI_BIN=",
     ):
         assert name in text
     current_provider_section = text.split(
-        "# Current Controlled-Zen provider controls.\n",
+        "# Controlled-Zen provider routes. Keep keys only in the operator env file.\n",
         maxsplit=1,
-    )[1].split("\n# ", maxsplit=1)[0]
+    )[1]
     assert current_provider_section.strip().splitlines() == [
         "OPENCODE_ZEN_API_KEY=",
         "OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen",

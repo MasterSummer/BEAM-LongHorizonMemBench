@@ -7,16 +7,17 @@ boundary in this module keeps the rest of the qualification code independent of
 same :class:`QdrantTransport` protocol.  The latter is intended for tests and
 repository-only dry runs; it is not a second retrieval implementation.
 
-Point IDs are benchmark IDs (normally the SHA-256 ID of a
-``PublicHistoryUnit``).  They are intentionally kept as strings all the way to
-the wire so a retrieved candidate can be joined to its normalized memory object
-without an evaluator-side ID translation table.  Namespace is encoded in the
-payload and every read/write/delete operation requires it explicitly.
+Benchmark point IDs (normally the SHA-256 ID of a ``PublicHistoryUnit``) are
+kept in evaluator-facing transport records.  The HTTP implementation maps them
+to deterministic UUIDs at the Qdrant wire boundary because Qdrant accepts only
+unsigned integers or UUIDs as point IDs.  Namespace is encoded in the payload
+and every read/write/delete operation requires it explicitly.
 """
 
 from __future__ import annotations
 
 import math
+import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, cast
@@ -116,6 +117,10 @@ class QdrantTransport(Protocol):
     def close(self) -> None: ...
 
 
+_WIRE_POINT_ID_KEY = "_lhmsb_point_id"
+_WIRE_POINT_NAMESPACE = uuid.UUID("7e2b6f3b-99ee-4a62-9b35-4f4e7e8f5f4e")
+
+
 def validate_namespace(namespace: str) -> str:
     if not isinstance(namespace, str) or not namespace:
         raise QdrantError("invalid_namespace", "namespace must be a non-empty string")
@@ -173,6 +178,53 @@ def validate_score(score: object) -> float:
 
 def _payload_copy(payload: Mapping[str, object]) -> dict[str, object]:
     return {str(key): value for key, value in payload.items()}
+
+
+def _wire_point_id(namespace: str, point_id: str) -> str:
+    """Return a stable Qdrant-compatible ID for a benchmark point."""
+    return str(uuid.uuid5(_WIRE_POINT_NAMESPACE, f"{namespace}\x00{point_id}"))
+
+
+def _to_wire_point(
+    point: QdrantPoint,
+    *,
+    namespace: str,
+) -> QdrantPoint:
+    payload = _payload_copy(point.payload)
+    existing_namespace = payload.get("_namespace", payload.get("namespace"))
+    if existing_namespace is not None and existing_namespace != namespace:
+        raise QdrantError("namespace_mismatch", "point payload namespace differs")
+    existing = payload.get(_WIRE_POINT_ID_KEY)
+    if existing is not None and existing != point.point_id:
+        raise QdrantError(
+            "point_id_mismatch",
+            "point payload contains a conflicting benchmark point ID",
+        )
+    payload[_WIRE_POINT_ID_KEY] = point.point_id
+    payload["_namespace"] = namespace
+    return QdrantPoint(
+        _wire_point_id(namespace, point.point_id),
+        point.vector,
+        payload,
+    )
+
+
+def _restore_payload(payload: Mapping[str, object]) -> tuple[str | None, dict[str, object]]:
+    copied = _payload_copy(payload)
+    raw_point_id = copied.pop(_WIRE_POINT_ID_KEY, None)
+    if raw_point_id is None:
+        return None, copied
+    return validate_point_id(raw_point_id), copied
+
+
+def _restore_point(point: QdrantPoint) -> QdrantPoint:
+    original_id, payload = _restore_payload(point.payload)
+    return QdrantPoint(original_id or point.point_id, point.vector, payload)
+
+
+def _restore_hit(hit: QdrantHit) -> QdrantHit:
+    original_id, payload = _restore_payload(hit.payload)
+    return QdrantHit(original_id or hit.point_id, hit.score, payload)
 
 
 def _point_from_value(
@@ -251,6 +303,24 @@ def validate_search_order(hits: Sequence[QdrantHit]) -> tuple[QdrantHit, ...]:
             "Qdrant search points are not in descending score/ID order",
         )
     return ordered
+
+
+def _validate_qdrant_score_order(hits: Sequence[QdrantHit]) -> None:
+    """Validate the order guaranteed by Qdrant without imposing tie order."""
+    ids: list[str] = []
+    previous_score: float | None = None
+    for hit in hits:
+        validate_point_id(hit.point_id)
+        score = validate_score(hit.score)
+        ids.append(hit.point_id)
+        if previous_score is not None and score > previous_score:
+            raise QdrantError(
+                "invalid_point_order",
+                "Qdrant search points are not in descending score order",
+            )
+        previous_score = score
+    if len(ids) != len(set(ids)):
+        raise QdrantError("duplicate_point_id", "Qdrant search returned duplicate point IDs")
 
 
 class InMemoryQdrantTransport:
@@ -465,12 +535,7 @@ class QdrantHttpTransport:
             if value.point_id in seen:
                 raise QdrantError("duplicate_point_id", "upsert contains duplicate point IDs")
             seen.add(value.point_id)
-            payload = _payload_copy(value.payload)
-            existing_namespace = payload.get("_namespace", payload.get("namespace"))
-            if existing_namespace is not None and existing_namespace != ns:
-                raise QdrantError("namespace_mismatch", "point payload namespace differs")
-            payload["_namespace"] = ns
-            normalized.append(QdrantPoint(value.point_id, value.vector, payload))
+            normalized.append(_to_wire_point(value, namespace=ns))
         self._request(
             "PUT",
             f"/collections/{collection}/points",
@@ -505,7 +570,8 @@ class QdrantHttpTransport:
         if not isinstance(raw_points, list):
             raise QdrantError("invalid_points", "scroll response points must be an array")
         points = tuple(
-            _point_from_value(point, dimension=self.vector_size) for point in raw_points
+            _restore_point(_point_from_value(point, dimension=self.vector_size))
+            for point in raw_points
         )
         ids = [point.point_id for point in points]
         if len(ids) != len(set(ids)):
@@ -539,8 +605,11 @@ class QdrantHttpTransport:
         result = _result_value(raw, "search response")
         if not isinstance(result, list):
             raise QdrantError("invalid_points", "search response result must be an array")
-        hits = tuple(_hit_from_value(hit) for hit in result)
-        return validate_search_order(hits)
+        wire_hits = tuple(_hit_from_value(hit) for hit in result)
+        _validate_qdrant_score_order(wire_hits)
+        hits = tuple(_restore_hit(hit) for hit in wire_hits)
+        ordered = tuple(sorted(hits, key=lambda hit: (-hit.score, hit.point_id)))
+        return validate_search_order(ordered)
 
     def delete_namespace(self, *, collection_name: str | None = None, namespace: str) -> None:
         collection = self._collection(collection_name)

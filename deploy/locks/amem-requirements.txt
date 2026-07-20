@@ -1,0 +1,4 @@
+# lock-status: bootstrap-contract
+# Generated on the target host from the pinned A-MEM checkout.
+# The generated lock is hash-pinned and installed with --require-hashes.
+--require-hashes

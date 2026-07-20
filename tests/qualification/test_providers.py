@@ -144,6 +144,8 @@ def test_deepseek_uses_openai_compatible_chat_tools() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/chat/completions"
         assert request.headers["authorization"] == "Bearer secret"
+        body = json.loads(request.content)
+        assert body["thinking"] == {"type": "disabled"}
         return httpx.Response(
             200,
             json={
@@ -183,6 +185,39 @@ def test_deepseek_uses_openai_compatible_chat_tools() -> None:
     assert response.selected_option_id == "option-01"
     assert response.usage.cached_tokens == 3
     assert response.usage.reasoning_tokens == 4
+
+
+def test_deepseek_missing_rationale_keeps_selected_action() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chat_missing_rationale",
+                "model": "deepseek-v4-pro",
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "submit_action",
+                                        "arguments": '{"action_id":"option-01"}',
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ],
+            },
+        )
+
+    response = HttpPolicyClient(
+        _profile("deepseek"),
+        api_key="secret",
+        transport=httpx.MockTransport(handler),
+    ).submit_action(_request())
+    assert response.selected_option_id == "option-01"
+    assert response.concise_rationale == ""
 
 
 @pytest.mark.parametrize(

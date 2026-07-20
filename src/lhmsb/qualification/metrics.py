@@ -8,9 +8,16 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
-from lhmsb.longhorizon.attribution import eligible_write_state_ids
+from lhmsb.longhorizon.attribution import (
+    MemoryAttribution,
+    attribute_memory,
+    build_software_fact_signatures,
+    eligible_write_state_ids,
+)
 from lhmsb.longhorizon.replay import replay_plan
 from lhmsb.longhorizon.schema import ContinuationOpportunity
+from lhmsb.qualification.memory_runtime import InventorySnapshot, WriteSessionResult
+from lhmsb.qualification.prefix import MemoryPrefixArtifact, MemoryPrefixCheckpoint
 from lhmsb.qualification.runner import (
     PolicyEvaluation,
     QualificationMatrixResult,
@@ -61,9 +68,10 @@ class StateCheckpointMetricInput:
     n_live: int
     write_latency_seconds: float = 0.0
     is_final_checkpoint: bool = True
-    new_memory_provenance: tuple[str, ...] = ()
-    live_memory_provenance: tuple[str, ...] = ()
-    provenance_complete: bool = True
+    # Native lifecycle event counts are optional so schema-v1 callers keep their
+    # exact constructor and serialization semantics.  Schema-v2 adapters fill
+    # these from the immutable mutation trace.
+    mutation_counts: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -91,13 +99,81 @@ class BehaviorMetricInput:
     intervention_labels: tuple[str, ...] = ()
     leave_one_out_count: int = 0
     leave_one_out_action_flips: int = 0
-    count_contrast_count: int = 0
-    count_contrast_action_flips: int = 0
-    count_contrast_behavior_changes: int = 0
     drift_flags: tuple[str, ...] = ()
     matched_group: str = ""
     checkpoint_session: int = 0
     is_conflict_opportunity: bool = False
+    # ``visible_memory_count`` is an exposure variable.  The primary scaling
+    # variable is the total live native-object count at the checkpoint.
+    live_memory_count: int | None = None
+
+
+@dataclass(frozen=True)
+class MultisystemMetricInput:
+    """One backend-neutral scored SCEU observation.
+
+    This DTO deliberately contains only evaluator-side attribution and the
+    model-visible trace.  It can be built from either the schema-v2 evaluator
+    result or the legacy runner result, allowing aggregation to stay independent
+    of a particular memory backend.
+    """
+
+    policy_profile_id: str
+    condition: str
+    readout: str
+    result_id: str
+    behavior_score: float
+    is_correct: bool
+    required_state_ids: tuple[str, ...] = ()
+    stale_state_ids: tuple[str, ...] = ()
+    candidate_memory_state_ids: tuple[tuple[str, ...], ...] = ()
+    retrieved_memory_state_ids: tuple[tuple[str, ...], ...] = ()
+    visible_memory_state_ids: tuple[tuple[str, ...], ...] = ()
+    candidate_shortfall: bool = False
+    visible_memory_count: int = 0
+    live_memory_count: int | None = None
+    causal_labels: tuple[str, ...] = ()
+    intervention_labels: tuple[str, ...] = ()
+    leave_one_out_count: int = 0
+    leave_one_out_action_flips: int = 0
+    drift_flags: tuple[str, ...] = ()
+    matched_group: str = ""
+    checkpoint_session: int = 0
+    is_conflict_opportunity: bool = False
+    retrieval_latency_seconds: float = 0.0
+    rerank_latency_seconds: float | None = None
+
+    def behavior_input(self) -> BehaviorMetricInput:
+        return BehaviorMetricInput(
+            policy_profile_id=self.policy_profile_id,
+            condition=self.condition,
+            readout=self.readout,
+            result_id=self.result_id,
+            behavior_score=self.behavior_score,
+            is_correct=self.is_correct,
+            visible_memory_count=self.visible_memory_count,
+            live_memory_count=self.live_memory_count,
+            causal_labels=self.causal_labels,
+            intervention_labels=self.intervention_labels,
+            leave_one_out_count=self.leave_one_out_count,
+            leave_one_out_action_flips=self.leave_one_out_action_flips,
+            drift_flags=self.drift_flags,
+            matched_group=self.matched_group,
+            checkpoint_session=self.checkpoint_session,
+            is_conflict_opportunity=self.is_conflict_opportunity,
+        )
+
+    def retrieval_input(self) -> RetrievalMetricInput:
+        return RetrievalMetricInput(
+            required_state_ids=self.required_state_ids,
+            stale_state_ids=self.stale_state_ids,
+            candidate_memory_state_ids=self.candidate_memory_state_ids,
+            retrieved_memory_state_ids=self.retrieved_memory_state_ids,
+            visible_memory_state_ids=self.visible_memory_state_ids,
+            candidate_shortfall=self.candidate_shortfall,
+            retrieval_latency_seconds=self.retrieval_latency_seconds,
+            rerank_latency_seconds=self.rerank_latency_seconds,
+        )
 
 
 @dataclass(frozen=True)
@@ -133,17 +209,137 @@ def compute_metric_collection(
     """Compute the complete qualification metric namespace from flat records."""
     values: dict[str, MetricValue] = {}
     _state_metrics(values, state_checkpoints)
-    for mode, prefix in (
-        ("native/exact", "storage_exact_"),
-        ("inferred", "storage_inferred_"),
-    ):
-        filtered = _filter_state_observations(state_checkpoints, mode)
-        if filtered:
-            _state_metrics(values, filtered, prefix=prefix)
     _retrieval_metrics(values, retrievals)
     _behavior_metrics(values, behaviors)
     _usage_metrics(values, usages)
     return MetricCollection(metrics=tuple(sorted(values.items())))
+
+
+def compute_multisystem_metrics(
+    observations: Sequence[MultisystemMetricInput],
+    *,
+    state_checkpoints: Sequence[StateCheckpointMetricInput] = (),
+    usages: Sequence[UsageMetricInput] = (),
+) -> MetricCollection:
+    """Compute metrics for the schema-v2 seven-condition matrix.
+
+    ``compute_metric_collection`` remains the low-level API used by schema-v1.
+    This adapter makes the common evaluator output convenient to aggregate and
+    ensures that retrieval metrics are only included for conditions that expose
+    a memory readout.  Empty controls therefore retain denominator-safe nulls.
+    """
+    behaviors = tuple(item.behavior_input() for item in observations)
+    retrievals = tuple(
+        item.retrieval_input()
+        for item in observations
+        if item.condition in {"flat_retrieval", "mem0", "amem", "memos",
+                              "mem0_controlled", "mem0_native"}
+        and item.readout != "none"
+    )
+    return compute_metric_collection(
+        state_checkpoints=state_checkpoints,
+        retrievals=retrievals,
+        behaviors=behaviors,
+        usages=usages,
+    )
+
+
+def compute_multisystem_metrics_by_cell(
+    observations: Sequence[MultisystemMetricInput],
+    *,
+    state_checkpoints_by_cell: Mapping[tuple[str, str, str],
+                                       Sequence[StateCheckpointMetricInput]] | None = None,
+    usages_by_cell: Mapping[tuple[str, str, str], Sequence[UsageMetricInput]] | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Return deterministic, non-mixed metric groups for policy/readout cells.
+
+    Native and ``common_rerank`` rows are intentionally separate groups.  The
+    function does not invent missing cells, which is important for controlled
+    tracks that deliberately omit native readouts.
+    """
+    grouped: dict[tuple[str, str, str], list[MultisystemMetricInput]] = defaultdict(list)
+    for item in observations:
+        grouped[(item.policy_profile_id, item.condition, item.readout)].append(item)
+    output: list[dict[str, object]] = []
+    state_map = state_checkpoints_by_cell or {}
+    usage_map = usages_by_cell or {}
+    for key in sorted(grouped):
+        metrics = compute_multisystem_metrics(
+            tuple(grouped[key]),
+            state_checkpoints=state_map.get(key, ()),
+            usages=usage_map.get(key, ()),
+        )
+        output.append(
+            {
+                "policy_profile_id": key[0],
+                "condition": key[1],
+                "readout": key[2],
+                "metrics": metrics.to_dict(),
+            }
+        )
+    return tuple(output)
+
+
+def compute_multisystem_scorecard(
+    observations: Sequence[MultisystemMetricInput],
+) -> tuple[dict[str, object], ...]:
+    """Build a compact scorecard without averaging readouts together."""
+    grouped: dict[tuple[str, str, str], list[MultisystemMetricInput]] = defaultdict(list)
+    for item in observations:
+        grouped[(item.policy_profile_id, item.condition, item.readout)].append(item)
+    output: list[dict[str, object]] = []
+    for key in sorted(grouped):
+        rows = grouped[key]
+        labels = [label for row in rows for label in row.intervention_labels]
+        causal = [label for row in rows for label in row.causal_labels]
+        flags = [flag for row in rows for flag in row.drift_flags]
+        output.append(
+            {
+                "policy_profile_id": key[0],
+                "condition": key[1],
+                "readout": key[2],
+                "n_sceu": len(rows),
+                "mean_behavior_score": _ratio_value(
+                    sum(row.behavior_score for row in rows), len(rows)
+                ),
+                "behavior_correct_rate": _ratio_value(
+                    sum(row.is_correct for row in rows), len(rows)
+                ),
+                "mean_visible_memory_count": _ratio_value(
+                    sum(row.visible_memory_count for row in rows), len(rows)
+                ),
+                "mean_live_memory_count": _ratio_value(
+                    sum(row.live_memory_count for row in rows if row.live_memory_count is not None),
+                    sum(row.live_memory_count is not None for row in rows),
+                ),
+                "causal_memory_use_rate": _ratio_value(
+                    sum(label in {"beneficial", "harmful"} for label in causal),
+                    len(causal),
+                ),
+                "beneficial_intervention_rate": _ratio_value(
+                    labels.count("beneficial"), len(labels)
+                ),
+                "harmful_intervention_rate": _ratio_value(
+                    labels.count("harmful"), len(labels)
+                ),
+                "constraint_loss_rate": _flag_rate(flags, "constraint_loss", len(rows)),
+                "current_plan_deviation_rate": _flag_rate(flags, "plan_deviation", len(rows)),
+                "stale_state_action_rate": _flag_rate(flags, "stale_state", len(rows)),
+                "local_over_global_rate": _flag_rate(flags, "local_over_global", len(rows)),
+                "aggregate_drift_rate": _ratio_value(
+                    sum(bool(row.drift_flags) for row in rows), len(rows)
+                ),
+            }
+        )
+    return tuple(output)
+
+
+def _ratio_value(numerator: float, denominator: float) -> float | None:
+    return None if denominator == 0 else float(numerator) / float(denominator)
+
+
+def _flag_rate(flags: Sequence[str], name: str, denominator: int) -> float | None:
+    return _ratio_value(flags.count(name), denominator)
 
 
 def compute_qualification_metrics(
@@ -206,22 +402,8 @@ def compute_qualification_metrics(
             new_memory_ids = {
                 event.memory_id
                 for event in write.events
-                if event.normalized_event in {"add", "update"}
+                if event.native_event in {"ADD", "UPDATE", "OBSERVED_ADD"}
             }
-            event_by_memory = {
-                event.memory_id: event for event in write.events
-            }
-            new_provenance = tuple(
-                (
-                    "inferred"
-                    if event_by_memory[memory_id].source
-                    in {"inventory_diff", "inventory_delta"}
-                    or event_by_memory[memory_id].native_event.startswith("INFERRED")
-                    else "native/exact"
-                )
-                for memory_id in sorted(new_memory_ids)
-                if memory_id in event_by_memory
-            )
             future_needed = tuple(
                 state_id
                 for state_id, state in replay.current.items()
@@ -251,13 +433,10 @@ def compute_qualification_metrics(
                     n_live=write.inventory.n_live,
                     write_latency_seconds=write.latency_seconds,
                     is_final_checkpoint=index == len(task.writes) - 1,
-                    new_memory_provenance=new_provenance,
-                    live_memory_provenance=tuple(
-                        _attribution_mode(alignment.attributions, item.memory_id)
-                        for item in write.inventory.items
-                    ),
-                    provenance_complete=not (
-                        write.n_write > 0 and not write.events
+                    mutation_counts=tuple(
+                        sorted(
+                            Counter(event.native_event.lower() for event in write.events).items()
+                        )
                     ),
                 )
             )
@@ -303,11 +482,6 @@ def compute_qualification_metrics(
                     item.evaluations[0].selected_action_id != baseline_action
                     for item in loo
                 )
-                count_contrasts = tuple(
-                    item
-                    for item in row.interventions
-                    if item.count_contrast in {"delete_one", "add_one"}
-                )
                 opportunity = opportunity_by_id[row.opportunity_id]
                 checkpoint_replay = replay_plan(
                     spec.plan,
@@ -331,15 +505,9 @@ def compute_qualification_metrics(
                         ),
                         leave_one_out_count=len(loo),
                         leave_one_out_action_flips=action_flips,
-                        count_contrast_count=len(count_contrasts),
-                        count_contrast_action_flips=sum(
-                            item.classification.action_changed
-                            for item in count_contrasts
-                        ),
-                        count_contrast_behavior_changes=sum(
-                            item.classification.action_changed
-                            or item.classification.checker_changed
-                            for item in count_contrasts
+                        live_memory_count=_live_count_at_checkpoint(
+                            task.writes,
+                            row.checkpoint_session,
                         ),
                         drift_flags=row.normalized_drift_flags,
                         matched_group=row.matched_group,
@@ -347,11 +515,6 @@ def compute_qualification_metrics(
                         is_conflict_opportunity=_is_state_conflict_opportunity(
                             opportunity,
                             checkpoint_replay.invalidated,
-                            pre_update_state_ids=tuple(
-                                state.state_id
-                                for state in spec.plan.state_units
-                                if state.valid_from > row.checkpoint_session
-                            ),
                         ),
                     )
                 )
@@ -430,131 +593,269 @@ def compute_qualification_metrics(
     )
 
 
-def _attribution_mode(
-    attributions: Sequence[object],
-    memory_id: str,
-) -> str:
-    for item in attributions:
-        if getattr(item, "memory_id", None) == memory_id:
-            mode = getattr(item, "provenance_mode", "unavailable")
-            return str(mode)
-    return "unavailable"
+def _live_count_at_checkpoint(
+    writes: Sequence[WriteSessionResult],
+    checkpoint_session: int,
+) -> int | None:
+    """Read the last immutable inventory before a continuation checkpoint."""
+    candidates = [
+        item
+        for item in writes
+        if item.session_index < checkpoint_session
+    ]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda item: item.session_index)
+    return latest.inventory.n_live
 
 
-def _filter_state_observations(
-    observations: Sequence[StateCheckpointMetricInput],
-    mode: str,
-) -> tuple[StateCheckpointMetricInput, ...]:
-    """Project checkpoint records onto one provenance track.
+def multisystem_observations_from_results(
+    results: Sequence[object] | object,
+    specs: Mapping[str, SoftwareMem0VerticalSpec],
+    *,
+    prefix_artifacts: Mapping[str, object] | None = None,
+) -> tuple[MultisystemMetricInput, ...]:
+    """Normalize schema-v2 evaluator DTOs into metric inputs.
 
-    A checkpoint with no object on the requested track contributes no write
-    denominator.  This keeps exact metrics undefined for backends that expose
-    only inferred snapshots instead of silently turning missing native events
-    into a zero-quality claim.
+    The evaluator intentionally stores only a prefix hash in each result.  This
+    helper joins the result to the separately persisted immutable artifact so
+    state coverage and memory-count metrics can be computed without exposing
+    evaluator labels to the policy.  Missing artifacts are tolerated for control
+    rows and produce denominator-safe null retrieval metrics for memory rows.
     """
-    projected: list[StateCheckpointMetricInput] = []
-    for item in observations:
-        new_pairs = tuple(
-            pair
-            for pair, provenance in zip(
-                item.new_memory_state_ids,
-                item.new_memory_provenance,
-                strict=False,
-            )
-            if provenance == mode
-        )
-        live_pairs = tuple(
-            pair
-            for pair, provenance in zip(
-                item.live_memory_state_ids,
-                item.live_memory_provenance,
-                strict=False,
-            )
-            if provenance == mode
-        )
-        if not new_pairs and not live_pairs:
+    task_results = getattr(results, "task_results", None)
+    rows = tuple(task_results) if task_results is not None else tuple(results)  # type: ignore[arg-type]
+    output: list[MultisystemMetricInput] = []
+    artifact_map = prefix_artifacts or {}
+    for task in rows:
+        episode_id = str(getattr(task, "episode_id", ""))
+        spec = specs.get(episode_id)
+        if spec is None:
             continue
-        projected.append(
-            StateCheckpointMetricInput(
-                eligible_write_state_ids=(
-                    item.eligible_write_state_ids if new_pairs else ()
-                ),
-                new_memory_state_ids=new_pairs,
-                current_state_ids=item.current_state_ids,
-                future_needed_state_ids=item.future_needed_state_ids,
-                retired_state_ids=item.retired_state_ids,
-                live_memory_state_ids=live_pairs,
-                live_content_hashes=tuple(
-                    content_hash
-                    for content_hash, provenance in zip(
-                        item.live_content_hashes,
-                        item.live_memory_provenance,
-                        strict=False,
+        policy_id = str(getattr(task, "policy_profile_id", ""))
+        task_condition = str(getattr(task, "condition", ""))
+        artifact = _artifact_for_task(task, artifact_map)
+        opportunity_by_id = {item.opportunity_id: item for item in spec.plan.opportunities}
+        sceu_by_id = {item.sceu_id: item for item in spec.plan.sceu_units}
+        for condition_result in getattr(task, "condition_results", ()):
+            condition = str(getattr(condition_result, "condition", task_condition))
+            readout = str(getattr(condition_result, "readout", "none"))
+            for row in getattr(condition_result, "sceu_results", ()):
+                sceu = sceu_by_id.get(str(getattr(row, "sceu_id", "")))
+                if sceu is None:
+                    continue
+                checkpoint = _artifact_checkpoint(artifact, sceu.checkpoint_session)
+                inventory = checkpoint.inventory if checkpoint is not None else None
+                attribution = _artifact_attributions(spec, inventory, sceu.checkpoint_session)
+                candidate_ids = tuple(getattr(row, "candidate_memory_ids", ()))
+                retrieved_ids = tuple(getattr(row, "retrieved_memory_ids", ()))
+                visible_ids = tuple(getattr(row, "model_visible_memory_ids", ()))
+                intervention_rows = tuple(getattr(row, "interventions", ()))
+                loo_rows = tuple(
+                    item
+                    for item in intervention_rows
+                    if str(getattr(item, "intervention_kind", "")) == "leave_one_out"
+                )
+                causal_labels = tuple(
+                    str(getattr(getattr(item, "classification", None), "label", "indeterminate"))
+                    for item in loo_rows
+                )
+                intervention_labels = tuple(
+                    str(getattr(getattr(item, "classification", None), "label", "indeterminate"))
+                    for item in intervention_rows
+                )
+                selected = str(getattr(row, "selected_action_id", ""))
+                flips = sum(
+                    bool(getattr(item, "evaluations", ()))
+                    and str(getattr(item.evaluations[0], "selected_action_id", "")) != selected
+                    for item in loo_rows
+                )
+                behavior = getattr(row, "behavior", None)
+                behavior_score = float(
+                    getattr(behavior, "behavior_score", getattr(row, "behavior_score", 0.0))
+                )
+                is_correct = bool(
+                    getattr(behavior, "is_correct", getattr(row, "is_correct", False))
+                )
+                opportunity = opportunity_by_id.get(str(getattr(row, "opportunity_id", "")))
+                current = replay_plan(spec.plan, sceu.checkpoint_session)
+                output.append(
+                    MultisystemMetricInput(
+                        policy_profile_id=policy_id,
+                        condition=condition,
+                        readout=readout,
+                        result_id=str(getattr(row, "result_id", "")),
+                        behavior_score=behavior_score,
+                        is_correct=is_correct,
+                        required_state_ids=tuple(sceu.required_state_ids),
+                        stale_state_ids=tuple(sorted(current.invalidated)),
+                        candidate_memory_state_ids=tuple(
+                            _attributed_state_ids(attribution, memory_id)
+                            for memory_id in candidate_ids
+                        ),
+                        retrieved_memory_state_ids=tuple(
+                            _attributed_state_ids(attribution, memory_id)
+                            for memory_id in retrieved_ids
+                        ),
+                        visible_memory_state_ids=tuple(
+                            _attributed_state_ids(attribution, memory_id)
+                            for memory_id in visible_ids
+                        ),
+                        candidate_shortfall=bool(getattr(row, "candidate_shortfall", False)),
+                        visible_memory_count=len(visible_ids),
+                        live_memory_count=(None if inventory is None else inventory.n_live),
+                        causal_labels=causal_labels,
+                        intervention_labels=intervention_labels,
+                        leave_one_out_count=len(loo_rows),
+                        leave_one_out_action_flips=flips,
+                        drift_flags=tuple(getattr(row, "normalized_drift_flags", ())),
+                        matched_group=str(getattr(row, "matched_group", "")),
+                        checkpoint_session=sceu.checkpoint_session,
+                        is_conflict_opportunity=(
+                            False
+                            if opportunity is None
+                            else _is_state_conflict_opportunity(
+                                opportunity,
+                                current.invalidated,
+                            )
+                        ),
+                        retrieval_latency_seconds=_checkpoint_retrieval_latency(
+                            checkpoint,
+                            sceu.opportunity_id,
+                        ),
+                        rerank_latency_seconds=_checkpoint_rerank_latency(
+                            checkpoint,
+                            sceu.opportunity_id,
+                        ),
                     )
-                    if provenance == mode
-                ),
-                n_write=item.n_write,
-                n_live=len(live_pairs),
-                write_latency_seconds=item.write_latency_seconds,
-                is_final_checkpoint=item.is_final_checkpoint,
-                new_memory_provenance=(mode,) * len(new_pairs),
-                live_memory_provenance=(mode,) * len(live_pairs),
-                provenance_complete=item.provenance_complete,
-            )
+                )
+    return tuple(output)
+
+
+def compute_schema_v2_metrics(
+    results: Sequence[object] | object,
+    specs: Mapping[str, SoftwareMem0VerticalSpec],
+    *,
+    prefix_artifacts: Mapping[str, object] | None = None,
+    state_checkpoints: Sequence[StateCheckpointMetricInput] = (),
+    usages: Sequence[UsageMetricInput] = (),
+) -> MetricCollection:
+    """Convenience facade used by server aggregation workers."""
+    observations = multisystem_observations_from_results(
+        results,
+        specs,
+        prefix_artifacts=prefix_artifacts,
+    )
+    return compute_multisystem_metrics(
+        observations,
+        state_checkpoints=state_checkpoints,
+        usages=usages,
+    )
+
+
+def _artifact_for_task(
+    task: object,
+    artifacts: Mapping[str, object],
+) -> MemoryPrefixArtifact | None:
+    condition = str(getattr(task, "condition", ""))
+    episode_id = str(getattr(task, "episode_id", ""))
+    candidates = (
+        f"{episode_id}--{condition}",
+        condition,
+        f"{episode_id}--{_backend_alias(condition)}",
+        _backend_alias(condition),
+    )
+    for key in candidates:
+        candidate = artifacts.get(key)
+        if candidate is None:
+            continue
+        if isinstance(candidate, MemoryPrefixArtifact):
+            return candidate
+        if isinstance(candidate, Mapping):
+            try:
+                return MemoryPrefixArtifact.from_dict(candidate)
+            except Exception:
+                return None
+    return None
+
+
+def _backend_alias(condition: str) -> str:
+    if condition in {"mem0_controlled", "mem0_native"}:
+        return "mem0"
+    return condition
+
+
+def _artifact_checkpoint(
+    artifact: MemoryPrefixArtifact | None,
+    checkpoint_session: int,
+) -> MemoryPrefixCheckpoint | None:
+    if artifact is None:
+        return None
+    return next(
+        (item for item in artifact.checkpoints if item.checkpoint_session == checkpoint_session),
+        None,
+    )
+
+
+def _artifact_attributions(
+    spec: SoftwareMem0VerticalSpec,
+    inventory: InventorySnapshot | None,
+    checkpoint_session: int,
+) -> dict[str, MemoryAttribution]:
+    if inventory is None:
+        return {}
+    signatures = build_software_fact_signatures(spec.plan)
+    output: dict[str, MemoryAttribution] = {}
+    for item in inventory.items:
+        metadata = dict(item.metadata)
+        source_session = metadata.get("session_index")
+        eligible = (
+            eligible_write_state_ids(spec.plan, source_session)
+            if isinstance(source_session, int) and source_session < checkpoint_session
+            else ()
         )
-    return tuple(projected)
+        attribution = attribute_memory(
+            item.memory_id,
+            item.content,
+            signatures,
+            unique_write_state_ids=eligible,
+        )
+        output[item.memory_id] = attribution
+    return output
 
 
-def provenance_diagnostics(
-    matrix: QualificationMatrixResult,
-) -> dict[str, object]:
-    """Summarize exact/inferred lifecycle coverage for the report manifest."""
-    n_writes = 0
-    n_events = 0
-    native_events = 0
-    inferred_events = 0
-    incomplete: list[dict[str, object]] = []
-    by_source: Counter[str] = Counter()
-    for task in matrix.task_results:
-        for write in task.writes:
-            n_writes += 1
-            n_events += len(write.events)
-            for event in write.events:
-                source = (
-                    "inferred"
-                    if event.source in {"inventory_diff", "inventory_delta"}
-                    or event.native_event.startswith("INFERRED")
-                    else "native/exact"
-                )
-                by_source[source] += 1
-                if source == "inferred":
-                    inferred_events += 1
-                else:
-                    native_events += 1
-            if write.n_write > 0 and not write.events:
-                incomplete.append(
-                    {
-                        "task_id": task.task_id,
-                        "session_index": write.session_index,
-                        "n_write": write.n_write,
-                    }
-                )
-    return {
-        "n_write_sessions": n_writes,
-        "n_lifecycle_events": n_events,
-        "native_exact_event_count": native_events,
-        "inferred_event_count": inferred_events,
-        "event_source_counts": dict(sorted(by_source.items())),
-        "incomplete_write_sessions": incomplete,
-        "status": "incomplete" if incomplete else "complete",
-    }
+def _attributed_state_ids(
+    attribution: Mapping[str, MemoryAttribution],
+    memory_id: str,
+) -> tuple[str, ...]:
+    item = attribution.get(memory_id)
+    return () if item is None else tuple(item.state_ids)
+
+
+def _checkpoint_retrieval_latency(checkpoint: object | None, opportunity_id: str) -> float:
+    if checkpoint is None:
+        return 0.0
+    for search in getattr(checkpoint, "retrievals", ()):
+        # CandidateSearch currently binds the query, not opportunity ID.  A
+        # checkpoint with one SCEU has an unambiguous search; otherwise leave
+        # latency as an explicitly observed-but-zero placeholder.
+        _ = opportunity_id
+        return float(getattr(search, "latency_seconds", 0.0))
+    return 0.0
+
+
+def _checkpoint_rerank_latency(checkpoint: object | None, opportunity_id: str) -> float | None:
+    if checkpoint is None:
+        return None
+    for rerank in getattr(checkpoint, "common_reranks", ()):
+        _ = opportunity_id
+        return float(getattr(rerank, "latency_seconds", 0.0))
+    return None
 
 
 def _state_metrics(
     values: dict[str, MetricValue],
     observations: Sequence[StateCheckpointMetricInput],
-    *,
-    prefix: str = "",
 ) -> None:
     write_covered = 0
     write_eligible = 0
@@ -569,6 +870,8 @@ def _state_metrics(
     aligned_live_objects = 0
     responsive_retired = 0
     retired_states = 0
+    current_stale_coexistence = 0
+    mutation_totals: Counter[str] = Counter()
     aligned_future = 0
     future_states = 0
     write_latency = 0.0
@@ -593,6 +896,11 @@ def _state_metrics(
         represented_current += len(represented & current)
         current_states += len(current)
         stale_objects += sum(bool(states & retired) for states in live)
+        current_stale_coexistence += sum(
+            bool(states & current) and bool(states & retired)
+            for states in live
+        )
+        mutation_totals.update(dict(item.mutation_counts))
         counts = Counter(
             state_id
             for states in live
@@ -611,51 +919,56 @@ def _state_metrics(
             final_write_count += item.n_write
             final_live_count += item.n_live
 
-    def metric(name: str) -> str:
-        return f"{prefix}{name}" if prefix else name
-
-    values[metric("write_coverage")] = safe_ratio(write_covered, write_eligible)
-    values[metric("write_selectivity")] = safe_ratio(selective_objects, written_objects)
+    values["write_coverage"] = safe_ratio(write_covered, write_eligible)
+    values["write_selectivity"] = safe_ratio(selective_objects, written_objects)
     precision = safe_ratio(current_objects, live_objects)
     recall = safe_ratio(represented_current, current_states)
-    values[metric("current_state_storage_precision")] = precision
-    values[metric("current_state_storage_recall")] = recall
-    values[metric("current_state_storage_f1")] = _f1(precision, recall)
-    values[metric("stale_state_retention_rate")] = safe_ratio(stale_objects, live_objects)
-    values[metric("duplicate_live_memory_rate")] = safe_ratio(
+    values["current_state_storage_precision"] = precision
+    values["current_state_storage_recall"] = recall
+    values["current_state_storage_f1"] = _f1(precision, recall)
+    values["stale_state_retention_rate"] = safe_ratio(stale_objects, live_objects)
+    values["current_stale_coexistence_rate"] = safe_ratio(
+        current_stale_coexistence,
+        live_objects,
+    )
+    values["duplicate_live_memory_rate"] = safe_ratio(
         duplicate_objects,
         aligned_live_objects,
     )
-    values[metric("update_delete_responsiveness")] = safe_ratio(
+    values["update_delete_responsiveness"] = safe_ratio(
         responsive_retired,
         retired_states,
     )
-    values[metric("write_to_continuation_alignment")] = safe_ratio(
+    values["write_to_continuation_alignment"] = safe_ratio(
         aligned_future,
         future_states,
     )
-    values[metric("memory_write_count")] = safe_ratio(
+    values["memory_write_count"] = safe_ratio(
         final_write_count,
         final_checkpoints,
     )
-    values[metric("memory_write_count_total")] = (
+    values["memory_write_count_total"] = (
         safe_ratio(final_write_count, 1)
         if final_checkpoints
         else safe_ratio(0, 0)
     )
-    values[metric("live_memory_count")] = safe_ratio(
+    values["live_memory_count"] = safe_ratio(
         final_live_count,
         final_checkpoints,
     )
-    values[metric("live_memory_count_total")] = (
+    values["live_memory_count_total"] = (
         safe_ratio(final_live_count, 1)
         if final_checkpoints
         else safe_ratio(0, 0)
     )
-    values[metric("mean_write_latency_seconds")] = safe_ratio(
+    values["mean_write_latency_seconds"] = safe_ratio(
         write_latency,
         len(observations),
     )
+    for event_name in ("add", "update", "delete", "observed_add", "observed_delta", "merge"):
+        values[f"mutation_{event_name}_count"] = safe_ratio(
+            mutation_totals[event_name], 1 if observations else 0
+        )
 
 
 def _retrieval_metrics(
@@ -670,6 +983,9 @@ def _retrieval_metrics(
     visible_states_found = 0
     visible_objects = 0
     contaminated_visible = 0
+    stale_candidates = 0
+    candidate_objects = 0
+    stale_visible = 0
     stale_retrieved = 0
     retrieved_not_visible = 0
     shortfalls = 0
@@ -692,6 +1008,9 @@ def _retrieval_metrics(
         retrieved_states_found += len(required & retrieved_union)
         visible_states_found += len(required & visible_union)
         visible_objects += len(visible)
+        candidate_objects += len(candidates)
+        stale_candidates += sum(bool(states & stale) for states in candidates)
+        stale_visible += sum(bool(states & stale) for states in visible)
         contaminated_visible += sum(not bool(states & required) for states in visible)
         stale_retrieved += sum(bool(states & stale) for states in retrieved)
         retrieved_not_visible += max(0, len(retrieved) - len(visible))
@@ -730,12 +1049,24 @@ def _retrieval_metrics(
         contaminated_visible,
         visible_objects,
     )
+    values["stale_candidate_exposure"] = safe_ratio(
+        stale_candidates,
+        candidate_objects,
+    )
+    values["stale_visible_exposure"] = safe_ratio(
+        stale_visible,
+        visible_objects,
+    )
     values["stale_retrieval_rate"] = safe_ratio(
         stale_retrieved,
         retrieved_objects,
     )
     values["retrieved_but_not_visible_rate"] = safe_ratio(
         retrieved_not_visible,
+        retrieved_objects,
+    )
+    values["retrieval_to_visible_yield"] = safe_ratio(
+        retrieved_objects - retrieved_not_visible,
         retrieved_objects,
     )
     values["mean_retrieval_latency_seconds"] = safe_ratio(
@@ -767,6 +1098,10 @@ def _behavior_metrics(
         causal_labels.count("visible_not_causally_used"),
         len(causal_labels),
     )
+    values["visible_to_causal_use_yield"] = safe_ratio(
+        causal_used,
+        sum(item.visible_memory_count for item in observations),
+    )
     values["beneficial_intervention_rate"] = safe_ratio(
         intervention_labels.count("beneficial"),
         len(intervention_labels),
@@ -791,21 +1126,6 @@ def _behavior_metrics(
     values["leave_one_memory_out_action_flip_rate"] = safe_ratio(
         loo_flips,
         loo_count,
-    )
-    count_contrasts = sum(item.count_contrast_count for item in observations)
-    count_action_flips = sum(
-        item.count_contrast_action_flips for item in observations
-    )
-    count_behavior_changes = sum(
-        item.count_contrast_behavior_changes for item in observations
-    )
-    values["memory_count_contrast_rate"] = safe_ratio(
-        count_action_flips,
-        count_contrasts,
-    )
-    values["memory_count_behavior_change_rate"] = safe_ratio(
-        count_behavior_changes,
-        count_contrasts,
     )
     flag_names = (
         "constraint_loss",
@@ -841,33 +1161,33 @@ def _behavior_metrics(
         len(conflict),
     )
     values["matched_early_late_behavioral_decay"] = _matched_decay(observations)
+    by_live_count: dict[int, list[BehaviorMetricInput]] = defaultdict(list)
+    for item in observations:
+        if item.live_memory_count is not None:
+            by_live_count[item.live_memory_count].append(item)
+    for live_count, rows in sorted(by_live_count.items()):
+        suffix = f"_live_memory_count_{live_count}"
+        values[f"mean_behavior_score{suffix}"] = safe_ratio(
+            sum(item.behavior_score for item in rows), len(rows)
+        )
+        values[f"behavior_correct_rate{suffix}"] = safe_ratio(
+            sum(item.is_correct for item in rows), len(rows)
+        )
+        values[f"aggregate_drift_rate{suffix}"] = safe_ratio(
+            sum(any(flag in item.drift_flags for flag in flag_names) for item in rows),
+            len(rows),
+        )
     _baseline_comparison_metrics(values, observations)
 
 
 def _is_state_conflict_opportunity(
     opportunity: ContinuationOpportunity,
     invalidated_state_ids: Collection[str],
-    *,
-    pre_update_state_ids: Collection[str] = (),
 ) -> bool:
-    if opportunity.challenge_type in {
-        "scope-conflict",
-        "valid-update",
-        "global-local-conflict",
-        "premature-v2",
-        "stale-after-revoke",
-    }:
+    if opportunity.challenge_type in {"scope-conflict", "valid-update"}:
         return True
     if opportunity.challenge_type != "matched-branch":
         return False
-    if set(pre_update_state_ids) & {
-        state_id
-        for action in opportunity.action_catalog
-        for state_id in action.satisfies_state_ids
-    }:
-        # The early matched branch is a conflict-resolution probe: an action
-        # that adopts a future branch is not valid yet.
-        return True
     invalidated = set(invalidated_state_ids)
     valid_actions = set(opportunity.valid_action_ids)
     return any(
@@ -891,10 +1211,13 @@ def _baseline_comparison_metrics(
         for key, scores in grouped.items()
         if scores
     }
+    policies = sorted({item.policy_profile_id for item in observations})
+    # Keep the schema-v1 keys exactly as before.  For schema-v2 every backend
+    # and readout receives its own key; native and common-rerank are never
+    # silently averaged into one cell.
     gains: list[float] = []
     closures: list[float] = []
     rerank_deltas: list[float] = []
-    policies = sorted({item.policy_profile_id for item in observations})
     comparisons = (
         (
             "mem0_controlled_native",
@@ -912,12 +1235,33 @@ def _baseline_comparison_metrics(
             "native",
         ),
     )
-    comparison_gains: dict[str, list[float]] = {
-        prefix: [] for prefix, _, _ in comparisons
+    comparison_gains: dict[str, list[float]] = {prefix: [] for prefix, _, _ in comparisons}
+    comparison_closures: dict[str, list[float]] = {prefix: [] for prefix, _, _ in comparisons}
+    schema2_conditions = ("flat_retrieval", "mem0", "amem", "memos")
+    schema2_readouts = {
+        "flat_retrieval": ("common_rerank",),
+        "mem0": ("native", "common_rerank"),
+        "amem": ("native", "common_rerank"),
+        "memos": ("native", "common_rerank"),
     }
-    comparison_closures: dict[str, list[float]] = {
-        prefix: [] for prefix, _, _ in comparisons
-    }
+    schema2_buckets: dict[str, list[float]] = defaultdict(list)
+    has_schema2 = any(item.condition in schema2_conditions for item in observations)
+
+    def append_closure(
+        numerator: float,
+        workspace: float | None,
+        oracle: float | None,
+        bucket: list[float],
+    ) -> None:
+        if workspace is None or oracle is None or oracle == workspace:
+            return
+        bucket.append(
+            float(
+                Decimal(str(numerator))
+                / (Decimal(str(oracle)) - Decimal(str(workspace)))
+            )
+        )
+
     for policy in policies:
         workspace = means.get((policy, "workspace_only", "none"))
         oracle = means.get((policy, "oracle_current_state", "none"))
@@ -946,20 +1290,53 @@ def _baseline_comparison_metrics(
                 continue
             gain = _stable_difference(score, workspace)
             comparison_gains[prefix].append(gain)
-            if oracle is not None and oracle != workspace:
-                comparison_closures[prefix].append(
-                    float(
-                        Decimal(str(gain))
-                        / (
-                            Decimal(str(oracle))
-                            - Decimal(str(workspace))
-                        )
-                    )
-                )
+            append_closure(gain, workspace, oracle, comparison_closures[prefix])
         native = means.get((policy, "mem0_controlled", "native"))
         common = means.get((policy, "mem0_controlled", "common_rerank"))
         if native is not None and common is not None:
             rerank_deltas.append(_stable_difference(common, native))
+
+        flat = means.get((policy, "flat_retrieval", "common_rerank"))
+        full = means.get((policy, "full_context", "none"))
+        if not has_schema2:
+            continue
+        for condition in schema2_conditions:
+            # Emit an explicit null for an inapplicable Flat native readout so
+            # downstream tables can distinguish "not applicable" from missing
+            # computation without inventing a score.
+            readouts = schema2_readouts[condition]
+            if condition == "flat_retrieval":
+                readouts = ("native", "common_rerank")
+            for readout in readouts:
+                score = means.get((policy, condition, readout))
+                prefix = f"{condition}_{readout}"
+                gain_values = []
+                gap_values = []
+                flat_values = []
+                if workspace is not None and score is not None:
+                    gain_values.append(_stable_difference(score, workspace))
+                if flat is not None and score is not None and condition != "flat_retrieval":
+                    flat_values.append(_stable_difference(score, flat))
+                if full is not None and score is not None:
+                    gap_values.append(_stable_difference(full, score))
+                schema2_buckets[f"{prefix}_gain_beyond_workspace"].extend(gain_values)
+                schema2_buckets[f"{prefix}_gain_over_flat"].extend(flat_values)
+                schema2_buckets[f"{prefix}_gap_to_full_context"].extend(gap_values)
+                closure: list[float] = []
+                if workspace is not None and score is not None:
+                    append_closure(
+                        _stable_difference(score, workspace),
+                        workspace,
+                        oracle,
+                        closure,
+                    )
+                schema2_buckets[f"{prefix}_oracle_gap_closed"].extend(closure)
+            native = means.get((policy, condition, "native"))
+            common = means.get((policy, condition, "common_rerank"))
+            if native is not None and common is not None:
+                schema2_buckets[f"{condition}_common_rerank_minus_native"].append(
+                    _stable_difference(common, native)
+                )
     values["mem0_gain_beyond_workspace"] = safe_ratio(
         sum(gains),
         len(gains),
@@ -983,6 +1360,8 @@ def _baseline_comparison_metrics(
         sum(rerank_deltas),
         len(rerank_deltas),
     )
+    for name, bucket in sorted(schema2_buckets.items()):
+        values[name] = safe_ratio(sum(bucket), len(bucket))
 
 
 def _usage_metrics(
@@ -1183,11 +1562,16 @@ __all__ = [
     "BehaviorMetricInput",
     "MetricCollection",
     "MetricValue",
+    "MultisystemMetricInput",
     "RetrievalMetricInput",
     "StateCheckpointMetricInput",
     "UsageMetricInput",
     "compute_metric_collection",
+    "compute_multisystem_metrics",
+    "compute_multisystem_metrics_by_cell",
+    "compute_multisystem_scorecard",
+    "compute_schema_v2_metrics",
     "compute_qualification_metrics",
-    "provenance_diagnostics",
+    "multisystem_observations_from_results",
     "safe_ratio",
 ]

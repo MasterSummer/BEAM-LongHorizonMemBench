@@ -1,0 +1,4 @@
+# lock-status: bootstrap-contract
+# Generated on the target host by bootstrap_systems_server.sh.
+# The generated lock is hash-pinned and installed with --require-hashes.
+--require-hashes

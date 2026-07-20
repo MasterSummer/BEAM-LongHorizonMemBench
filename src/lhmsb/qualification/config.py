@@ -18,12 +18,19 @@ from lhmsb.qualification.conditions import (
     condition_definition,
     condition_definitions,
 )
+from lhmsb.qualification.memory_runtime import MemoryTraceValidationError
+from lhmsb.qualification.prefix import (
+    MemoryPrefixArtifact,
+    PrefixArtifactError,
+    prefix_artifact_hash,
+)
 from lhmsb.qualification.schema import (
     AMemProfile,
     CausalSamplingProfile,
     EvaluationTask,
     EvaluationTaskTemplate,
     FlatRetrievalProfile,
+    Mem0ControlledProfile,
     Mem0Profile,
     Mem0Track,
     MemOSTreeProfile,
@@ -464,37 +471,59 @@ def _load_system_profile(
                 )
             return memos_profile
         if backend == "mem0":
-            mem0_profile = _load_mem0_data(data)
-            if mem0_profile.track != "controlled":
+            track = _string(data.get("track", "controlled"), "mem0.track")
+            if track != "controlled":
                 raise QualificationConfigError("schema-v2 Mem0 profile must be controlled")
-            if mem0_profile.version != "2.0.12":
-                raise QualificationConfigError(
-                    "Mem0 version is not the pinned qualification revision"
-                )
-            if mem0_profile.embedding_model != retrieval.embedding_model:
-                raise QualificationConfigError(
-                    "Mem0 controlled profile must use common BGE-M3 embeddings"
-                )
-            declared_writer = _string(
-                data.get("writer_profile_id", writer_profile.profile_id),
-                "mem0.writer_profile_id",
+            mem0_profile = Mem0ControlledProfile(
+                profile_id=profile_id,
+                backend="mem0",
+                kind=_string(data.get("kind", "mem0"), "mem0.kind"),
+                track="controlled",
+                package=_string(data.get("package"), "mem0.package"),
+                version=_string(data.get("version"), "mem0.version"),
+                source_commit=_string(data.get("source_commit"), "mem0.source_commit"),
+                source_url=_string(
+                    data.get("source_url", "https://github.com/mem0ai/mem0"),
+                    "mem0.source_url",
+                ),
+                wheel_sha256=_string(data.get("wheel_sha256"), "mem0.wheel_sha256"),
+                internal_llm_mode=_string(
+                    data.get("internal_llm_mode"), "mem0.internal_llm_mode"
+                ),
+                internal_llm_provider=_optional_string(
+                    data.get("internal_llm_provider")
+                ),
+                internal_llm_model=_optional_string(data.get("internal_llm_model")),
+                embedding_provider=_string(
+                    data.get("embedding_provider"), "mem0.embedding_provider"
+                ),
+                embedding_profile_id=cast(str, common["embedding_profile_id"]),
+                embedding_model=cast(str, common["embedding_model"]),
+                embedding_revision=cast(str, common["embedding_revision"]),
+                vector_store=_string(data.get("vector_store"), "mem0.vector_store"),
+                reranker_enabled=_boolean(
+                    data.get("reranker_enabled"), "mem0.reranker_enabled"
+                ),
+                prompt_source=_string(data.get("prompt_source"), "mem0.prompt_source"),
+                telemetry_enabled=_boolean(
+                    data.get("telemetry_enabled"), "mem0.telemetry_enabled"
+                ),
+                reranker_profile_id=cast(str, common["reranker_profile_id"]),
+                reranker_model=cast(str, common["reranker_model"]),
+                reranker_revision=cast(str, common["reranker_revision"]),
+                candidate_k=cast(int, common["candidate_k"]),
+                visible_k=cast(int, common["visible_k"]),
+                readouts=readouts,
+                writer_profile_id=_string(
+                    data.get("writer_profile_id", writer_profile.profile_id),
+                    "mem0.writer_profile_id",
+                ),
+                allow_fallback=allow_fallback,
+                fallback_backend=fallback_backend,
             )
-            if declared_writer != writer_profile.profile_id:
+            if mem0_profile.writer_profile_id != writer_profile.profile_id:
                 raise QualificationConfigError(
                     "Mem0 writer profile does not match the fixed writer"
-                )
-            if readouts != ("native", "common_rerank"):
-                raise QualificationConfigError(
-                    "Mem0 controlled profile must expose native and common_rerank"
-                )
-            if (
-                _integer(data.get("candidate_k", retrieval.candidate_k), "mem0.candidate_k")
-                != retrieval.candidate_k
-                or _integer(data.get("visible_k", retrieval.visible_k), "mem0.visible_k")
-                != retrieval.visible_k
-            ):
-                raise QualificationConfigError(
-                    "Mem0 controlled retrieval budget differs from common budget"
                 )
             return mem0_profile
     except (TypeError, ValueError) as exc:
@@ -610,6 +639,22 @@ _PREPARATION_BACKENDS: tuple[str, ...] = (
     "amem",
     "memos",
 )
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _require_digest(value: object, label: str) -> str:
+    if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
+        raise QualificationConfigError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _episode_ids(value: Sequence[str]) -> tuple[str, ...]:
+    output = tuple(_string(item, "episode_id") for item in value)
+    if not output:
+        raise QualificationConfigError("episode_ids must be non-empty")
+    if len(output) != len(set(output)):
+        raise QualificationConfigError("episode_ids must be unique")
+    return output
 
 
 def _require_v2(
@@ -630,22 +675,24 @@ def build_preparation_tasks(
 ) -> tuple[PreparationTask, ...]:
     """Expand one immutable prefix preparation task per backend and episode."""
     resolved = _require_v2(config)
+    _require_digest(run_identity, "run_identity")
     tasks: list[PreparationTask] = []
-    for episode_id in episode_ids:
+    for episode_id in _episode_ids(episode_ids):
         for backend in _PREPARATION_BACKENDS:
             profile = resolved.system_profiles[backend]
             profile_id = profile.profile_id
             index = len(tasks)
+            task_id = f"prepare-{index:05d}--{_slug(episode_id)}--{backend}"
             payload = {
                 "stage": "prepare_prefix",
                 "task_index": index,
+                "task_id": task_id,
                 "episode_id": episode_id,
                 "backend": backend,
                 "profile_id": profile_id,
                 "run_identity": run_identity,
                 "config_hash": resolved.config_hash,
             }
-            task_id = f"prepare-{index:05d}--{_slug(episode_id)}--{backend}"
             tasks.append(
                 PreparationTask(
                     task_index=index,
@@ -654,6 +701,7 @@ def build_preparation_tasks(
                     backend=cast(SystemBackend, backend),
                     profile_id=profile_id,
                     run_identity=run_identity,
+                    config_hash=resolved.config_hash,
                     task_payload_hash=canonical_hash(payload),
                 )
             )
@@ -670,9 +718,10 @@ def build_evaluation_task_templates(
 ) -> tuple[EvaluationTaskTemplate, ...]:
     """Create stable, non-executable Stage-B rows before artifact finalization."""
     resolved = _require_v2(config)
+    _require_digest(run_identity, "run_identity")
     templates: list[EvaluationTaskTemplate] = []
     seen_results: set[str] = set()
-    for episode_id in episode_ids:
+    for episode_id in _episode_ids(episode_ids):
         for policy in resolved.policy_profiles:
             for condition in resolved.conditions:
                 definition = condition_definition(condition)
@@ -686,25 +735,32 @@ def build_evaluation_task_templates(
                 )
                 index = len(templates)
                 prefix_backend = definition.prefix_backend
+                task_id = (
+                    f"evaluate-template-{index:05d}--{_slug(episode_id)}--"
+                    f"{policy.profile_id}--{condition}"
+                )
                 payload = {
                     "stage": "evaluate_template",
                     "task_index": index,
+                    "task_id": task_id,
                     "episode_id": episode_id,
                     "policy_profile_id": policy.profile_id,
                     "condition": condition,
                     "prefix_backend": prefix_backend,
                     "prefix_artifact_hash": NO_PREFIX_ARTIFACT,
                     "run_identity": run_identity,
+                    "config_hash": resolved.config_hash,
                     "results": [asdict(item) for item in scored],
                 }
                 templates.append(
                     EvaluationTaskTemplate(
                         task_index=index,
-                        task_id=f"evaluate-template-{index:05d}--{_slug(episode_id)}--{policy.profile_id}--{condition}",
+                        task_id=task_id,
                         episode_id=episode_id,
                         policy_profile_id=policy.profile_id,
                         condition=condition,
                         run_identity=run_identity,
+                        config_hash=resolved.config_hash,
                         task_payload_hash=canonical_hash(payload),
                         scored_conditions=tuple(scored),
                         prefix_backend=prefix_backend,
@@ -722,16 +778,23 @@ def finalize_evaluation_plan(
     *,
     run_identity: str,
 ) -> tuple[EvaluationTask, ...]:
-    """Bind verified prefix hashes and materialize executable Stage-B tasks.
-
-    ``prefix_artifacts`` accepts either ``{episode--backend: hash/object}`` or
-    ``{episode: {backend: hash/object}}``.  Artifact objects only need an
-    ``artifact_hash`` attribute, allowing the function to remain independent of
-    storage and adapter implementations.
-    """
+    """Bind complete, verified prefix artifacts to an exact template matrix."""
     resolved = _require_v2(config)
+    _require_digest(run_identity, "run_identity")
     if not templates:
         raise QualificationConfigError("cannot finalize an empty evaluation template matrix")
+    if any(not isinstance(item, EvaluationTaskTemplate) for item in templates):
+        raise QualificationConfigError("template matrix contains an invalid record")
+    episode_order = tuple(dict.fromkeys(item.episode_id for item in templates))
+    expected_templates = build_evaluation_task_templates(
+        resolved,
+        episode_ids=episode_order,
+        run_identity=run_identity,
+    )
+    if tuple(templates) != expected_templates:
+        raise QualificationConfigError(
+            "evaluation template matrix is incomplete, tampered, cross-run, or cross-config"
+        )
     artifacts = _normalise_prefix_artifacts(prefix_artifacts)
     required = {
         f"{template.episode_id}--{template.prefix_backend}"
@@ -744,16 +807,80 @@ def finalize_evaluation_plan(
             "cannot finalize evaluation plan; missing verified prefix artifact(s): "
             + ", ".join(missing)
         )
+    extra = sorted(set(artifacts) - required)
+    if extra:
+        raise QualificationConfigError(
+            "cannot finalize evaluation plan; unexpected prefix artifact(s): "
+            + ", ".join(extra)
+        )
+    verified_hashes: dict[str, str] = {}
+    dataset_hashes: set[str] = set()
+    model_hashes: set[str] = set()
+    surfaces_by_episode: dict[str, set[str]] = {}
+    for key in sorted(required):
+        artifact = artifacts[key]
+        episode_id, backend = key.rsplit("--", 1)
+        profile = resolved.system_profiles[backend]
+        expected_writer = (
+            None if backend == "flat_retrieval" else resolved.writer_profile.profile_id
+        )
+        mismatches: list[str] = []
+        for field, actual, expected in (
+            ("episode_id", artifact.episode_id, episode_id),
+            ("backend", artifact.backend, backend),
+            ("profile_id", artifact.profile_id, profile.profile_id),
+            ("config_hash", artifact.config_hash, resolved.config_hash),
+            ("run_identity", artifact.run_identity, run_identity),
+            ("dataset_release", artifact.dataset_release, resolved.dataset_release),
+            ("writer_profile_id", artifact.writer_profile_id, expected_writer),
+            (
+                "embedding_profile_id",
+                artifact.embedding_profile_id,
+                resolved.retrieval.embedding_profile_id,
+            ),
+            (
+                "reranker_profile_id",
+                artifact.reranker_profile_id,
+                resolved.retrieval.reranker_profile_id,
+            ),
+            ("source_commit", artifact.source_commit, profile.source_commit),
+        ):
+            if actual != expected:
+                mismatches.append(field)
+        if mismatches:
+            raise QualificationConfigError(
+                f"prefix artifact {key} is cross-bound or inconsistent: "
+                + ", ".join(mismatches)
+            )
+        try:
+            verified_hashes[key] = prefix_artifact_hash(artifact)
+        except PrefixArtifactError as exc:
+            raise QualificationConfigError(
+                f"prefix artifact {key} failed hash verification: {exc}"
+            ) from exc
+        dataset_hashes.add(artifact.dataset_manifest_hash)
+        model_hashes.add(artifact.model_files_hash)
+        surfaces_by_episode.setdefault(episode_id, set()).add(artifact.surface_hash)
+    if len(dataset_hashes) != 1:
+        raise QualificationConfigError("prefix artifacts disagree on dataset manifest hash")
+    if len(model_hashes) != 1:
+        raise QualificationConfigError("prefix artifacts disagree on model files hash")
+    if any(len(values) != 1 for values in surfaces_by_episode.values()):
+        raise QualificationConfigError("prefix artifacts disagree on episode surface hash")
     tasks: list[EvaluationTask] = []
     for template in templates:
         prefix_hash = (
             NO_PREFIX_ARTIFACT
             if template.prefix_backend is None
-            else artifacts[f"{template.episode_id}--{template.prefix_backend}"]
+            else verified_hashes[f"{template.episode_id}--{template.prefix_backend}"]
         )
+        task_id = template.task_id.replace("evaluate-template-", "evaluate-")
+        if template.prefix_backend is not None:
+            task_id = f"{task_id}--pfx-{prefix_hash[:12]}"
         payload = {
             "stage": "evaluate",
             "task_index": template.task_index,
+            "task_id": task_id,
             "episode_id": template.episode_id,
             "policy_profile_id": template.policy_profile_id,
             "condition": template.condition,
@@ -763,9 +890,6 @@ def finalize_evaluation_plan(
             "results": [asdict(item) for item in template.scored_conditions],
             "config_hash": resolved.config_hash,
         }
-        task_id = template.task_id.replace("evaluate-template-", "evaluate-")
-        if template.prefix_backend is not None:
-            task_id = f"{task_id}--pfx-{prefix_hash[:12]}"
         tasks.append(
             EvaluationTask(
                 task_index=template.task_index,
@@ -775,6 +899,7 @@ def finalize_evaluation_plan(
                 condition=template.condition,
                 prefix_artifact_hash=prefix_hash,
                 run_identity=run_identity,
+                config_hash=resolved.config_hash,
                 task_payload_hash=canonical_hash(payload),
                 scored_conditions=template.scored_conditions,
                 prefix_backend=template.prefix_backend,
@@ -830,32 +955,58 @@ def _scored_conditions(
     return scored
 
 
-def _normalise_prefix_artifacts(value: Mapping[str, object]) -> dict[str, str]:
-    output: dict[str, str] = {}
+def _normalise_prefix_artifacts(
+    value: Mapping[str, object],
+) -> dict[str, MemoryPrefixArtifact]:
+    output: dict[str, MemoryPrefixArtifact] = {}
     for key, raw in value.items():
-        if isinstance(raw, Mapping):
+        if not isinstance(key, str):
+            raise QualificationConfigError("prefix artifact keys must be strings")
+        if isinstance(raw, MemoryPrefixArtifact) or _is_serialized_artifact(raw):
+            _add_artifact(output, key, raw)
+        elif isinstance(raw, Mapping):
             for backend, nested in raw.items():
-                output[f"{key}--{backend}"] = _artifact_hash(nested, f"{key}--{backend}")
+                if not isinstance(backend, str):
+                    raise QualificationConfigError(
+                        "nested prefix artifact backend keys must be strings"
+                    )
+                _add_artifact(output, f"{key}--{backend}", nested)
         else:
-            output[str(key)] = _artifact_hash(raw, str(key))
+            raise QualificationConfigError(
+                f"{key} must be a MemoryPrefixArtifact or complete serialized mapping"
+            )
     return output
 
 
-def _artifact_hash(value: object, label: str) -> str:
-    if isinstance(value, str):
-        digest = value
-    else:
-        candidate = getattr(value, "artifact_hash", None)
-        if not isinstance(candidate, str):
-            raise QualificationConfigError(f"{label} is not a verified prefix artifact")
-        digest = candidate
-    # Planning tests and dry-runs may use deterministic opaque 64-character
-    # placeholders (for example ``"mem0" * 16``).  A real artifact object is
-    # always recalculated and validated by MemoryPrefixArtifact; Stage-B planning
-    # only carries its opaque content-address key.
-    if len(digest) != 64 or any(character.isspace() for character in digest):
-        raise QualificationConfigError(f"{label} has an invalid artifact hash")
-    return digest
+def _is_serialized_artifact(value: object) -> bool:
+    return isinstance(value, Mapping) and {
+        "artifact_hash",
+        "episode_id",
+        "backend",
+        "profile_id",
+    }.issubset(value)
+
+
+def _add_artifact(
+    output: dict[str, MemoryPrefixArtifact],
+    key: str,
+    value: object,
+) -> None:
+    if key in output:
+        raise QualificationConfigError(f"duplicate prefix artifact key: {key}")
+    try:
+        if isinstance(value, MemoryPrefixArtifact):
+            artifact = value
+        elif isinstance(value, Mapping):
+            artifact = MemoryPrefixArtifact.from_dict(cast(Mapping[str, object], value))
+        else:
+            raise QualificationConfigError(
+                f"{key} must be a MemoryPrefixArtifact or complete serialized mapping"
+            )
+        prefix_artifact_hash(artifact)
+    except (PrefixArtifactError, MemoryTraceValidationError) as exc:
+        raise QualificationConfigError(f"invalid prefix artifact {key}: {exc}") from exc
+    output[key] = artifact
 
 
 def canonical_hash(value: object) -> str:

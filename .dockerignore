@@ -19,5 +19,19 @@
 
 !docker/
 !docker/mem0-worker.Dockerfile
+!docker/core-worker.Dockerfile
+!docker/amem-worker.Dockerfile
+!docker/memos-worker.Dockerfile
+!docker/locks/
+!docker/locks/**
 !docker/wheelhouse/
 !docker/wheelhouse/**
+
+# Operator credentials and mutable execution state never enter a build context.
+.env
+.env.*
+!.env.example
+data/
+runs/
+*.key
+*.pem

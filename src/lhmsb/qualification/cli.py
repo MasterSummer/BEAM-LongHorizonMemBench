@@ -58,6 +58,7 @@ from lhmsb.qualification.schema import (
     QualificationTask,
     ReadoutKind,
     ScoredCondition,
+    SystemsQualificationConfig,
 )
 from lhmsb.qualification.storage import (
     QualificationStorage,
@@ -72,6 +73,16 @@ _PROG = "python -m lhmsb.qualification"
 
 class QualificationCliError(RuntimeError):
     """Invalid plan or CLI state that must not be silently repaired."""
+
+
+def _require_legacy_config(
+    config: QualificationConfig | SystemsQualificationConfig,
+) -> QualificationConfig:
+    if isinstance(config, SystemsQualificationConfig):
+        raise QualificationCliError(
+            "schema-v2 configuration must use the multisystem command namespace"
+        )
+    return config
 
 
 @dataclass(frozen=True)
@@ -197,7 +208,7 @@ def plan_qualification_run(
         raise QualificationCliError(
             "Git worktree is dirty; commit changes or pass --allow-dirty"
         )
-    config = load_qualification_config(config_path)
+    config = _require_legacy_config(load_qualification_config(config_path))
     specs = load_mem0_specs(dataset)
     if not specs:
         raise QualificationCliError("frozen dataset contains no episodes")
@@ -638,6 +649,30 @@ def _add_plan_args(parser: argparse.ArgumentParser) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Execute one qualification command and return a stable exit status."""
+    # Schema-v2 owns a separate two-stage command namespace.  Keep this
+    # dispatch before parsing the legacy command table so old Mem0 run bytes
+    # remain unchanged while the server can invoke ``plan-systems`` and
+    # friends through the same module entrypoint.
+    candidate_argv = list(argv) if argv is not None else sys.argv[1:]
+    if candidate_argv and (
+        candidate_argv[0].endswith("-systems")
+        or candidate_argv[0]
+        in {
+            "prepare-task",
+            "finalize-evaluation-plan",
+            "evaluate-task",
+            "run-evaluation-matrix",
+        }
+    ):
+        from lhmsb.qualification.multisystem_cli import (
+            is_multisystem_command,
+        )
+        from lhmsb.qualification.multisystem_cli import (
+            main as multisystem_main,
+        )
+
+        if is_multisystem_command(candidate_argv[0]):
+            return multisystem_main(candidate_argv)
     args = _build_parser().parse_args(argv)
     command = str(args.command)
     try:
@@ -814,7 +849,9 @@ def _load_run_contract(
         raise QualificationCliError(
             f"unsupported run schema: {manifest.schema_version}"
         )
-    config = load_qualification_config(Path(manifest.config_path))
+    config = _require_legacy_config(
+        load_qualification_config(Path(manifest.config_path))
+    )
     specs_tuple = load_mem0_specs(Path(manifest.dataset_path))
     specs = {spec.plan.episode_id: spec for spec in specs_tuple}
     tasks = _read_tasks(run_directory / "tasks.jsonl")
@@ -1024,7 +1061,7 @@ def _qdrant_collection_snapshot_size(
 ) -> int:
     """Measure the compressed bytes of one isolated Qdrant collection."""
     try:
-        from qdrant_client import QdrantClient
+        from qdrant_client import QdrantClient  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - qualification extra gate
         raise QualificationRunError(
             "resource_measurement_failure",

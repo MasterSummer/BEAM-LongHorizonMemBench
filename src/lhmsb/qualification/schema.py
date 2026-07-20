@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Literal
+import hashlib
+import json
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass
+from types import MappingProxyType
+from typing import Literal, cast
 
 PolicyProvider = Literal["anthropic", "deepseek", "openai"]
 PolicyRequestAPI = Literal["messages", "responses", "chat_completions"]
@@ -22,6 +26,14 @@ QualificationCondition = Literal[
 ]
 ReadoutKind = Literal["none", "native", "common_rerank"]
 SystemBackend = Literal["flat_retrieval", "mem0", "amem", "memos"]
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _require_sha256(value: object, field: str) -> None:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ValueError(f"{field} must be a lowercase SHA-256 digest")
 
 
 def _validate_readouts(
@@ -84,6 +96,22 @@ class PolicyProfile:
             )
 
 
+def _policy_identity(profile: PolicyProfile) -> tuple[object, ...]:
+    return (
+        profile.profile_id,
+        profile.provider,
+        profile.model_id,
+        profile.route_id,
+        profile.api_key_env,
+        profile.endpoint,
+        profile.endpoint_override_env,
+        profile.request_api,
+        profile.timeout_seconds,
+        profile.max_retries,
+        profile.format_repair_attempts,
+    )
+
+
 @dataclass(frozen=True)
 class RetrievalProfile:
     embedding_profile_id: str
@@ -124,6 +152,91 @@ class Mem0Profile:
     @property
     def kind(self) -> str:
         return "managed_memory"
+
+    @property
+    def system_id(self) -> str:
+        return self.profile_id
+
+
+@dataclass(frozen=True)
+class Mem0ControlledProfile:
+    """Complete schema-v2 Mem0 identity, separate from the schema-v1 record."""
+
+    profile_id: str
+    backend: SystemBackend
+    kind: str
+    track: Mem0Track
+    package: str
+    version: str
+    source_commit: str
+    source_url: str
+    wheel_sha256: str
+    internal_llm_mode: str
+    internal_llm_provider: str | None
+    internal_llm_model: str | None
+    embedding_provider: str
+    embedding_profile_id: str
+    embedding_model: str
+    embedding_revision: str
+    vector_store: str
+    reranker_enabled: bool
+    prompt_source: str
+    telemetry_enabled: bool
+    reranker_profile_id: str
+    reranker_model: str
+    reranker_revision: str
+    candidate_k: int
+    visible_k: int
+    readouts: tuple[ReadoutKind, ...]
+    writer_profile_id: str
+    allow_fallback: bool
+    fallback_backend: str | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "readouts", tuple(self.readouts))
+        if self.backend != "mem0" or self.kind != "mem0" or self.track != "controlled":
+            raise ValueError("schema-v2 Mem0 profile must be controlled mem0")
+        if (
+            self.profile_id != "mem0_controlled"
+            or self.package != "mem0ai"
+            or self.version != "2.0.12"
+            or self.source_commit != "42cf18c4e6adb448e981aa1c7b55c1602b0cb670"
+            or self.source_url != "https://github.com/mem0ai/mem0"
+            or self.wheel_sha256
+            != "6b7e1afa466f6e14dd34b5e9222c159a69fad38f8d787e73adbf91dbb29e73e2"
+        ):
+            raise ValueError("Mem0 package/version/source/wheel identity is not pinned")
+        if _GIT_COMMIT.fullmatch(self.source_commit) is None:
+            raise ValueError("Mem0 source commit must be a full lowercase commit")
+        _require_sha256(self.wheel_sha256, "Mem0 wheel_sha256")
+        if (
+            self.internal_llm_mode != "policy_model"
+            or self.internal_llm_provider is not None
+            or self.internal_llm_model is not None
+        ):
+            raise ValueError("Mem0 controlled writer mode is not canonical")
+        if (
+            self.embedding_provider != "openai_compatible_tei"
+            or self.vector_store != "qdrant"
+            or self.reranker_enabled
+            or self.prompt_source != "mem0_builtin"
+            or self.telemetry_enabled
+            or self.writer_profile_id != "deepseek_v4_pro_writer"
+        ):
+            raise ValueError("Mem0 controlled backend capabilities are not canonical")
+        _validate_common_retrieval(
+            embedding_model=self.embedding_model,
+            embedding_revision=self.embedding_revision,
+            reranker_model=self.reranker_model,
+            reranker_revision=self.reranker_revision,
+            candidate_k=self.candidate_k,
+            visible_k=self.visible_k,
+        )
+        _validate_readouts(self.readouts, managed=True)
+        if not self.writer_profile_id:
+            raise ValueError("managed system profile requires the fixed writer profile")
+        if self.allow_fallback or self.fallback_backend:
+            raise ValueError("Mem0 controlled profile cannot declare a fallback")
 
     @property
     def system_id(self) -> str:
@@ -179,8 +292,17 @@ class FlatRetrievalProfile:
     fallback_backend: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "readouts", tuple(self.readouts))
         if self.backend != "flat_retrieval" or self.kind != "flat_retrieval":
             raise ValueError("flat profile backend/kind must be flat_retrieval")
+        if (
+            self.profile_id != "flat_controlled"
+            or self.package != "lhmsb"
+            or self.version != "schema-v2"
+            or self.source_commit != "repository"
+            or self.source_url is not None
+        ):
+            raise ValueError("flat retrieval system identity is not canonical")
         _validate_common_retrieval(
             embedding_model=self.embedding_model,
             embedding_revision=self.embedding_revision,
@@ -224,12 +346,23 @@ class AMemProfile:
     fallback_backend: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "readouts", tuple(self.readouts))
         if self.backend != "amem" or self.kind != "amem":
             raise ValueError("A-MEM profile backend/kind must be amem")
         if self.package.strip().lower() in {"a-mem", "a_mem"}:
             raise ValueError(
                 "A-MEM profile must identify official agentic-memory source, not a-mem"
             )
+        if (
+            self.profile_id != "amem_controlled"
+            or self.package != "agentic-memory"
+            or self.version != "source"
+            or self.source_commit != "ceffb860f0712bbae97b184d440df62bc910ca8d"
+            or self.source_url != "https://github.com/agiresearch/A-mem"
+            or self.vector_store != "chroma"
+            or self.writer_profile_id != "deepseek_v4_pro_writer"
+        ):
+            raise ValueError("A-MEM system profile identity is not canonical")
         _validate_common_retrieval(
             embedding_model=self.embedding_model,
             embedding_revision=self.embedding_revision,
@@ -276,10 +409,21 @@ class MemOSTreeProfile:
     fallback_backend: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "readouts", tuple(self.readouts))
         if self.backend != "memos" or self.kind != "memos":
             raise ValueError("MemOS profile backend/kind must be memos")
         if self.mode != "tree":
             raise ValueError("only the MemOS tree mode is allowed in schema-v2")
+        if (
+            self.profile_id != "memos_tree_controlled"
+            or self.package != "memos"
+            or self.version != "2.0.23"
+            or self.source_commit != "583b07b998afc4debb6c5078439b0b3896f5b097"
+            or self.source_url != "https://github.com/MemTensor/MemOS"
+            or self.vector_store != "neo4j"
+            or self.writer_profile_id != "deepseek_v4_pro_writer"
+        ):
+            raise ValueError("MemOS Tree system profile identity is not canonical")
         _validate_common_retrieval(
             embedding_model=self.embedding_model,
             embedding_revision=self.embedding_revision,
@@ -299,13 +443,171 @@ class MemOSTreeProfile:
         return self.profile_id
 
 
-SystemProfile = FlatRetrievalProfile | AMemProfile | MemOSTreeProfile | Mem0Profile
+SystemProfile = (
+    FlatRetrievalProfile | AMemProfile | MemOSTreeProfile | Mem0ControlledProfile
+)
 # Spelling aliases keep the public API tolerant of acronym capitalization used
 # by downstream adapter code.
 AMEMProfile = AMemProfile
 MemOSProfile = MemOSTreeProfile
 FlatProfile = FlatRetrievalProfile
 SamplingProfile = CausalSamplingProfile
+
+
+def _canonical_task_hash(value: object) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validate_task_payload_hash(actual: str, payload: Mapping[str, object]) -> None:
+    _require_sha256(actual, "task_payload_hash")
+    expected = _canonical_task_hash(payload)
+    if actual != expected:
+        raise ValueError(
+            "task_payload_hash does not match the canonical task payload: "
+            f"expected {expected}; received {actual}"
+        )
+
+
+def _task_text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+    return value
+
+
+def _task_id(value: object) -> str:
+    task_id = _task_text(value, "task_id")
+    if (
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", task_id) is None
+        or ".." in task_id
+        or "/" in task_id
+        or "\\" in task_id
+    ):
+        raise ValueError("task_id must be a canonical path-safe identifier")
+    return task_id
+
+
+def _task_index(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("task_index must be a non-negative integer")
+    return value
+
+
+def _task_bool(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    return value
+
+
+def _task_backend(value: object, *, optional: bool) -> SystemBackend | None:
+    if value is None and optional:
+        return None
+    backend = _task_text(value, "prefix_backend" if optional else "backend")
+    if backend not in {"flat_retrieval", "mem0", "amem", "memos"}:
+        raise ValueError(f"unsupported task backend: {backend!r}")
+    return cast(SystemBackend, backend)
+
+
+def _task_slug(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "-", value).strip("-")
+
+
+@dataclass(frozen=True)
+class ScoredCondition:
+    result_id: str
+    condition: str
+    readout: ReadoutKind
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "result_id": self.result_id,
+            "condition": self.condition,
+            "readout": self.readout,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> ScoredCondition:
+        readout = _task_text(raw.get("readout"), "readout")
+        if readout not in {"none", "native", "common_rerank"}:
+            raise ValueError(f"unsupported scored-condition readout: {readout!r}")
+        return cls(
+            result_id=_task_text(raw.get("result_id"), "result_id"),
+            condition=_task_text(raw.get("condition"), "scored condition"),
+            readout=cast(ReadoutKind, readout),
+        )
+
+
+def _task_scored_conditions(value: object) -> tuple[ScoredCondition, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError("scored_conditions must be an array")
+    scored: list[ScoredCondition] = []
+    for item in value:
+        if isinstance(item, ScoredCondition):
+            scored.append(item)
+        elif isinstance(item, Mapping):
+            scored.append(ScoredCondition.from_dict(item))
+        else:
+            raise ValueError("scored_conditions entries must be objects")
+    return tuple(scored)
+
+
+def _validate_scored_condition_shape(scored: tuple[ScoredCondition, ...]) -> None:
+    if not scored:
+        raise ValueError("scored_conditions must be non-empty")
+    for item in scored:
+        if not isinstance(item, ScoredCondition):
+            raise ValueError("scored_conditions entries must be ScoredCondition records")
+        _task_text(item.result_id, "result_id")
+        _task_text(item.condition, "scored condition")
+        if item.readout not in {"none", "native", "common_rerank"}:
+            raise ValueError(f"unsupported scored-condition readout: {item.readout!r}")
+
+
+def _validate_evaluation_relations(
+    *,
+    episode_id: str,
+    policy_profile_id: str,
+    condition: QualificationCondition,
+    prefix_backend: SystemBackend | None,
+    scored_conditions: tuple[ScoredCondition, ...],
+) -> None:
+    # Local import avoids the conditions -> schema import cycle.
+    from lhmsb.qualification.conditions import condition_definition
+
+    definition = condition_definition(condition)
+    if prefix_backend != definition.prefix_backend:
+        raise ValueError(
+            "condition and prefix_backend disagree: "
+            f"{condition!r} requires {definition.prefix_backend!r}"
+        )
+    result_ids = tuple(item.result_id for item in scored_conditions)
+    cells = tuple((item.condition, item.readout) for item in scored_conditions)
+    if len(result_ids) != len(set(result_ids)) or len(cells) != len(set(cells)):
+        raise ValueError("scored result IDs and scored cells must be unique within a task")
+    if any(item.condition != condition for item in scored_conditions):
+        raise ValueError("each scored condition must match the evaluation task condition")
+    actual_readouts = tuple(item.readout for item in scored_conditions)
+    if actual_readouts != definition.readouts:
+        raise ValueError(
+            "scored readout sequence does not match the condition definition: "
+            f"expected {definition.readouts!r}; received {actual_readouts!r}"
+        )
+    for item in scored_conditions:
+        suffix = condition if item.readout == "none" else f"{condition}--{item.readout}"
+        expected_result_id = (
+            f"{_task_slug(episode_id)}--{policy_profile_id}--{suffix}"
+        )
+        if item.result_id != expected_result_id:
+            raise ValueError(
+                "scored result_id does not match episode, policy, condition, and readout: "
+                f"expected {expected_result_id!r}; received {item.result_id!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -318,7 +620,30 @@ class PreparationTask:
     backend: SystemBackend
     profile_id: str
     run_identity: str
+    config_hash: str
     task_payload_hash: str
+
+    def __post_init__(self) -> None:
+        _task_index(self.task_index)
+        _task_id(self.task_id)
+        _task_text(self.episode_id, "episode_id")
+        _task_backend(self.backend, optional=False)
+        _task_text(self.profile_id, "profile_id")
+        _require_sha256(self.run_identity, "run_identity")
+        _require_sha256(self.config_hash, "config_hash")
+        _validate_task_payload_hash(self.task_payload_hash, self._canonical_payload())
+
+    def _canonical_payload(self) -> dict[str, object]:
+        return {
+            "stage": "prepare_prefix",
+            "task_index": self.task_index,
+            "task_id": self.task_id,
+            "episode_id": self.episode_id,
+            "backend": self.backend,
+            "profile_id": self.profile_id,
+            "run_identity": self.run_identity,
+            "config_hash": self.config_hash,
+        }
 
     @property
     def system_profile_id(self) -> str:
@@ -332,8 +657,26 @@ class PreparationTask:
             "backend": self.backend,
             "profile_id": self.profile_id,
             "run_identity": self.run_identity,
+            "config_hash": self.config_hash,
             "task_payload_hash": self.task_payload_hash,
         }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> PreparationTask:
+        backend = _task_backend(raw.get("backend"), optional=False)
+        assert backend is not None
+        return cls(
+            task_index=_task_index(raw.get("task_index")),
+            task_id=_task_id(raw.get("task_id")),
+            episode_id=_task_text(raw.get("episode_id"), "episode_id"),
+            backend=backend,
+            profile_id=_task_text(raw.get("profile_id"), "profile_id"),
+            run_identity=_task_text(raw.get("run_identity"), "run_identity"),
+            config_hash=_task_text(raw.get("config_hash"), "config_hash"),
+            task_payload_hash=_task_text(
+                raw.get("task_payload_hash"), "task_payload_hash"
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -346,11 +689,50 @@ class EvaluationTaskTemplate:
     policy_profile_id: str
     condition: QualificationCondition
     run_identity: str
+    config_hash: str
     task_payload_hash: str
     scored_conditions: tuple[ScoredCondition, ...]
     prefix_backend: SystemBackend | None
     prefix_artifact_hash: str = "NO_PREFIX_ARTIFACT"
     executable: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "scored_conditions", tuple(self.scored_conditions))
+        _task_index(self.task_index)
+        _task_id(self.task_id)
+        _task_text(self.episode_id, "episode_id")
+        _task_text(self.policy_profile_id, "policy_profile_id")
+        _task_backend(self.prefix_backend, optional=True)
+        _validate_scored_condition_shape(self.scored_conditions)
+        _require_sha256(self.run_identity, "run_identity")
+        _require_sha256(self.config_hash, "config_hash")
+        if self.executable is not False:
+            raise ValueError("EvaluationTaskTemplate is never executable")
+        _validate_task_payload_hash(self.task_payload_hash, self._canonical_payload())
+        if self.prefix_artifact_hash != "NO_PREFIX_ARTIFACT":
+            raise ValueError("evaluation templates cannot carry prefix artifacts")
+        _validate_evaluation_relations(
+            episode_id=self.episode_id,
+            policy_profile_id=self.policy_profile_id,
+            condition=self.condition,
+            prefix_backend=self.prefix_backend,
+            scored_conditions=self.scored_conditions,
+        )
+
+    def _canonical_payload(self) -> dict[str, object]:
+        return {
+            "stage": "evaluate_template",
+            "task_index": self.task_index,
+            "task_id": self.task_id,
+            "episode_id": self.episode_id,
+            "policy_profile_id": self.policy_profile_id,
+            "condition": self.condition,
+            "prefix_backend": self.prefix_backend,
+            "prefix_artifact_hash": self.prefix_artifact_hash,
+            "run_identity": self.run_identity,
+            "config_hash": self.config_hash,
+            "results": [item.to_dict() for item in self.scored_conditions],
+        }
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -360,19 +742,39 @@ class EvaluationTaskTemplate:
             "policy_profile_id": self.policy_profile_id,
             "condition": self.condition,
             "run_identity": self.run_identity,
+            "config_hash": self.config_hash,
             "task_payload_hash": self.task_payload_hash,
-            "scored_conditions": [
-                {
-                    "result_id": item.result_id,
-                    "condition": item.condition,
-                    "readout": item.readout,
-                }
-                for item in self.scored_conditions
-            ],
+            "scored_conditions": [item.to_dict() for item in self.scored_conditions],
             "prefix_backend": self.prefix_backend,
             "prefix_artifact_hash": self.prefix_artifact_hash,
             "executable": self.executable,
         }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> EvaluationTaskTemplate:
+        condition = _task_text(raw.get("condition"), "condition")
+        prefix_backend = _task_backend(raw.get("prefix_backend"), optional=True)
+        return cls(
+            task_index=_task_index(raw.get("task_index")),
+            task_id=_task_id(raw.get("task_id")),
+            episode_id=_task_text(raw.get("episode_id"), "episode_id"),
+            policy_profile_id=_task_text(
+                raw.get("policy_profile_id"), "policy_profile_id"
+            ),
+            condition=cast(QualificationCondition, condition),
+            run_identity=_task_text(raw.get("run_identity"), "run_identity"),
+            config_hash=_task_text(raw.get("config_hash"), "config_hash"),
+            task_payload_hash=_task_text(
+                raw.get("task_payload_hash"), "task_payload_hash"
+            ),
+            scored_conditions=_task_scored_conditions(raw.get("scored_conditions")),
+            prefix_backend=prefix_backend,
+            prefix_artifact_hash=_task_text(
+                raw.get("prefix_artifact_hash", "NO_PREFIX_ARTIFACT"),
+                "prefix_artifact_hash",
+            ),
+            executable=_task_bool(raw.get("executable", False), "executable"),
+        )
 
 
 @dataclass(frozen=True)
@@ -386,16 +788,53 @@ class EvaluationTask:
     condition: QualificationCondition
     prefix_artifact_hash: str
     run_identity: str
+    config_hash: str
     task_payload_hash: str
     scored_conditions: tuple[ScoredCondition, ...]
     prefix_backend: SystemBackend | None
     executable: bool = True
 
     def __post_init__(self) -> None:
-        if not self.executable:
+        object.__setattr__(self, "scored_conditions", tuple(self.scored_conditions))
+        _task_index(self.task_index)
+        _task_id(self.task_id)
+        _task_text(self.episode_id, "episode_id")
+        _task_text(self.policy_profile_id, "policy_profile_id")
+        _task_backend(self.prefix_backend, optional=True)
+        _validate_scored_condition_shape(self.scored_conditions)
+        if self.executable is not True:
             raise ValueError("EvaluationTask must be executable")
-        if not self.prefix_artifact_hash:
-            raise ValueError("evaluation task requires a prefix marker or artifact hash")
+        _require_sha256(self.run_identity, "run_identity")
+        _require_sha256(self.config_hash, "config_hash")
+        _task_text(self.prefix_artifact_hash, "prefix_artifact_hash")
+        _validate_task_payload_hash(self.task_payload_hash, self._canonical_payload())
+        if self.prefix_backend is None:
+            if self.prefix_artifact_hash != "NO_PREFIX_ARTIFACT":
+                raise ValueError("control task must use NO_PREFIX_ARTIFACT")
+        else:
+            _require_sha256(self.prefix_artifact_hash, "prefix_artifact_hash")
+        _validate_evaluation_relations(
+            episode_id=self.episode_id,
+            policy_profile_id=self.policy_profile_id,
+            condition=self.condition,
+            prefix_backend=self.prefix_backend,
+            scored_conditions=self.scored_conditions,
+        )
+
+    def _canonical_payload(self) -> dict[str, object]:
+        return {
+            "stage": "evaluate",
+            "task_index": self.task_index,
+            "task_id": self.task_id,
+            "episode_id": self.episode_id,
+            "policy_profile_id": self.policy_profile_id,
+            "condition": self.condition,
+            "prefix_backend": self.prefix_backend,
+            "prefix_artifact_hash": self.prefix_artifact_hash,
+            "run_identity": self.run_identity,
+            "results": [item.to_dict() for item in self.scored_conditions],
+            "config_hash": self.config_hash,
+        }
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -406,18 +845,37 @@ class EvaluationTask:
             "condition": self.condition,
             "prefix_artifact_hash": self.prefix_artifact_hash,
             "run_identity": self.run_identity,
+            "config_hash": self.config_hash,
             "task_payload_hash": self.task_payload_hash,
-            "scored_conditions": [
-                {
-                    "result_id": item.result_id,
-                    "condition": item.condition,
-                    "readout": item.readout,
-                }
-                for item in self.scored_conditions
-            ],
+            "scored_conditions": [item.to_dict() for item in self.scored_conditions],
             "prefix_backend": self.prefix_backend,
             "executable": self.executable,
         }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> EvaluationTask:
+        condition = _task_text(raw.get("condition"), "condition")
+        prefix_backend = _task_backend(raw.get("prefix_backend"), optional=True)
+        return cls(
+            task_index=_task_index(raw.get("task_index")),
+            task_id=_task_id(raw.get("task_id")),
+            episode_id=_task_text(raw.get("episode_id"), "episode_id"),
+            policy_profile_id=_task_text(
+                raw.get("policy_profile_id"), "policy_profile_id"
+            ),
+            condition=cast(QualificationCondition, condition),
+            prefix_artifact_hash=_task_text(
+                raw.get("prefix_artifact_hash"), "prefix_artifact_hash"
+            ),
+            run_identity=_task_text(raw.get("run_identity"), "run_identity"),
+            config_hash=_task_text(raw.get("config_hash"), "config_hash"),
+            task_payload_hash=_task_text(
+                raw.get("task_payload_hash"), "task_payload_hash"
+            ),
+            scored_conditions=_task_scored_conditions(raw.get("scored_conditions")),
+            prefix_backend=prefix_backend,
+            executable=_task_bool(raw.get("executable", True), "executable"),
+        )
 
 
 @dataclass(frozen=True)
@@ -443,24 +901,73 @@ class SystemsQualificationConfig:
     source_lock_hash: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "policy_profiles", tuple(self.policy_profiles))
+        object.__setattr__(self, "conditions", tuple(self.conditions))
+        object.__setattr__(self, "required_secret_env", tuple(self.required_secret_env))
+        object.__setattr__(
+            self,
+            "system_profiles",
+            MappingProxyType(dict(self.system_profiles)),
+        )
         if self.schema_version != 2:
             raise ValueError("SystemsQualificationConfig requires schema_version=2")
-        if len(self.policy_profiles) not in {1, 3}:
-            raise ValueError(
-                "schema-v2 requires one GPT-only or three continuation policy profiles"
-            )
-        if len({profile.profile_id for profile in self.policy_profiles}) != len(
-            self.policy_profiles
-        ):
-            raise ValueError("policy profile IDs must be unique")
-        if len({profile.model_id for profile in self.policy_profiles}) != len(
-            self.policy_profiles
-        ):
-            raise ValueError("policy model IDs must be unique")
-        if (
-            self.writer_profile.provider != "deepseek"
-            or self.writer_profile.model_id != "deepseek-v4-pro"
-        ):
+        expected_policies = (
+            (
+                "opus_4_8_zen",
+                "anthropic",
+                "claude-opus-4-8",
+                "opencode_zen",
+                "OPENCODE_ZEN_API_KEY",
+                "https://opencode.ai/zen",
+                "OPENCODE_ZEN_BASE_URL",
+                "messages",
+                180.0,
+                2,
+                1,
+            ),
+            (
+                "deepseek_v4_pro",
+                "deepseek",
+                "deepseek-v4-pro",
+                "deepseek_direct",
+                "DEEPSEEK_API_KEY",
+                "https://api.deepseek.com",
+                "DEEPSEEK_BASE_URL",
+                "chat_completions",
+                180.0,
+                2,
+                1,
+            ),
+            (
+                "gpt_5_6_sol_zen",
+                "openai",
+                "gpt-5.6-sol",
+                "opencode_zen",
+                "OPENCODE_ZEN_API_KEY",
+                "https://opencode.ai/zen",
+                "OPENCODE_ZEN_BASE_URL",
+                "responses",
+                180.0,
+                2,
+                1,
+            ),
+        )
+        if tuple(_policy_identity(item) for item in self.policy_profiles) != expected_policies:
+            raise ValueError("schema-v2 continuation policy identities are not canonical")
+        expected_writer = (
+            "deepseek_v4_pro_writer",
+            "deepseek",
+            "deepseek-v4-pro",
+            "deepseek_direct",
+            "DEEPSEEK_API_KEY",
+            "https://api.deepseek.com",
+            "DEEPSEEK_BASE_URL",
+            "chat_completions",
+            180.0,
+            2,
+            1,
+        )
+        if _policy_identity(self.writer_profile) != expected_writer:
             raise ValueError("schema-v2 requires the fixed DeepSeek writer profile")
         expected_conditions = (
             "workspace_only",
@@ -473,10 +980,28 @@ class SystemsQualificationConfig:
         )
         if self.conditions != expected_conditions:
             raise ValueError("schema-v2 conditions must use the canonical seven-condition order")
-        if self.full_context_max_chars < 1:
-            raise ValueError("full_context_max_chars must be positive")
-        if self.retrieval.candidate_k != 20 or self.retrieval.visible_k != 5:
-            raise ValueError("schema-v2 retrieval budget must be candidate_k=20 and visible_k=5")
+        if self.full_context_max_chars != 100_000:
+            raise ValueError("schema-v2 full_context_max_chars must equal 100000")
+        expected_retrieval = RetrievalProfile(
+            embedding_profile_id="bge_m3",
+            embedding_model="BAAI/bge-m3",
+            embedding_revision="5617a9f61b028005a4858fdac845db406aefb181",
+            embedding_dimension=1024,
+            embedding_dtype="float16",
+            reranker_profile_id="bge_reranker_v2_m3",
+            reranker_model="BAAI/bge-reranker-v2-m3",
+            reranker_revision="953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+            reranker_dtype="float16",
+            candidate_k=20,
+            visible_k=5,
+        )
+        if self.retrieval != expected_retrieval:
+            raise ValueError("schema-v2 common retrieval identity is not canonical")
+        if self.sampling != CausalSamplingProfile():
+            raise ValueError("schema-v2 sampling profile is not canonical")
+        if self.source_lock_hash is None:
+            raise ValueError("schema-v2 source lock SHA is required")
+        _require_sha256(self.source_lock_hash, "source_lock_hash")
         expected_backends = {"flat_retrieval", "mem0", "amem", "memos"}
         if set(self.system_profiles) != expected_backends:
             raise ValueError("schema-v2 requires flat_retrieval, mem0, amem, and memos profiles")
@@ -487,20 +1012,32 @@ class SystemsQualificationConfig:
                 raise ValueError("amem profile kind mismatch")
             if key == "memos" and not isinstance(profile, MemOSTreeProfile):
                 raise ValueError("memos profile kind mismatch")
-            if key == "mem0" and not isinstance(profile, Mem0Profile):
+            if key == "mem0" and not isinstance(profile, Mem0ControlledProfile):
                 raise ValueError("mem0 profile kind mismatch")
-            if (
-                hasattr(profile, "embedding_model")
-                and profile.embedding_model != self.retrieval.embedding_model
-            ):
-                raise ValueError("all controlled systems must use the common embedding model")
-            if (
-                hasattr(profile, "candidate_k")
-                and profile.candidate_k != self.retrieval.candidate_k
-            ):
-                raise ValueError("system candidate_k differs from common retrieval budget")
-            if hasattr(profile, "visible_k") and profile.visible_k != self.retrieval.visible_k:
-                raise ValueError("system visible_k differs from common retrieval budget")
+            common_identity = (
+                profile.embedding_profile_id,
+                profile.embedding_model,
+                profile.embedding_revision,
+                profile.reranker_profile_id,
+                profile.reranker_model,
+                profile.reranker_revision,
+                profile.candidate_k,
+                profile.visible_k,
+            )
+            expected_common_identity = (
+                self.retrieval.embedding_profile_id,
+                self.retrieval.embedding_model,
+                self.retrieval.embedding_revision,
+                self.retrieval.reranker_profile_id,
+                self.retrieval.reranker_model,
+                self.retrieval.reranker_revision,
+                self.retrieval.candidate_k,
+                self.retrieval.visible_k,
+            )
+            if common_identity != expected_common_identity:
+                raise ValueError(
+                    "all controlled systems must use the full common retrieval identity"
+                )
         amem = self.system_profiles["amem"]
         if (
             not isinstance(amem, AMemProfile)
@@ -516,7 +1053,7 @@ class SystemsQualificationConfig:
         ):
             raise ValueError("MemOS Tree source/version is not pinned")
         mem0 = self.system_profiles["mem0"]
-        if not isinstance(mem0, Mem0Profile) or mem0.version != "2.0.12":
+        if not isinstance(mem0, Mem0ControlledProfile):
             raise ValueError("Mem0 source/version is not pinned")
         expected_secrets = tuple(
             dict.fromkeys(
@@ -540,15 +1077,35 @@ class SystemsQualificationConfig:
         return self.writer_profile.profile_id
 
     def to_dict(self) -> dict[str, object]:
-        from dataclasses import asdict
+        from lhmsb.qualification.conditions import condition_definitions
 
-        return asdict(self)
+        systems: dict[str, object] = {}
+        for backend in ("flat_retrieval", "mem0", "amem", "memos"):
+            raw = asdict(self.system_profiles[backend])
+            if "readouts" in raw:
+                raw["readouts"] = list(raw["readouts"])
+            systems[backend] = raw
+        return {
+            "schema_version": self.schema_version,
+            "experiment_id": self.experiment_id,
+            "dataset_release": self.dataset_release,
+            "data_root_env": self.data_root_env,
+            "policy_profiles": [asdict(item) for item in self.policy_profiles],
+            "writer_profile": asdict(self.writer_profile),
+            "retrieval": asdict(self.retrieval),
+            "systems": systems,
+            "conditions": list(self.conditions),
+            "condition_definitions": [
+                item.to_dict() for item in condition_definitions(self.conditions)
+            ],
+            "full_context_max_chars": self.full_context_max_chars,
+            "sampling": asdict(self.sampling),
+            "required_secret_env": list(self.required_secret_env),
+            "source_lock_hash": self.source_lock_hash,
+        }
 
     @property
     def config_hash(self) -> str:
-        # Local import avoids a schema/config import cycle.
-        import hashlib
-        import json
         payload = json.dumps(
             self.to_dict(),
             sort_keys=True,
@@ -557,13 +1114,6 @@ class SystemsQualificationConfig:
             default=str,
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-@dataclass(frozen=True)
-class ScoredCondition:
-    result_id: str
-    condition: str
-    readout: ReadoutKind
 
 
 @dataclass(frozen=True)
@@ -597,6 +1147,7 @@ __all__ = [
     "EvaluationTask",
     "EvaluationTaskTemplate",
     "FlatRetrievalProfile",
+    "Mem0ControlledProfile",
     "Mem0Profile",
     "Mem0Track",
     "MemOSTreeProfile",

@@ -15,9 +15,13 @@ from typing import Any
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.qualification.metrics import (
+    compute_multisystem_metrics,
+    compute_multisystem_metrics_by_cell,
+    compute_multisystem_scorecard,
     compute_qualification_metrics,
-    provenance_diagnostics,
+    multisystem_observations_from_results,
 )
+from lhmsb.qualification.prefix import MemoryPrefixArtifact
 from lhmsb.qualification.runner import (
     PolicyEvaluation,
     QualificationMatrixResult,
@@ -37,11 +41,15 @@ REQUIRED_REPORT_ARTIFACTS: tuple[str, ...] = (
     "retrieval_trace.jsonl",
     "interventions.jsonl",
     "api_usage.jsonl",
+    "policy_calls.jsonl",
+    "prefix_manifests.jsonl",
+    "graph_diagnostics.jsonl",
     "metrics.json",
     "metrics_by_cell.json",
     "summary.json",
     "scorecard.csv",
     "scorecard.md",
+    "validation.json",
 )
 _JSONL_ARTIFACTS = (
     "tasks.jsonl",
@@ -52,6 +60,9 @@ _JSONL_ARTIFACTS = (
     "retrieval_trace.jsonl",
     "interventions.jsonl",
     "api_usage.jsonl",
+    "policy_calls.jsonl",
+    "prefix_manifests.jsonl",
+    "graph_diagnostics.jsonl",
 )
 _SCORECARD_FIELDS = (
     "policy_profile_id",
@@ -63,6 +74,7 @@ _SCORECARD_FIELDS = (
     "behavior_correct_rate",
     "baseline_stability_rate",
     "mean_visible_memory_count",
+    "mean_live_memory_count",
     "causal_memory_use_rate",
     "beneficial_intervention_rate",
     "harmful_intervention_rate",
@@ -72,7 +84,6 @@ _SCORECARD_FIELDS = (
     "stale_state_action_rate",
     "local_over_global_rate",
     "aggregate_drift_rate",
-    "memory_count_contrast_rate",
 )
 
 
@@ -98,17 +109,33 @@ def write_qualification_report(
     output_directory: Path,
     *,
     run_metadata: Mapping[str, object] | None = None,
+    prefix_artifacts: Mapping[str, object] | None = None,
 ) -> ReportArtifacts:
     """Write the complete deterministic report and hash every non-manifest file."""
     output_directory.mkdir(parents=True, exist_ok=True)
-    rows = _flatten_rows(matrix)
+    rows = _flatten_rows(matrix, prefix_artifacts=prefix_artifacts)
     for name in _JSONL_ARTIFACTS:
         _atomic_write(
             output_directory / name,
             _jsonl_bytes(rows[name]),
         )
 
-    metrics = compute_qualification_metrics(matrix, specs)
+    evaluation_matrix = any(
+        not hasattr(task, "writes") for task in matrix.task_results
+    )
+    if evaluation_matrix:
+        observations = multisystem_observations_from_results(
+            matrix,
+            specs,
+            prefix_artifacts=prefix_artifacts,
+        )
+        metrics = compute_multisystem_metrics(observations)
+        metrics_by_cell = compute_multisystem_metrics_by_cell(observations)
+        scorecard_rows = list(compute_multisystem_scorecard(observations))
+    else:
+        metrics = compute_qualification_metrics(matrix, specs)
+        metrics_by_cell = ()
+        scorecard_rows = _scorecard_rows(matrix)
     _atomic_write(
         output_directory / "metrics.json",
         _json_bytes(metrics.to_dict()),
@@ -118,7 +145,11 @@ def write_qualification_report(
         _json_bytes(
             {
                 "schema_version": REPORT_SCHEMA_VERSION,
-                "groups": _metrics_by_cell(matrix, specs),
+                "groups": (
+                    list(metrics_by_cell)
+                    if evaluation_matrix
+                    else _metrics_by_cell(matrix, specs)
+                ),
             }
         ),
     )
@@ -126,7 +157,6 @@ def write_qualification_report(
         output_directory / "summary.json",
         _json_bytes(_summary(matrix, rows)),
     )
-    scorecard_rows = _scorecard_rows(matrix)
     _atomic_write(
         output_directory / "scorecard.csv",
         _scorecard_csv(scorecard_rows).encode("utf-8"),
@@ -134,6 +164,16 @@ def write_qualification_report(
     _atomic_write(
         output_directory / "scorecard.md",
         _scorecard_markdown(scorecard_rows).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "validation.json",
+        _json_bytes(
+            {
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "status": "pending_external_validation",
+                "run_identity": matrix.run_identity,
+            }
+        ),
     )
 
     artifact_hashes = tuple(
@@ -165,6 +205,8 @@ def write_qualification_report(
 
 def _flatten_rows(
     matrix: QualificationMatrixResult,
+    *,
+    prefix_artifacts: Mapping[str, object] | None = None,
 ) -> dict[str, list[dict[str, object]]]:
     rows: dict[str, list[dict[str, object]]] = {
         name: [] for name in _JSONL_ARTIFACTS
@@ -172,9 +214,44 @@ def _flatten_rows(
     seen_calls: set[str] = set()
     for task in matrix.task_results:
         task_context = _task_context(task)
-        alignment_by_session = {
-            item.checkpoint_session: item for item in task.alignments
-        }
+        artifact = _prefix_artifact_for_task(task, prefix_artifacts or {})
+        if artifact is not None:
+            rows["prefix_manifests.jsonl"].append(
+                {
+                    **task_context,
+                    "prefix_artifact_hash": artifact.artifact_hash,
+                    "backend": artifact.backend,
+                    "profile_id": artifact.profile_id,
+                    "config_hash": artifact.config_hash,
+                    "run_identity": artifact.run_identity,
+                    "dataset_release": artifact.dataset_release,
+                    "surface_hash": artifact.surface_hash,
+                    "source_commit": artifact.source_commit,
+                    }
+                )
+            # Schema-v2 evaluation results carry their immutable memory prefix
+            # outside the task result (rather than through legacy ``writes``).
+            # Export one inventory snapshot per checkpoint so the report keeps
+            # the stored-state side of the retrieval chain auditable.
+            if not getattr(task, "writes", ()):
+                for checkpoint in artifact.checkpoints:
+                    if checkpoint.inventory is not None:
+                        rows["memory_inventory.jsonl"].append(
+                            {
+                                **task_context,
+                                **_jsonable(asdict(checkpoint.inventory)),
+                            }
+                        )
+            for checkpoint in artifact.checkpoints:
+                for key, value in checkpoint.graph_diagnostics:
+                    rows["graph_diagnostics.jsonl"].append(
+                        {
+                            **task_context,
+                            "checkpoint_session": checkpoint.checkpoint_session,
+                            "key": key,
+                            "value": _jsonable(value),
+                        }
+                    )
         rows["tasks.jsonl"].append(
             {
                 **task_context,
@@ -188,7 +265,7 @@ def _flatten_rows(
         rows["task_results.jsonl"].append(
             _jsonable(asdict(task))
         )
-        for write in task.writes:
+        for write in getattr(task, "writes", ()):
             write_context = {
                 **task_context,
                 "session_index": write.session_index,
@@ -198,39 +275,12 @@ def _flatten_rows(
                     {
                         **write_context,
                         **_jsonable(asdict(event)),
-                        "provenance_mode": (
-                            "inferred"
-                            if event.source in {"inventory_diff", "inventory_delta"}
-                            or event.native_event.startswith("INFERRED")
-                            else "native/exact"
-                        ),
                     }
                 )
             rows["memory_inventory.jsonl"].append(
                 {
                     **write_context,
                     **_jsonable(asdict(write.inventory)),
-                    "provenance_mode_by_memory": {
-                        attribution.memory_id: attribution.provenance_mode
-                        for attribution in (
-                            alignment_by_session[write.session_index].attributions
-                            if write.session_index in alignment_by_session
-                            else ()
-                        )
-                    },
-                    "attribution_by_memory": {
-                        attribution.memory_id: {
-                            "state_ids": list(attribution.state_ids),
-                            "source_event_ids": list(attribution.source_event_ids),
-                            "source_session": attribution.source_session,
-                            "provenance_mode": attribution.provenance_mode,
-                        }
-                        for attribution in (
-                            alignment_by_session[write.session_index].attributions
-                            if write.session_index in alignment_by_session
-                            else ()
-                        )
-                    },
                 }
             )
             for usage in write.usage_events:
@@ -240,7 +290,7 @@ def _flatten_rows(
                     write_context,
                     usage,
                 )
-        for trace in task.retrieval_traces:
+        for trace in getattr(task, "retrieval_traces", ()):
             rows["retrieval_trace.jsonl"].append(
                 {
                     **task_context,
@@ -275,12 +325,19 @@ def _flatten_rows(
                 "condition_status": condition.status,
             }
             for row in condition.sceu_results:
-                rows["sceu_results.jsonl"].append(
-                    {
-                        **condition_context,
-                        **_jsonable(asdict(row)),
-                    }
+                trace_id = _evaluation_trace_id(
+                    task.task_id,
+                    row.sceu_id,
+                    condition.readout,
+                    row.retrieval_trace_id,
                 )
+                row_payload = {
+                    **condition_context,
+                    **_jsonable(asdict(row)),
+                }
+                if trace_id is not None:
+                    row_payload["retrieval_trace_id"] = trace_id
+                rows["sceu_results.jsonl"].append(row_payload)
                 for evaluation in row.baseline_evaluations:
                     _append_api_usage(
                         rows["api_usage.jsonl"],
@@ -310,6 +367,55 @@ def _flatten_rows(
                             intervention_kind=intervention.intervention_kind,
                             target_memory_id=intervention.target_memory_id,
                         )
+            # The schema-v2 evaluator persists retrievals inside each immutable
+            # SCEU result rather than a mutable runner task trace.  Normalize
+            # them to the same trace artifact here.
+            if not getattr(task, "retrieval_traces", ()) and condition.condition in {
+                "flat_retrieval",
+                "mem0",
+                "amem",
+                "memos",
+            }:
+                for row in condition.sceu_results:
+                    rows["retrieval_trace.jsonl"].append(
+                        {
+                            **condition_context,
+                            "trace_id": _evaluation_trace_id(
+                                task.task_id,
+                                row.sceu_id,
+                                condition.readout,
+                                row.retrieval_trace_id,
+                            ),
+                            "sceu_id": row.sceu_id,
+                            "opportunity_id": row.opportunity_id,
+                            "checkpoint_session": row.checkpoint_session,
+                            "query": "",
+                            "query_hash": "",
+                            "candidate_memory_ids": list(row.candidate_memory_ids),
+                            "native_retrieved_memory_ids": list(
+                                row.retrieved_memory_ids
+                                if condition.readout == "native"
+                                else ()
+                            ),
+                            "common_reranked_memory_ids": list(
+                                row.retrieved_memory_ids
+                                if condition.readout == "common_rerank"
+                                else ()
+                            ),
+                            "candidate_shortfall": bool(
+                                getattr(row, "candidate_shortfall", False)
+                            ),
+                            "search_latency_seconds": 0.0,
+                            "rerank_result": None,
+                            "internal_usage": [],
+                        }
+                    )
+    rows["policy_calls.jsonl"] = [
+        dict(row)
+        for row in rows["api_usage.jsonl"]
+        if isinstance(row.get("policy_request_hash"), str)
+        and bool(row["policy_request_hash"])
+    ]
     return rows
 
 
@@ -453,6 +559,48 @@ def _task_context(task: QualificationTaskResult) -> dict[str, object]:
     }
 
 
+def _evaluation_trace_id(
+    task_id: str,
+    sceu_id: str,
+    readout: str,
+    existing: str | None,
+) -> str | None:
+    """Return a stable report trace ID for one schema-v2 SCEU/readout.
+
+    Common-rerank rows already carry the evaluator trace ID.  Native rows in
+    early schema-v2 result files intentionally left that field empty because
+    their order is directly inherited from the frozen candidate search.  The
+    report still needs a distinct trace record for validation and provenance,
+    so synthesize one without changing the original task result bytes.
+    """
+    if existing:
+        return existing
+    if readout == "native":
+        return f"{task_id}:{sceu_id}:native"
+    return None
+
+
+def _prefix_artifact_for_task(
+    task: object,
+    artifacts: Mapping[str, object],
+) -> MemoryPrefixArtifact | None:
+    condition = str(getattr(task, "condition", ""))
+    episode_id = str(getattr(task, "episode_id", ""))
+    backend = "mem0" if condition in {"mem0_controlled", "mem0_native"} else condition
+    for key in (f"{episode_id}--{backend}", backend, f"{episode_id}--{condition}", condition):
+        raw = artifacts.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, MemoryPrefixArtifact):
+            return raw
+        if isinstance(raw, Mapping):
+            try:
+                return MemoryPrefixArtifact.from_dict(raw)
+            except Exception:
+                return None
+    return None
+
+
 def _summary(
     matrix: QualificationMatrixResult,
     rows: Mapping[str, Sequence[dict[str, object]]],
@@ -463,11 +611,6 @@ def _summary(
         statuses[task.status] += 1
         for condition in task.condition_results:
             condition_statuses[condition.status] += 1
-    count_rows = [
-        row
-        for row in rows["interventions.jsonl"]
-        if row.get("count_contrast") in {"delete_one", "add_one"}
-    ]
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "run_identity": matrix.run_identity,
@@ -479,26 +622,8 @@ def _summary(
         "n_inventory_snapshots": len(rows["memory_inventory.jsonl"]),
         "n_retrieval_traces": len(rows["retrieval_trace.jsonl"]),
         "n_interventions": len(rows["interventions.jsonl"]),
-        "n_memory_count_contrasts": len(count_rows),
-        "n_memory_count_action_flips": sum(
-            bool(
-                _mapping_value(
-                    row.get("classification"),
-                    "action_changed",
-                )
-            )
-            for row in count_rows
-        ),
         "n_api_calls": len(rows["api_usage.jsonl"]),
-        "storage_provenance": provenance_diagnostics(matrix),
-        "n_policy_calls": sum(
-            row.get("call_kind") not in {
-                "memory_internal_llm",
-                "embedding",
-                "reranker",
-            }
-            for row in rows["api_usage.jsonl"]
-        ),
+        "n_policy_calls": len(rows["policy_calls.jsonl"]),
         "n_memory_internal_calls": sum(
             row.get("call_kind") == "memory_internal_llm"
             for row in rows["api_usage.jsonl"]
@@ -511,13 +636,9 @@ def _summary(
             row.get("call_kind") == "reranker"
             for row in rows["api_usage.jsonl"]
         ),
+        "n_prefix_manifests": len(rows["prefix_manifests.jsonl"]),
+        "n_graph_diagnostics": len(rows["graph_diagnostics.jsonl"]),
     }
-
-
-def _mapping_value(value: object, key: str) -> object:
-    if isinstance(value, Mapping):
-        return value.get(key)
-    return None
 
 
 def _scorecard_rows(
@@ -562,11 +683,6 @@ def _scorecard_rows(
             intervention.classification.label
             for intervention in interventions
         ]
-        count_contrasts = [
-            intervention
-            for intervention in interventions
-            if intervention.count_contrast in {"delete_one", "add_one"}
-        ]
         drift_flags = [
             flag
             for row in rows
@@ -596,6 +712,18 @@ def _scorecard_rows(
                 "mean_visible_memory_count": _ratio_value(
                     sum(len(row.model_visible_memory_ids) for row in rows),
                     len(rows),
+                ),
+                "mean_live_memory_count": _ratio_value(
+                    sum(
+                        _live_memory_count_or_zero(row)
+                        for row in rows
+                        if _live_memory_count_from_row(row) is not None
+                    ),
+                    sum(
+                        1
+                        for row in rows
+                        if _live_memory_count_from_row(row) is not None
+                    ),
                 ),
                 "causal_memory_use_rate": _ratio_value(
                     sum(label in {"beneficial", "harmful"} for label in causal),
@@ -640,13 +768,6 @@ def _scorecard_rows(
                 "aggregate_drift_rate": _ratio_value(
                     sum(bool(row.normalized_drift_flags) for row in rows),
                     len(rows),
-                ),
-                "memory_count_contrast_rate": _ratio_value(
-                    sum(
-                        intervention.classification.action_changed
-                        for intervention in count_contrasts
-                    ),
-                    len(count_contrasts),
                 ),
             }
         )
@@ -729,6 +850,16 @@ def _aggregate_status(statuses: Sequence[str] | Any) -> str:
 
 def _flag_rate(flags: Sequence[str], name: str, denominator: int) -> float | None:
     return _ratio_value(flags.count(name), denominator)
+
+
+def _live_memory_count_from_row(row: object) -> int | None:
+    value = getattr(row, "live_memory_count", None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _live_memory_count_or_zero(row: object) -> int:
+    value = _live_memory_count_from_row(row)
+    return 0 if value is None else value
 
 
 def _ratio_value(numerator: float, denominator: float) -> float | None:

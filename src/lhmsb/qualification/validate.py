@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from lhmsb.qualification.conditions import condition_definition
 from lhmsb.qualification.report import REQUIRED_REPORT_ARTIFACTS
 
 
@@ -80,6 +81,9 @@ def validate_qualification_artifacts(
         "retrieval_trace.jsonl",
         "interventions.jsonl",
         "api_usage.jsonl",
+        "policy_calls.jsonl",
+        "prefix_manifests.jsonl",
+        "graph_diagnostics.jsonl",
     ):
         jsonl[name] = _read_jsonl(report_directory / name, errors)
         canonical = sorted(
@@ -112,7 +116,7 @@ def validate_qualification_artifacts(
         if row.get("trace_id")
     }
     sceu_keys: set[tuple[str, str, str]] = set()
-    mem0_tasks_with_sceu: set[str] = set()
+    memory_tasks_with_sceu: set[str] = set()
     for row in jsonl["sceu_results.jsonl"]:
         task_id = str(row.get("task_id", ""))
         if task_id not in task_ids:
@@ -163,8 +167,13 @@ def validate_qualification_artifacts(
                 f"non-memory condition exposes memory IDs for {key}"
             )
         trace_id = row.get("retrieval_trace_id")
-        if condition.startswith("mem0_"):
-            mem0_tasks_with_sceu.add(task_id)
+        try:
+            is_memory_condition = condition_definition(condition).prefix_backend is not None
+        except ValueError:
+            errors.append(f"unknown condition in SCEU result: {condition}")
+            is_memory_condition = False
+        if is_memory_condition:
+            memory_tasks_with_sceu.add(task_id)
             if not isinstance(trace_id, str) or trace_id not in traces:
                 errors.append(
                     f"Mem0 SCEU lacks a known retrieval trace for {key}"
@@ -184,9 +193,9 @@ def validate_qualification_artifacts(
         str(row.get("task_id", ""))
         for row in jsonl["retrieval_trace.jsonl"]
     }
-    for task_id in sorted(mem0_tasks_with_sceu):
+    for task_id in sorted(memory_tasks_with_sceu):
         if task_id not in inventory_tasks:
-            errors.append(f"Mem0 task lacks inventory snapshots: {task_id}")
+            errors.append(f"memory task lacks inventory snapshots: {task_id}")
         if task_id not in trace_tasks:
             errors.append(f"Mem0 task lacks retrieval traces: {task_id}")
 
@@ -234,6 +243,53 @@ def validate_qualification_artifacts(
         errors,
         allow_empty=True,
     )
+    policy_calls = jsonl.get("policy_calls.jsonl", [])
+    policy_ids = _unique_ids(
+        policy_calls,
+        "call_id",
+        "policy call",
+        errors,
+        allow_empty=False,
+    )
+    usage_by_id = {
+        str(row.get("call_id")): row
+        for row in jsonl["api_usage.jsonl"]
+        if row.get("call_id")
+    }
+    schema_version = manifest.get("schema_version")
+    strict_policy_routes = bool(
+        isinstance(manifest.get("policy_routes"), Mapping)
+        or (isinstance(schema_version, int) and schema_version >= 3)
+    )
+    for row in policy_calls:
+        call_id = str(row.get("call_id", ""))
+        required_fields = (
+            "provider",
+            "model_id",
+            "route_id",
+            "endpoint_identity",
+            "request_hash",
+            "response_hash",
+            "policy_request_hash",
+        )
+        if strict_policy_routes:
+            for field in required_fields:
+                if not isinstance(row.get(field), str) or not row[field]:
+                    errors.append(f"policy call {call_id} lacks {field}")
+        usage = usage_by_id.get(call_id)
+        if usage is None:
+            errors.append(f"policy call references unknown API call: {call_id}")
+            continue
+        if strict_policy_routes:
+            for field in required_fields:
+                if row.get(field) != usage.get(field):
+                    errors.append(f"policy/API usage mismatch for {call_id}: {field}")
+    if set(policy_ids) != {
+        str(row.get("call_id"))
+        for row in jsonl["api_usage.jsonl"]
+        if row.get("policy_request_hash")
+    }:
+        errors.append("policy_calls coverage does not match api_usage policy calls")
     _read_json(report_directory / "metrics.json", errors, required=False)
     metrics_by_cell = _read_json(
         report_directory / "metrics_by_cell.json",
@@ -246,6 +302,14 @@ def validate_qualification_artifacts(
         errors,
     )
     _read_json(report_directory / "summary.json", errors, required=False)
+    validation_payload = _read_json(
+        report_directory / "validation.json", errors, required=False
+    )
+    if validation_payload and validation_payload.get("run_identity") not in {
+        None,
+        run_identity,
+    }:
+        errors.append("validation.json run identity does not match report manifest")
     return ArtifactValidationReport(
         ok=not errors,
         errors=tuple(errors),

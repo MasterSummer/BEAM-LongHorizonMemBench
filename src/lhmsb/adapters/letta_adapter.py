@@ -59,6 +59,8 @@ _MODULE_CANDIDATES = ("ai_memory_sdk", "letta_client")
 #: Client class names probed on whichever SDK module imports (the SDKs disagree on the
 #: exact symbol; the fake test double exposes one of these).
 _CLIENT_CANDIDATES = (
+    # ``ai-memory-sdk`` (the official Letta memory wrapper) exports this name.
+    "Memory",
     "AIMemory",
     "AIMemoryClient",
     "MemoryClient",

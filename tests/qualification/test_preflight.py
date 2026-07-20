@@ -15,6 +15,7 @@ from lhmsb.qualification.preflight import (
     _gate_controlled_mem0_lifecycle,
     _gate_host_runtime,
     _host_runtime_inventory,
+    _selected_gpu,
     current_repository_snapshot,
     default_preflight_gates,
     redact_secrets,
@@ -200,7 +201,7 @@ def test_containerized_preflight_reads_host_runtime_manifest(
                 "0, NVIDIA A100-SXM4-80GB, GPU-a, 81920 MiB",
                 "1, NVIDIA H100 80GB HBM3, GPU-b, 81920 MiB",
             ],
-            {},
+            {"LHMSB_REQUIRE_A100": "1", "LHMSB_MIN_FREE_BYTES": "0"},
             "A100",
         ),
         (
@@ -263,6 +264,23 @@ def test_live_preflight_includes_real_controlled_mem0_lifecycle_gate() -> None:
     assert names.index("controlled_mem0_lifecycle") < names.index(
         "native_mem0_profile"
     )
+
+
+def test_selected_gpu_accepts_rtx_4090_in_default_policy() -> None:
+    lines = (
+        "0, NVIDIA GeForce RTX 4090, GPU-a, 24564 MiB",
+        "1, NVIDIA GeForce RTX 4090, GPU-b, 24564 MiB",
+    )
+
+    assert _selected_gpu(lines, "0") == lines[0]
+    assert _selected_gpu(lines, "GPU-b") == lines[1]
+
+
+def test_selected_gpu_can_require_a100_for_legacy_deployments() -> None:
+    lines = ("0, NVIDIA GeForce RTX 4090, GPU-a, 24564 MiB",)
+
+    with pytest.raises(PreflightError, match="A100"):
+        _selected_gpu(lines, "0", require_a100=True)
 
 
 def test_controlled_mem0_lifecycle_checks_all_policy_profiles(
