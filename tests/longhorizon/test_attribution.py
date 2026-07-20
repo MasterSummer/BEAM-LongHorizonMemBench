@@ -182,4 +182,5 @@ def test_write_eligibility_includes_current_updates_and_excludes_retirements() -
     assert eligible_write_state_ids(spec.plan, 0) == ("C1", "C2", "G0", "P1")
     assert eligible_write_state_ids(spec.plan, 5) == ("P1",)
     assert eligible_write_state_ids(spec.plan, 6) == ("P2",)
-    assert eligible_write_state_ids(spec.plan, 8) == ("L1",)
+    assert eligible_write_state_ids(spec.plan, 8) == ("D1",)
+    assert eligible_write_state_ids(spec.plan, 9) == ("L1", "V2")

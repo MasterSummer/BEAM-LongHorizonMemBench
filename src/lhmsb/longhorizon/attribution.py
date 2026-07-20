@@ -343,16 +343,35 @@ def _software_catalog() -> dict[str, _SignatureDefinition]:
             ),
             negative_anchors=("v1 is the current implementation",),
         ),
-        "L1": _SignatureDefinition(
+        "D1": _SignatureDefinition(
             required_anchor_groups=(
+                ("local operator",),
+                ("proposes", "proposal"),
                 ("hosted api", "hosted accelerator", "cloud api"),
                 ("profiling run", "profiling"),
             ),
             allowed_surface_variants=(
-                "a hosted api can accelerate one local profiling run",
-                "a hosted accelerator can speed one profiling run",
+                (
+                    "a local operator proposes a hosted api for one profiling run "
+                    "this is a suggestion not authorization or a policy exception"
+                ),
             ),
-            negative_anchors=("hosted services are forbidden for profiling",),
+            negative_anchors=("project owner explicitly authorizes",),
+        ),
+        "L1": _SignatureDefinition(
+            required_anchor_groups=(
+                ("project owner",),
+                ("authorizes", "authorization"),
+                ("hosted api", "hosted accelerator"),
+                ("isolated local profiler", "isolated profiler"),
+            ),
+            allowed_surface_variants=(
+                (
+                    "the project owner explicitly authorizes a hosted api only for "
+                    "the isolated local profiler"
+                ),
+            ),
+            negative_anchors=("not authorization", "no authorization"),
         ),
         "V2": _SignatureDefinition(
             required_anchor_groups=(

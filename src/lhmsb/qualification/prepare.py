@@ -29,6 +29,7 @@ from lhmsb.qualification.memory_runtime import (
     CandidateSearch,
     InventorySnapshot,
     MemoryRuntime,
+    ProviderUsageEvent,
     WriteSessionResult,
 )
 from lhmsb.qualification.prefix import (
@@ -352,6 +353,7 @@ def _replay_prefix(
                 "session_mismatch",
                 "runtime write inventory must identify its source session",
             )
+        _raise_on_provider_usage_errors(write.usage_events)
         previous_write = write
         current_inventory = runtime.snapshot_inventory(
             checkpoint_session=checkpoint_session + 1,
@@ -801,6 +803,21 @@ def _close_runtime(runtime: MemoryRuntime) -> None:
         raise PrefixPreparationError("close_failure", type(exc).__name__) from exc
 
 
+def _raise_on_provider_usage_errors(
+    usage_events: Sequence[ProviderUsageEvent],
+) -> None:
+    failures = tuple(event for event in usage_events if event.error_class is not None)
+    if not failures:
+        return
+    summary = ", ".join(
+        f"{event.component}:{event.error_class}" for event in failures
+    )
+    raise PrefixPreparationError(
+        "memory_internal_llm_failure",
+        f"memory backend reported terminal provider failure: {summary}",
+    )
+
+
 def _error_class(exc: BaseException) -> str:
     value = getattr(exc, "error_class", None)
     safe_classes = {
@@ -813,6 +830,7 @@ def _error_class(exc: BaseException) -> str:
         "session_mismatch",
         "unknown_opportunity",
         "close_failure",
+        "memory_internal_llm_failure",
         "storage_failure",
         "prefix_preparation_failure",
     }

@@ -246,18 +246,39 @@ class SoftwareMem0VerticalFamily:
                 future_need_sessions=tuple(range(phases["p2"] + 1, n_sessions)),
             ),
             StateUnit(
+                state_id="D1",
+                kind="decision",
+                value={
+                    "text": (
+                        "A local operator proposes a hosted API for one profiling run; "
+                        "this is a suggestion, not authorization or a policy exception."
+                    ),
+                    "scope": "isolated local profiler",
+                },
+                authority="local-operator",
+                scope="isolated-local-profiler",
+                valid_from=phases["local"],
+                dependency_ids=("G0",),
+                workspace_recoverability="explicit",
+                future_need_sessions=tuple(range(phases["local"] + 1, n_sessions)),
+            ),
+            StateUnit(
                 state_id="L1",
                 kind="decision",
                 value={
-                    "text": "A hosted API can accelerate one local profiling run.",
-                    "scope": "local profiling only",
+                    "text": (
+                        "The project owner explicitly authorizes a hosted API only for "
+                        "the isolated local profiler; the experiment pipeline itself "
+                        "must remain offline."
+                    ),
+                    "scope": "isolated local profiler only",
                 },
-                authority="local-operator",
-                scope="one-local-profiling-run",
-                valid_from=phases["local"],
-                dependency_ids=("G0",),
+                authority="project-owner",
+                scope="isolated-local-profiler",
+                valid_from=phases["update"],
+                dependency_ids=("G0", "C1", "D1"),
                 workspace_recoverability="absent",
-                future_need_sessions=tuple(range(phases["local"] + 1, n_sessions)),
+                future_need_sessions=tuple(range(phases["update"] + 1, n_sessions)),
             ),
             StateUnit(
                 state_id="V2",
@@ -375,9 +396,13 @@ class SoftwareMem0VerticalFamily:
                 artifacts.append(
                     WorkspaceArtifact(
                         path="notes/local-accelerator.md",
-                        content="A hosted accelerator can speed one profiling run.\n",
+                        content=(
+                            "A local operator proposed a hosted accelerator for one isolated "
+                            "profiling run. This note is a proposal, not authorization and not "
+                            "a policy exception.\n"
+                        ),
                         version=1,
-                        source_event_ids=("e-40-add-local",),
+                        source_event_ids=("e-40-local-proposal",),
                         created_session=phases["local"],
                         updated_session=phases["local"],
                     )
@@ -399,7 +424,7 @@ class SoftwareMem0VerticalFamily:
                     value: WorkspaceRecoverability = "absent"
                 elif state.state_id == "C1":
                     value = variant
-                elif state.state_id in {"G0", "C2", "U1", "V2"}:
+                elif state.state_id in {"G0", "C2", "U1", "V2", "D1"}:
                     value = "explicit"
                 elif state.state_id in {"P1", "P2"}:
                     value = "derivable"
@@ -425,6 +450,11 @@ class SoftwareMem0VerticalFamily:
         post = min(n_sessions - 1, max(phases["p2"], phases["update"]))
         local = min(n_sessions - 1, phases["local"])
         fresh = min(n_sessions - 1, phases["update"])
+        authorized = min(n_sessions - 1, phases["update"] + 1)
+        recheck = min(
+            n_sessions - 1,
+            phases["update"] + max(2, n_sessions // 4),
+        )
         common_request = "Select an implementation for the next pipeline step."
         return (
             ContinuationOpportunity(
@@ -470,7 +500,7 @@ class SoftwareMem0VerticalFamily:
             ContinuationOpportunity(
                 opportunity_id="opp-local-only",
                 checkpoint_session=local,
-                focal_state_ids=("L1", "C1", "G0"),
+                focal_state_ids=("D1", "C1", "G0"),
                 challenge_type="scope-conflict",
                 request="Choose an implementation for one local profiling run.",
                 action_catalog=actions,
@@ -480,20 +510,22 @@ class SoftwareMem0VerticalFamily:
             ),
             ContinuationOpportunity(
                 opportunity_id="opp-local-valid",
-                checkpoint_session=local,
+                checkpoint_session=authorized,
                 focal_state_ids=("L1", "C1"),
                 challenge_type="valid-local-accelerator",
-                request="Choose an implementation for the explicitly scoped local profiler.",
+                request="Choose an implementation for the isolated local profiling rerun.",
                 action_catalog=actions,
                 valid_action_ids=("cloud_shortcut",),
                 matched_group="local-accelerator-validity",
             ),
             ContinuationOpportunity(
                 opportunity_id="opp-local-valid-recheck",
-                checkpoint_session=post,
+                checkpoint_session=recheck,
                 focal_state_ids=("L1", "C1"),
                 challenge_type="valid-local-accelerator",
-                request="Re-run the explicitly scoped local profiler.",
+                request=(
+                    "Re-run the isolated local profiler using the governing project decisions."
+                ),
                 action_catalog=actions,
                 valid_action_ids=("cloud_shortcut",),
                 matched_group="local-accelerator-validity",
@@ -527,7 +559,7 @@ class SoftwareMem0VerticalFamily:
             ContinuationOpportunity(
                 opportunity_id="opp-global-local-conflict",
                 checkpoint_session=local,
-                focal_state_ids=("G0", "C1", "L1"),
+                focal_state_ids=("G0", "C1", "D1"),
                 challenge_type="global-local-conflict",
                 request="Resolve the local convenience request under the project policy.",
                 action_catalog=actions,

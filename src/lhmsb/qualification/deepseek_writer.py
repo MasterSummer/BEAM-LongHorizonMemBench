@@ -161,63 +161,62 @@ class DeepSeekJSONBridge:
         started = time.perf_counter()
         started_at = datetime.now(UTC).isoformat()
         retries = 0
-        raw: dict[str, object]
+        raw: dict[str, object] = {}
         decoded: Mapping[object, object]
-        for structured_attempt in range(self.max_retries + 1):
-            raw, transport_retries = self._post(body)
-            retries += transport_retries
-            returned_model = raw.get("model")
-            if returned_model != self.model_id:
-                raise DeepSeekWriterError(
-                    "provider_model_unavailable",
-                    f"requested {self.model_id!r}, provider returned {returned_model!r}",
-                )
-            content = _response_content(raw)
-            try:
-                parsed = json.loads(content)
-                if not isinstance(parsed, Mapping):
+        try:
+            for structured_attempt in range(self.max_retries + 1):
+                raw, transport_retries = self._post(body)
+                retries += transport_retries
+                returned_model = raw.get("model")
+                if returned_model != self.model_id:
+                    raise DeepSeekWriterError(
+                        "provider_model_unavailable",
+                        f"requested {self.model_id!r}, provider returned {returned_model!r}",
+                    )
+                content = _response_content(raw)
+                try:
+                    parsed = _decode_json_object(content)
+                    _validate_schema(parsed, schema)
+                except (json.JSONDecodeError, DeepSeekWriterError) as exc:
+                    if structured_attempt < self.max_retries:
+                        retries += 1
+                        self._delay()
+                        continue
+                    if isinstance(exc, DeepSeekWriterError):
+                        raise
                     raise DeepSeekWriterError(
                         "structured_output_failure",
-                        "DeepSeek JSON response must be an object",
-                    )
-                _validate_schema(parsed, schema)
-            except (json.JSONDecodeError, DeepSeekWriterError) as exc:
-                if structured_attempt < self.max_retries:
-                    retries += 1
-                    self._delay()
-                    continue
-                if isinstance(exc, DeepSeekWriterError):
-                    raise
+                        "DeepSeek response content is not JSON",
+                    ) from exc
+                decoded = parsed
+                break
+            else:  # pragma: no cover - the bounded loop always returns or raises
                 raise DeepSeekWriterError(
-                    "structured_output_failure",
-                    "DeepSeek response content is not JSON",
-                ) from exc
-            decoded = parsed
-            break
-        else:  # pragma: no cover - the bounded loop always returns or raises
-            raise DeepSeekWriterError("structured_output_failure", "unreachable retry state")
-        response_hash = _canonical_hash(raw)
-        ended_at = datetime.now(UTC).isoformat()
-        usage = _usage_fields(raw)
-        event = ProviderUsageEvent(
-            call_id=request_id or f"deepseek-writer-{len(self.calls):06d}",
-            component="memory_internal_llm",
-            provider="deepseek",
-            model_id=self.model_id,
-            endpoint_identity=self.endpoint,
+                    "structured_output_failure", "unreachable retry state"
+                )
+        except DeepSeekWriterError as exc:
+            self.calls.append(
+                self._usage_event(
+                    request_id=request_id,
+                    request_hash=request_hash,
+                    raw=raw,
+                    input_count=len(normalized_messages),
+                    started=started,
+                    started_at=started_at,
+                    retries=retries,
+                    error_class=exc.error_class,
+                )
+            )
+            raise
+        event = self._usage_event(
+            request_id=request_id,
             request_hash=request_hash,
-            response_hash=response_hash,
-            input_tokens=usage[0],
-            output_tokens=usage[1],
-            cached_tokens=usage[2],
-            reasoning_tokens=usage[3],
-            usage_observed=usage[4],
+            raw=raw,
             input_count=len(normalized_messages),
-            latency_seconds=max(0.0, time.perf_counter() - started),
-            retry_count=retries,
+            started=started,
+            started_at=started_at,
+            retries=retries,
             error_class=None,
-            started_at_utc=started_at,
-            ended_at_utc=ended_at,
         )
         self.calls.append(event)
         return DeepSeekJSONResponse(
@@ -225,7 +224,7 @@ class DeepSeekJSONBridge:
             raw=raw,
             usage_event=event,
             request_hash=request_hash,
-            response_hash=response_hash,
+            response_hash=event.response_hash,
             retry_count=retries,
             route_id=self.route_id,
         )
@@ -233,6 +232,43 @@ class DeepSeekJSONBridge:
     # ``request`` is intentionally a thin alias; this is useful when injecting
     # the bridge into code that expects an HTTP-client-like method.
     request = generate_json
+
+    def _usage_event(
+        self,
+        *,
+        request_id: str | None,
+        request_hash: str,
+        raw: Mapping[str, object],
+        input_count: int,
+        started: float,
+        started_at: str,
+        retries: int,
+        error_class: str | None,
+    ) -> ProviderUsageEvent:
+        usage = _usage_fields(raw)
+        response_payload: object = (
+            raw if raw else {"error_class": error_class or "unknown"}
+        )
+        return ProviderUsageEvent(
+            call_id=request_id or f"deepseek-writer-{len(self.calls):06d}",
+            component="memory_internal_llm",
+            provider="deepseek",
+            model_id=self.model_id,
+            endpoint_identity=self.endpoint,
+            request_hash=request_hash,
+            response_hash=_canonical_hash(response_payload),
+            input_tokens=usage[0],
+            output_tokens=usage[1],
+            cached_tokens=usage[2],
+            reasoning_tokens=usage[3],
+            usage_observed=usage[4],
+            input_count=input_count,
+            latency_seconds=max(0.0, time.perf_counter() - started),
+            retry_count=retries,
+            error_class=error_class,
+            started_at_utc=started_at,
+            ended_at_utc=datetime.now(UTC).isoformat(),
+        )
 
     def _request_body(
         self,
@@ -363,6 +399,37 @@ def _response_content(raw: Mapping[str, object]) -> str:
             "DeepSeek message content is missing",
         )
     return cast(str, message["content"])
+
+
+def _decode_json_object(content: str) -> Mapping[object, object]:
+    """Accept a JSON object plus common provider-only presentation wrappers."""
+    text = content.strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as direct_error:
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].strip().lower() in {"```", "```json"}:
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        start = text.find("{")
+        if start < 0:
+            raise direct_error
+        try:
+            parsed, end = json.JSONDecoder().raw_decode(text[start:])
+        except json.JSONDecodeError:
+            raise direct_error from None
+        trailing = text[start + end :].strip()
+        if trailing and trailing != "```":
+            raise direct_error
+    if not isinstance(parsed, Mapping):
+        raise DeepSeekWriterError(
+            "structured_output_failure",
+            "DeepSeek JSON response must be an object",
+        )
+    return parsed
 
 
 def _usage_fields(

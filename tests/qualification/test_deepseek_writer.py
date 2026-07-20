@@ -94,6 +94,42 @@ def test_bridge_rejects_openai_endpoint_and_bad_schema_response() -> None:
     )
     with pytest.raises(DeepSeekWriterError, match="required"):
         bridge.generate_json(({"role": "user", "content": "x"},), response_format=_SCHEMA)
+    assert len(bridge.calls) == 1
+    assert bridge.calls[0].error_class == "structured_output_failure"
+    bridge.close()
+
+
+@pytest.mark.parametrize(
+    "wrapped",
+    (
+        "```json\n{payload}\n```",
+        "Here is the requested object:\n{payload}",
+    ),
+)
+def test_bridge_accepts_provider_presentation_wrappers(wrapped: str) -> None:
+    payload = json.dumps({"keywords": [], "context": "ok", "tags": []})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "deepseek-v4-pro",
+                "choices": [{"message": {"content": wrapped.format(payload=payload)}}],
+            },
+            request=request,
+        )
+
+    bridge = DeepSeekJSONBridge(
+        api_key="deepseek-secret",
+        endpoint="https://api.deepseek.com",
+        transport=httpx.MockTransport(handler),
+        max_retries=0,
+    )
+    result = bridge.generate_json(
+        ({"role": "user", "content": "make a note"},), response_format=_SCHEMA
+    )
+    assert result.payload["context"] == "ok"
+    assert result.usage_event.error_class is None
     bridge.close()
 
 

@@ -106,3 +106,6 @@ def test_cell_groups_and_scorecard_do_not_mix_native_and_common() -> None:
     scorecard = compute_multisystem_scorecard(rows)
     assert len(scorecard) == 2
     assert {item["readout"] for item in scorecard} == {"native", "common_rerank"}
+    assert {item["status"] for item in scorecard} == {"complete"}
+    assert {item["baseline_stability_rate"] for item in scorecard} == {1.0}
+    assert {item["unstable_intervention_rate"] for item in scorecard} == {0.0}

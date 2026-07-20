@@ -8,6 +8,8 @@ from pathlib import Path
 from lhmsb.datasets.cli import main
 from lhmsb.datasets.mem0_stateful_pipeline import (
     MEM0_STATEFUL_GENERATOR_VERSION,
+    MEM0_STATEFUL_GENERATOR_VERSION_V3,
+    MEM0_STATEFUL_RELEASE_ID_V3,
     build_mem0_release_archive,
     freeze_mem0_stateful,
     generate_mem0_stateful_to_staging,
@@ -52,6 +54,7 @@ def test_generate_separates_public_and_evaluator_trees(tmp_path: Path) -> None:
         "P1",
         "U1",
         "P2",
+        "D1",
         "L1",
         "V2",
     }
@@ -83,6 +86,16 @@ def test_freeze_verify_and_regen_are_reproducible(tmp_path: Path) -> None:
     assert manifest.files == json.loads(
         (frozen / "hashes" / "files.json").read_text(encoding="utf-8")
     )
+
+
+def test_full_horizon_smoke_uses_v03_release_contract(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    frozen = tmp_path / "frozen"
+    generate_mem0_stateful_to_staging(stage, seeds=[42], n_sessions=16)
+    manifest = freeze_mem0_stateful(stage, frozen)
+
+    assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V3
+    assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V3
 
 
 def test_verify_detects_public_tampering(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ def test_software_vertical_has_fixed_state_first_semantics() -> None:
         "P1",
         "U1",
         "P2",
+        "D1",
         "L1",
     }
     assert {action.action_id for action in spec.actions} == {
@@ -34,6 +35,20 @@ def test_software_vertical_has_fixed_state_first_semantics() -> None:
     assert "P2" in late.current
     assert "P1" not in late.current
     assert "C1" in late.current
+    assert "D1" in late.current
+    assert "L1" in late.current
+
+
+def test_local_proposal_and_authorization_are_distinct_state_events() -> None:
+    spec = SoftwareVerticalFamily.generate(seed=42, n_sessions=16, trajectory_seed=2)
+    proposal = replay_plan(spec.plan, 8)
+    authorized = replay_plan(spec.plan, 9)
+
+    assert "D1" in proposal.current
+    assert "L1" not in proposal.current
+    assert proposal.current["D1"].authority == "local-operator"
+    assert authorized.current["L1"].authority == "project-owner"
+    assert authorized.current["L1"].workspace_recoverability == "absent"
 
 
 def test_vertical_generation_is_reproducible_and_horizon_parameterized() -> None:

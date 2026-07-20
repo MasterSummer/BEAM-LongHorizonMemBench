@@ -9,7 +9,7 @@ import pytest
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.qualification.config import canonical_hash
-from lhmsb.qualification.evaluate import EvaluationTaskResult
+from lhmsb.qualification.evaluate import EvaluationConditionResult, EvaluationTaskResult
 from lhmsb.qualification.memory_runtime import (
     CandidateSearch,
     InventorySnapshot,
@@ -28,7 +28,11 @@ from lhmsb.qualification.prepare import (
     _artifact_identity,
     prepare_prefix,
 )
-from lhmsb.qualification.report import _flatten_rows, _metric_usages
+from lhmsb.qualification.report import (
+    _flatten_rows,
+    _metric_usages,
+    _state_checkpoints_by_cell,
+)
 from lhmsb.qualification.runner import QualificationMatrixResult
 from lhmsb.qualification.schema import PreparationTask
 from lhmsb.qualification.storage import QualificationStorage, QualificationStorageError
@@ -190,6 +194,26 @@ class FakeRuntime:
         )
         self.items[item.memory_id] = item
         return item
+
+
+class FailedWriterRuntime(FakeRuntime):
+    def write_session(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        session_index: int,
+        metadata: dict[str, object] | None = None,
+    ) -> WriteSessionResult:
+        result = super().write_session(
+            messages,
+            session_index=session_index,
+            metadata=metadata,
+        )
+        failed = replace(
+            result.usage_events[0],
+            error_class="structured_output_failure",
+        )
+        return replace(result, usage_events=(failed,))
 
 
 class FakeReranker:
@@ -442,6 +466,9 @@ def test_prepare_replays_public_sessions_and_searches_before_current_write(tmp_p
     )
     assert len(state_rows) == 5
     assert state_rows[-1].is_final_checkpoint
+    assert state_rows[-1].live_memory_provenance == (
+        "native/exact",
+    ) * state_rows[-1].n_live
 
 
 def test_schema_v2_report_exports_and_scores_prefix_writer_usage(tmp_path: Path) -> None:
@@ -477,6 +504,36 @@ def test_schema_v2_report_exports_and_scores_prefix_writer_usage(tmp_path: Path)
     usage_metrics = _metric_usages(usage_rows)
     assert len(usage_metrics) == spec.plan.n_sessions
     assert all(item.component == "memory_internal_llm" for item in usage_metrics)
+
+    result_with_cells = replace(
+        result,
+        condition_results=(
+            EvaluationConditionResult(
+                result_id="mem0-common",
+                condition="mem0",
+                readout="common_rerank",
+                status="complete",
+                sceu_results=(),
+            ),
+            EvaluationConditionResult(
+                result_id="mem0-native",
+                condition="mem0",
+                readout="native",
+                status="complete",
+                sceu_results=(),
+            ),
+        ),
+    )
+    by_cell = _state_checkpoints_by_cell(
+        QualificationMatrixResult(task.run_identity, (result_with_cells,)),  # type: ignore[arg-type]
+        {spec.plan.episode_id: spec},
+        {"mem0": artifact},
+    )
+    assert set(by_cell) == {
+        ("gpt_5_6_sol_zen", "mem0", "common_rerank"),
+        ("gpt_5_6_sol_zen", "mem0", "native"),
+    }
+    assert all(len(checkpoints) == spec.plan.n_sessions + 1 for checkpoints in by_cell.values())
 
 
 def test_prepare_is_deterministic_and_second_run_is_read_only(tmp_path: Path) -> None:
@@ -567,6 +624,22 @@ def test_failed_prepare_closes_runtime_and_publishes_no_valid_artifact(tmp_path:
     assert not storage.prefix_artifact_path(task).exists()
     with pytest.raises(QualificationStorageError, match="RuntimeError during prefix preparation"):
         storage.load_prefix_artifact(task)
+
+
+def test_prepare_fails_on_swallowed_memory_writer_provider_error(tmp_path: Path) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task(spec.plan.episode_id)
+    storage = QualificationStorage(tmp_path / "run", run_identity=task.run_identity)
+    runtime = FailedWriterRuntime()
+
+    with pytest.raises(PrefixPreparationError) as exc_info:
+        prepare_prefix(task, spec, runtime, FakeReranker(), storage)
+
+    assert exc_info.value.error_class == "memory_internal_llm_failure"
+    assert runtime.closed
+    assert not storage.prefix_artifact_path(task).exists()
+    marker = json.loads(storage.prefix_failure_path(task).read_text(encoding="utf-8"))
+    assert marker["error_class"] == "memory_internal_llm_failure"
 
 
 def test_failed_prepare_can_be_retried_after_any_failure_marker(tmp_path: Path) -> None:

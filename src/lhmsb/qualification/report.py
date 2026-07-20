@@ -15,6 +15,7 @@ from typing import Any
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.qualification.metrics import (
+    StateCheckpointMetricInput,
     UsageMetricInput,
     _artifact_attributions,
     compute_multisystem_metrics,
@@ -150,6 +151,11 @@ def write_qualification_report(
         )
         metrics_by_cell = compute_multisystem_metrics_by_cell(
             observations,
+            state_checkpoints_by_cell=_state_checkpoints_by_cell(
+                matrix,
+                specs,
+                prefix_artifacts or {},
+            ),
             usages_by_cell=_metric_usages_by_cell(
                 observations,
                 rows["api_usage.jsonl"],
@@ -277,6 +283,7 @@ def _flatten_rows(
                                     checkpoint.inventory,
                                     checkpoint,
                                     checkpoint.checkpoint_session,
+                                    artifact=artifact,
                                 ).values()
                             }
                         rows["memory_inventory.jsonl"].append(
@@ -656,6 +663,32 @@ def _metric_usages_by_cell(
         for key in sorted(cell_keys):
             if key[:2] == (policy_id, condition):
                 grouped[key].append(usage)
+    return {key: tuple(value) for key, value in grouped.items()}
+
+
+def _state_checkpoints_by_cell(
+    matrix: QualificationMatrixResult,
+    specs: Mapping[str, SoftwareMem0VerticalSpec],
+    prefix_artifacts: Mapping[str, object],
+) -> dict[tuple[str, str, str], tuple[StateCheckpointMetricInput, ...]]:
+    """Project each immutable backend prefix onto its scored readout cells."""
+    grouped: dict[tuple[str, str, str], list[StateCheckpointMetricInput]] = {}
+    for task in matrix.task_results:
+        checkpoints = multisystem_state_checkpoints_from_artifacts(
+            (task,),
+            specs,
+            prefix_artifacts=prefix_artifacts,
+        )
+        if not checkpoints:
+            continue
+        policy_id = str(getattr(task, "policy_profile_id", ""))
+        task_condition = str(getattr(task, "condition", ""))
+        for condition_result in getattr(task, "condition_results", ()):
+            condition = str(
+                getattr(condition_result, "condition", task_condition)
+            )
+            readout = str(getattr(condition_result, "readout", "none"))
+            grouped.setdefault((policy_id, condition, readout), []).extend(checkpoints)
     return {key: tuple(value) for key, value in grouped.items()}
 
 

@@ -309,3 +309,35 @@ def test_flat_prefix_readout_is_reused_without_memory_runtime(tmp_path) -> None:
     assert result.status == "complete"
     assert any(row.candidate_memory_ids for row in result.sceu_results)
     assert all(row.interventions for row in result.sceu_results if row.model_visible_memory_ids)
+    assert all(
+        sum(
+            item.intervention_kind == "leave_one_out"
+            for item in row.interventions
+        )
+        <= 1
+        for row in result.sceu_results
+    )
+    assert all(
+        sum(item.intervention_kind == "count_add" for item in row.interventions)
+        == 1
+        for row in result.sceu_results
+    )
+    assert all(
+        item.target_memory_id == f"count-control:{row.sceu_id}"
+        and item.baseline_memory_count + 1 == item.intervention_memory_count
+        for row in result.sceu_results
+        for item in row.interventions
+        if item.intervention_kind == "count_add"
+    )
+    assert all(
+        item.provenance_mode == "evaluator_controlled"
+        for row in result.sceu_results
+        for item in row.interventions
+        if item.intervention_kind == "count_add"
+    )
+    assert all(
+        item.provenance_mode in {"native/exact", "inferred", "unavailable"}
+        for row in result.sceu_results
+        for item in row.interventions
+        if item.intervention_kind == "leave_one_out"
+    )

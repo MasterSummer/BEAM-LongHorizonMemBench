@@ -56,6 +56,24 @@ def test_oracle_uses_current_state_and_workspace_only_fails_on_absent_branch() -
     assert "stale-state" in late_workspace.behavior.drift_flags
 
 
+def test_two_authorized_profiler_handoffs_require_state_beyond_workspace() -> None:
+    spec = SoftwareVerticalFamily.generate(seed=42, n_sessions=16, trajectory_seed=2)
+    workspace = run_vertical_episode(spec, "workspace_only")
+    oracle = run_vertical_episode(spec, "oracle_current_state")
+
+    for opportunity_id in ("opp-local-valid", "opp-local-valid-recheck"):
+        workspace_result = next(
+            item for item in workspace.sceu_results if item.opportunity_id == opportunity_id
+        )
+        oracle_result = next(
+            item for item in oracle.sceu_results if item.opportunity_id == opportunity_id
+        )
+        assert workspace_result.selected_action == "safe_v2_offline"
+        assert not workspace_result.behavior.is_correct
+        assert oracle_result.selected_action == "cloud_shortcut"
+        assert oracle_result.behavior.is_correct
+
+
 def test_leave_one_out_removes_key_native_memory_and_changes_action() -> None:
     spec = SoftwareVerticalFamily.generate(seed=42, n_sessions=4, trajectory_seed=0)
     normal = run_vertical_episode(spec, "fake_native")

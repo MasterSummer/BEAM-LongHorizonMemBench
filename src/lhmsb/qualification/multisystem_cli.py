@@ -936,6 +936,7 @@ def _evaluation_result_from_dict(raw: Mapping[str, object]) -> EvaluationTaskRes
                 if data.get("count_contrast") is None
                 else str(data.get("count_contrast"))
             ),
+            provenance_mode=str(data.get("provenance_mode", "unavailable")),
         )
 
     def sceu(value: object) -> EvaluationSCEUResult:

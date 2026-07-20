@@ -455,11 +455,11 @@ def _release_for_generation(
 ) -> tuple[str, str]:
     """Select the release contract without changing legacy CI fixtures.
 
-    The 30-episode pilot is the first v0.3 release.  Small 4-session fixtures
-    retain the v0.2 identifiers so existing compatibility tests and archived
-    artifacts remain readable.
+    Full 16-session trajectories and the 30-episode pilot use the v0.3
+    contract.  Small 4-session CI fixtures retain the v0.2 identifiers so
+    existing compatibility tests and archived artifacts remain readable.
     """
-    if n_episodes >= 30:
+    if n_sessions >= 16 or n_episodes >= 30:
         return MEM0_STATEFUL_RELEASE_ID_V3, MEM0_STATEFUL_GENERATOR_VERSION_V3
     return MEM0_STATEFUL_RELEASE_ID, MEM0_STATEFUL_GENERATOR_VERSION
 

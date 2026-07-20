@@ -17,6 +17,7 @@ from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.families.software.vertical_checker import BehaviorResult
 from lhmsb.longhorizon.attribution import (
     MemoryAttribution,
+    ProvenanceMode,
     attribute_memory,
     build_software_fact_signatures,
     eligible_write_state_ids,
@@ -167,6 +168,7 @@ class EvaluationIntervention:
     baseline_memory_count: int = 0
     intervention_memory_count: int = 0
     count_contrast: str | None = None
+    provenance_mode: str = "unavailable"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -178,6 +180,7 @@ class EvaluationIntervention:
             "baseline_memory_count": self.baseline_memory_count,
             "intervention_memory_count": self.intervention_memory_count,
             "count_contrast": self.count_contrast,
+            "provenance_mode": self.provenance_mode,
         }
 
 
@@ -380,7 +383,12 @@ def evaluate_task(
             else:
                 context = ""
             workspace_hash = _workspace_hash(surface)
-            attributions = _attributions(spec, readout.inventory, sceu)
+            attributions = _attributions(
+                spec,
+                readout.inventory,
+                sceu,
+                artifact=artifact,
+            )
             visible_state_ids = _visible_state_ids(readout.visible_memory_ids, attributions)
             repeats = 1 if _is_control(task.condition) else profile.baseline_repeats
             baselines = _calls(
@@ -780,7 +788,11 @@ def _interventions(
         return ()
     current_ids = set(replay_plan(spec.plan, sceu.checkpoint_session).current)
     result: list[EvaluationIntervention] = []
-    for target in readout.visible_candidates:
+    for target in _intervention_targets(
+        readout.visible_candidates,
+        attributions,
+        sceu.intervention_target_ids,
+    ):
         remaining = tuple(
             item for item in readout.visible_candidates if item.memory_id != target.memory_id
         )
@@ -820,6 +832,11 @@ def _interventions(
                 baseline_memory_count=len(readout.visible_candidates),
                 intervention_memory_count=len(remaining),
                 count_contrast="delete_one",
+                provenance_mode=(
+                    "unavailable"
+                    if attributions.get(target.memory_id) is None
+                    else attributions[target.memory_id].provenance_mode
+                ),
             )
         )
         if role != "contradicts_current_state":
@@ -866,81 +883,103 @@ def _interventions(
                 replacement_memory_id=replacement.memory_id,
                 evaluations=replacement_calls,
                 classification=replacement_classification,
+                provenance_mode=(
+                    "unavailable"
+                    if attributions.get(target.memory_id) is None
+                    else attributions[target.memory_id].provenance_mode
+                ),
             )
         )
-    # A matched add-one contrast uses a real object from the same frozen
-    # checkpoint that was not already visible.  It changes only the model-visible
-    # memory count; the latent checkpoint and workspace remain identical.
-    visible_ids = {item.memory_id for item in readout.visible_candidates}
-    added = next(
-        (
-            item
-            for item in readout.inventory
-            if item.memory_id not in visible_ids
-        ),
-        None,
+    # The add-one arm is an evaluator-owned, state-neutral object.  It changes
+    # only the model-visible object count; checkpoint, workspace, and semantic
+    # evidence stay fixed.  The baseline is the matched retain arm.
+    added = _count_control_candidate(
+        sceu,
+        len(readout.visible_candidates) + 1,
     )
-    if added is not None:
-        extra = _candidate_from_memory_object(added, len(readout.visible_candidates) + 1)
-        added_visible = tuple(readout.visible_candidates) + (extra,)
-        add_calls = _calls(
-            policy,
-            checker,
-            task,
-            result_id,
-            spec,
-            public,
-            surface,
-            sceu,
-            added_visible,
-            additional_context,
-            workspace_hash,
-            _visible_state_ids(
-                tuple(item.memory_id for item in added_visible),
-                attributions,
-            ),
-            "count_add",
-            repeats,
-            max_output_tokens,
-            actions,
-        )
-        add_role = _memory_role(
-            attributions.get(added.memory_id),
-            current_ids=current_ids,
-        )
-        add_classification = classify_causal_use(
-            memory_id=added.memory_id,
+    added_visible = tuple(readout.visible_candidates) + (added,)
+    add_calls = _calls(
+        policy,
+        checker,
+        task,
+        result_id,
+        spec,
+        public,
+        surface,
+        sceu,
+        added_visible,
+        additional_context,
+        workspace_hash,
+        _visible_state_ids(
+            tuple(item.memory_id for item in readout.visible_candidates),
+            attributions,
+        ),
+        "count_add",
+        repeats,
+        max_output_tokens,
+        actions,
+    )
+    add_classification = classify_causal_use(
+        memory_id=added.memory_id,
+        intervention_kind="count_add",
+        memory_role="unknown",
+        baseline=_outcome_pair(baselines),
+        intervention=_outcome_pair(add_calls),
+    )
+    result.append(
+        EvaluationIntervention(
             intervention_kind="count_add",
-            memory_role=add_role,
-            baseline=_outcome_pair(baselines),
-            intervention=_outcome_pair(add_calls),
+            target_memory_id=added.memory_id,
+            replacement_memory_id=None,
+            evaluations=add_calls,
+            classification=add_classification,
+            baseline_memory_count=len(readout.visible_candidates),
+            intervention_memory_count=len(added_visible),
+            count_contrast="add_one",
+            provenance_mode="evaluator_controlled",
         )
-        result.append(
-            EvaluationIntervention(
-                intervention_kind="count_add",
-                target_memory_id=added.memory_id,
-                replacement_memory_id=None,
-                evaluations=add_calls,
-                classification=add_classification,
-                baseline_memory_count=len(readout.visible_candidates),
-                intervention_memory_count=len(added_visible),
-                count_contrast="add_one",
-            )
-        )
+    )
     return tuple(result)
 
 
-def _candidate_from_memory_object(item: MemoryObject, native_rank: int) -> RetrievalCandidate:
+def _intervention_targets(
+    visible: Sequence[RetrievalCandidate],
+    attributions: Mapping[str, MemoryAttribution],
+    target_state_ids: Sequence[str],
+) -> tuple[RetrievalCandidate, ...]:
+    """Choose one deterministic, evaluator-declared causal target per SCEU."""
+    targets = set(target_state_ids)
+    ranked: list[tuple[int, int, RetrievalCandidate]] = []
+    for index, candidate in enumerate(visible):
+        attribution = attributions.get(candidate.memory_id)
+        overlap = (
+            targets.intersection(attribution.state_ids)
+            if attribution is not None and attribution.contributes_positive_coverage
+            else set()
+        )
+        if overlap:
+            ranked.append((-len(overlap), index, candidate))
+    if not ranked:
+        return ()
+    ranked.sort(key=lambda item: (item[0], item[1], item[2].memory_id))
+    return (ranked[0][2],)
+
+
+def _count_control_candidate(sceu: SCEU, native_rank: int) -> RetrievalCandidate:
+    content = (
+        "Facilities note: the meeting-room projector lamp was checked during "
+        "routine maintenance."
+    )
     return RetrievalCandidate(
-        memory_id=item.memory_id,
-        content=item.content,
-        content_hash=item.content_hash,
+        memory_id=f"count-control:{sceu.sceu_id}",
+        content=content,
+        content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
         native_rank=native_rank,
         score=None,
         score_details=(),
-        metadata=item.metadata,
-        created_at=item.created_at,
-        updated_at=item.updated_at,
+        metadata=(("lhmsb.control", "memory-count-neutral"),),
+        created_at="evaluator-controlled",
+        updated_at="evaluator-controlled",
     )
 
 
@@ -977,10 +1016,16 @@ def _attributions(
     spec: SoftwareMem0VerticalSpec,
     inventory: Sequence[MemoryObject],
     sceu: SCEU,
+    *,
+    artifact: MemoryPrefixArtifact | None,
 ) -> dict[str, MemoryAttribution]:
     if not inventory:
         return {}
     signatures = build_software_fact_signatures(spec.plan)
+    events_by_memory = _provenance_events_by_memory(
+        artifact,
+        checkpoint_session=sceu.checkpoint_session,
+    )
     result: dict[str, MemoryAttribution] = {}
     for item in inventory:
         source_session = dict(item.metadata).get("session_index")
@@ -989,13 +1034,54 @@ def _attributions(
             if isinstance(source_session, int) and source_session < sceu.checkpoint_session
             else ()
         )
+        events = events_by_memory.get(item.memory_id, ())
+        mode = _provenance_mode(events[-1]) if events else "unavailable"
         result[item.memory_id] = attribute_memory(
             item.memory_id,
             item.content,
             signatures,
             unique_write_state_ids=eligible,
+            provenance_mode=mode,
+            source_event_ids=tuple(
+                str(getattr(event, "operation_id", ""))
+                for event in events
+                if getattr(event, "operation_id", "")
+            ),
+            source_session=(
+                source_session if isinstance(source_session, int) else None
+            ),
         )
     return result
+
+
+def _provenance_events_by_memory(
+    artifact: MemoryPrefixArtifact | None,
+    *,
+    checkpoint_session: int,
+) -> dict[str, tuple[object, ...]]:
+    grouped: dict[str, list[object]] = {}
+    if artifact is None:
+        return {}
+    for checkpoint in artifact.checkpoints:
+        if checkpoint.checkpoint_session > checkpoint_session:
+            continue
+        for write in checkpoint.writes:
+            for event in write.events:
+                grouped.setdefault(event.memory_id, []).append(event)
+    return {memory_id: tuple(events) for memory_id, events in grouped.items()}
+
+
+def _provenance_mode(event: object) -> ProvenanceMode:
+    source = str(getattr(event, "source", ""))
+    native_event = str(getattr(event, "native_event", ""))
+    if source in {
+        "inventory_diff",
+        "inventory_delta",
+        "snapshot_diff",
+        "neo4j_graph_diff",
+    } or native_event.upper().startswith("INFERRED"):
+        return "inferred"
+    return "native/exact"
 
 
 def _visible_state_ids(

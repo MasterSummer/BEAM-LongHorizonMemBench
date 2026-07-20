@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import cast
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.longhorizon.attribution import (
@@ -156,6 +157,8 @@ class MultisystemMetricInput:
     count_contrast_behavior_changes: int = 0
     retrieval_latency_seconds: float = 0.0
     rerank_latency_seconds: float | None = None
+    status: str = "complete"
+    baseline_stable: bool = True
 
     def behavior_input(self) -> BehaviorMetricInput:
         return BehaviorMetricInput(
@@ -324,12 +327,18 @@ def compute_multisystem_scorecard(
                 "policy_profile_id": key[0],
                 "condition": key[1],
                 "readout": key[2],
+                "status": _aggregate_observation_status(
+                    tuple(row.status for row in rows)
+                ),
                 "n_sceu": len(rows),
                 "mean_behavior_score": _ratio_value(
                     sum(row.behavior_score for row in rows), len(rows)
                 ),
                 "behavior_correct_rate": _ratio_value(
                     sum(row.is_correct for row in rows), len(rows)
+                ),
+                "baseline_stability_rate": _ratio_value(
+                    sum(row.baseline_stable for row in rows), len(rows)
                 ),
                 "mean_visible_memory_count": _ratio_value(
                     sum(row.visible_memory_count for row in rows), len(rows)
@@ -347,6 +356,13 @@ def compute_multisystem_scorecard(
                 ),
                 "harmful_intervention_rate": _ratio_value(
                     labels.count("harmful"), len(labels)
+                ),
+                "unstable_intervention_rate": _ratio_value(
+                    sum(
+                        label in {"unstable_baseline", "intervention_unstable"}
+                        for label in labels
+                    ),
+                    len(labels),
                 ),
                 "constraint_loss_rate": _flag_rate(flags, "constraint_loss", len(rows)),
                 "current_plan_deviation_rate": _flag_rate(flags, "plan_deviation", len(rows)),
@@ -374,6 +390,15 @@ def _ratio_value(numerator: float, denominator: float) -> float | None:
 
 def _flag_rate(flags: Sequence[str], name: str, denominator: int) -> float | None:
     return _ratio_value(flags.count(name), denominator)
+
+
+def _aggregate_observation_status(statuses: Sequence[str]) -> str:
+    values = tuple(statuses)
+    if values and all(value == "complete" for value in values):
+        return "complete"
+    if any(value == "failed" for value in values):
+        return "failed"
+    return "partial"
 
 
 def compute_qualification_metrics(
@@ -722,6 +747,7 @@ def multisystem_observations_from_results(
                     inventory,
                     checkpoint,
                     sceu.checkpoint_session,
+                    artifact=artifact,
                 )
                 candidate_ids = tuple(getattr(row, "candidate_memory_ids", ()))
                 retrieved_ids = tuple(getattr(row, "retrieved_memory_ids", ()))
@@ -838,6 +864,10 @@ def multisystem_observations_from_results(
                             checkpoint,
                             sceu.opportunity_id,
                         ),
+                        status=str(getattr(condition_result, "status", "complete")),
+                        baseline_stable=bool(
+                            getattr(row, "baseline_stable", True)
+                        ),
                     )
                 )
     return tuple(output)
@@ -911,6 +941,7 @@ def multisystem_state_checkpoints_from_artifacts(
                 inventory,
                 checkpoint,
                 checkpoint.checkpoint_session,
+                artifact=artifact,
             )
             # Prefix checkpoint ``n_sessions`` is the post-final-write
             # snapshot.  Latent replay indexes sessions themselves and thus
@@ -1055,14 +1086,25 @@ def _artifact_attributions(
     inventory: InventorySnapshot | None,
     checkpoint: MemoryPrefixCheckpoint | None,
     checkpoint_session: int,
+    *,
+    artifact: MemoryPrefixArtifact | None = None,
 ) -> dict[str, MemoryAttribution]:
     if inventory is None:
         return {}
     signatures = build_software_fact_signatures(spec.plan)
     signature_by_state = {signature.state_id: signature for signature in signatures}
     events_by_memory: dict[str, list[object]] = defaultdict(list)
-    if checkpoint is not None:
-        for write in checkpoint.writes:
+    relevant_checkpoints = (
+        tuple(
+            item
+            for item in artifact.checkpoints
+            if item.checkpoint_session <= checkpoint_session
+        )
+        if artifact is not None
+        else (() if checkpoint is None else (checkpoint,))
+    )
+    for relevant in relevant_checkpoints:
+        for write in relevant.writes:
             for event in write.events:
                 events_by_memory[event.memory_id].append(event)
     output: dict[str, MemoryAttribution] = {}
@@ -1075,12 +1117,9 @@ def _artifact_attributions(
             else ()
         )
         events = events_by_memory.get(item.memory_id, [])
-        provenance_mode: ProvenanceMode = (
-            "native/exact"
-            if any(_event_provenance(event) == "native/exact" for event in events)
-            else "inferred"
-            if events
-            else "unavailable"
+        provenance_mode: ProvenanceMode = cast(
+            ProvenanceMode,
+            _event_provenance(events[-1]) if events else "unavailable",
         )
         attribution = attribute_memory(
             item.memory_id,
