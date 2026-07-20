@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,7 @@ from lhmsb.qualification.memory_runtime import (
     WriteSessionResult,
     sha256_text,
 )
+from lhmsb.qualification.metrics import multisystem_state_checkpoints_from_artifacts
 from lhmsb.qualification.prepare import (
     PrefixPreparationError,
     _artifact_identity,
@@ -399,6 +401,18 @@ def test_prepare_replays_public_sessions_and_searches_before_current_write(tmp_p
     assert len(set(checkpoint_hashes)) == len(checkpoint_hashes)
     assert all(value != artifact.surface_hash for value in checkpoint_hashes)
     assert storage.load_prefix_artifact(_task(spec.plan.episode_id)) == artifact
+    state_rows = multisystem_state_checkpoints_from_artifacts(
+        (
+            SimpleNamespace(
+                episode_id=spec.plan.episode_id,
+                condition="flat_retrieval",
+            ),
+        ),
+        {spec.plan.episode_id: spec},
+        prefix_artifacts={"flat_retrieval": artifact},
+    )
+    assert len(state_rows) == 5
+    assert state_rows[-1].is_final_checkpoint
 
 
 def test_prepare_is_deterministic_and_second_run_is_read_only(tmp_path: Path) -> None:

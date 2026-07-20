@@ -912,7 +912,15 @@ def multisystem_state_checkpoints_from_artifacts(
                 checkpoint,
                 checkpoint.checkpoint_session,
             )
-            replay = replay_plan(spec.plan, checkpoint.checkpoint_session)
+            # Prefix checkpoint ``n_sessions`` is the post-final-write
+            # snapshot.  Latent replay indexes sessions themselves and thus
+            # ends at ``n_sessions - 1``.
+            replay_session = (
+                checkpoint.checkpoint_session - 1
+                if checkpoint.checkpoint_session == spec.plan.n_sessions
+                else checkpoint.checkpoint_session
+            )
+            replay = replay_plan(spec.plan, replay_session)
             new_ids = tuple(
                 sorted(
                     {
