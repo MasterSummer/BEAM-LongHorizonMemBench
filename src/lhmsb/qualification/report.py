@@ -549,14 +549,16 @@ def _append_internal_usage(
 
     if not isinstance(usage, ProviderUsageEvent):
         raise TypeError("internal provider usage has the wrong type")
-    if usage.call_id in seen_calls:
+    call_id = _provider_usage_call_id(usage)
+    if call_id in seen_calls:
         return
-    seen_calls.add(usage.call_id)
+    seen_calls.add(call_id)
     call_kind = _canonical_usage_component(usage.component)
     rows.append(
         {
             **context,
-            "call_id": usage.call_id,
+            "call_id": call_id,
+            "provider_call_id": usage.call_id,
             "call_kind": call_kind,
             "provider_component": usage.component,
             "provider": usage.provider,
@@ -580,6 +582,33 @@ def _append_internal_usage(
             "ended_at_utc": usage.ended_at_utc,
         }
     )
+
+
+def _provider_usage_call_id(usage: object) -> str:
+    """Address one actual provider call despite backend-local ID reuse.
+
+    Some native systems expose cumulative usage lists at later checkpoints,
+    while separately constructed writer components restart their local call-ID
+    counters.  Provider request/response identity plus timestamps distinguishes
+    real repeated calls and collapses only the cumulative copies.
+    """
+    payload = {
+        "provider": getattr(usage, "provider", None),
+        "endpoint_identity": getattr(usage, "endpoint_identity", None),
+        "request_hash": getattr(usage, "request_hash", None),
+        "response_hash": getattr(usage, "response_hash", None),
+        "started_at_utc": getattr(usage, "started_at_utc", None),
+        "ended_at_utc": getattr(usage, "ended_at_utc", None),
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"provider:{digest}"
 
 
 def _canonical_usage_component(component: object) -> str:

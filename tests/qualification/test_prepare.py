@@ -92,7 +92,10 @@ class FakeRuntime:
             latency_seconds=0.0,
             usage_events=(
                 ProviderUsageEvent(
-                    call_id=f"writer-{session_index}",
+                    # Native components may restart their local counter.  The
+                    # report must not collapse distinct provider calls merely
+                    # because this ID is reused.
+                    call_id="deepseek-writer-000000",
                     component="memory_writer",
                     provider="fake",
                     model_id="fake-writer",
@@ -465,6 +468,10 @@ def test_schema_v2_report_exports_and_scores_prefix_writer_usage(tmp_path: Path)
     usage_rows = rows["api_usage.jsonl"]
 
     assert len(usage_rows) == spec.plan.n_sessions
+    assert len({row["call_id"] for row in usage_rows}) == spec.plan.n_sessions
+    assert {row["provider_call_id"] for row in usage_rows} == {
+        "deepseek-writer-000000"
+    }
     assert {row["call_kind"] for row in usage_rows} == {"memory_internal_llm"}
     assert {row["provider_component"] for row in usage_rows} == {"memory_writer"}
     usage_metrics = _metric_usages(usage_rows)
