@@ -929,6 +929,13 @@ def _evaluation_result_from_dict(raw: Mapping[str, object]) -> EvaluationTaskRes
             ),
             evaluations=evaluations,
             classification=classification(data.get("classification")),
+            baseline_memory_count=_as_int(data.get("baseline_memory_count")),
+            intervention_memory_count=_as_int(data.get("intervention_memory_count")),
+            count_contrast=(
+                None
+                if data.get("count_contrast") is None
+                else str(data.get("count_contrast"))
+            ),
         )
 
     def sceu(value: object) -> EvaluationSCEUResult:

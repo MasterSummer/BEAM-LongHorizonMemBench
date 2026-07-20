@@ -85,8 +85,8 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   done
   systems_print_command verify_system_runtime.sh --data-root "${DATA_ROOT}"
   systems_print_command uv run python -m lhmsb.qualification preflight-systems \
-    --repository-only --dataset "${DATA_ROOT}/datasets/software_v2" \
-    --config "${REPO_ROOT}/configs/experiments/systems_controlled_zen.yaml" \
+    --repository-only --dataset "${DATA_ROOT}/datasets/software_v3" \
+    --config "${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only.yaml" \
     --data-root "${DATA_ROOT}"
   exit 0
 fi
@@ -293,7 +293,7 @@ PY
 
 uv run python -m lhmsb.qualification preflight-systems \
   --repository-only \
-  --dataset "${DATA_ROOT}/datasets/software_v2" \
-  --config "${REPO_ROOT}/configs/experiments/systems_controlled_zen.yaml" \
+  --dataset "${DATA_ROOT}/datasets/software_v3" \
+  --config "${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only.yaml" \
   --data-root "${DATA_ROOT}" \
   --json "${DATA_ROOT}/runs/preflight-systems/repository.json"

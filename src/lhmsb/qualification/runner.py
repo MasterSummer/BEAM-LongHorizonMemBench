@@ -204,7 +204,7 @@ class InterventionRun:
     classification: CausalUseResult
     baseline_memory_count: int = 0
     intervention_memory_count: int = 0
-    count_contrast: str = "delete_one"
+    count_contrast: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1987,7 +1987,11 @@ def _intervention_run_from_dict(
         ),
         baseline_memory_count=_integer(data.get("baseline_memory_count", 0)),
         intervention_memory_count=_integer(data.get("intervention_memory_count", 0)),
-        count_contrast=str(data.get("count_contrast", "delete_one")),
+        count_contrast=(
+            None
+            if data.get("count_contrast") is None
+            else str(data.get("count_contrast"))
+        ),
     )
 
 

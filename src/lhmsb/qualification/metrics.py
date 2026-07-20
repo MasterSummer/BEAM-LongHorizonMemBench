@@ -10,6 +10,7 @@ from decimal import Decimal
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.longhorizon.attribution import (
     MemoryAttribution,
+    ProvenanceMode,
     attribute_memory,
     build_software_fact_signatures,
     eligible_write_state_ids,
@@ -72,6 +73,13 @@ class StateCheckpointMetricInput:
     # exact constructor and serialization semantics.  Schema-v2 adapters fill
     # these from the immutable mutation trace.
     mutation_counts: tuple[tuple[str, int], ...] = ()
+    # Per-object lifecycle provenance.  These arrays align with
+    # ``new_memory_state_ids`` and ``live_memory_state_ids`` respectively.
+    # Keeping them on the immutable checkpoint record lets aggregation report
+    # exact and inferred tracks without guessing from a final inventory.
+    new_memory_provenance: tuple[str, ...] = ()
+    live_memory_provenance: tuple[str, ...] = ()
+    provenance_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -106,6 +114,9 @@ class BehaviorMetricInput:
     # ``visible_memory_count`` is an exposure variable.  The primary scaling
     # variable is the total live native-object count at the checkpoint.
     live_memory_count: int | None = None
+    count_contrast_count: int = 0
+    count_contrast_action_flips: int = 0
+    count_contrast_behavior_changes: int = 0
 
 
 @dataclass(frozen=True)
@@ -140,6 +151,9 @@ class MultisystemMetricInput:
     matched_group: str = ""
     checkpoint_session: int = 0
     is_conflict_opportunity: bool = False
+    count_contrast_count: int = 0
+    count_contrast_action_flips: int = 0
+    count_contrast_behavior_changes: int = 0
     retrieval_latency_seconds: float = 0.0
     rerank_latency_seconds: float | None = None
 
@@ -161,6 +175,9 @@ class MultisystemMetricInput:
             matched_group=self.matched_group,
             checkpoint_session=self.checkpoint_session,
             is_conflict_opportunity=self.is_conflict_opportunity,
+            count_contrast_count=self.count_contrast_count,
+            count_contrast_action_flips=self.count_contrast_action_flips,
+            count_contrast_behavior_changes=self.count_contrast_behavior_changes,
         )
 
     def retrieval_input(self) -> RetrievalMetricInput:
@@ -209,6 +226,15 @@ def compute_metric_collection(
     """Compute the complete qualification metric namespace from flat records."""
     values: dict[str, MetricValue] = {}
     _state_metrics(values, state_checkpoints)
+    # Provenance is a first-class denominator.  A backend with only inferred
+    # inventory diffs must not be silently reported as exact storage quality.
+    for mode, prefix in (
+        ("native/exact", "storage_exact_"),
+        ("inferred", "storage_inferred_"),
+    ):
+        projected = _filter_state_observations(state_checkpoints, mode)
+        if projected:
+            _state_metrics(values, projected, prefix=prefix)
     _retrieval_metrics(values, retrievals)
     _behavior_metrics(values, behaviors)
     _usage_metrics(values, usages)
@@ -329,6 +355,14 @@ def compute_multisystem_scorecard(
                 "aggregate_drift_rate": _ratio_value(
                     sum(bool(row.drift_flags) for row in rows), len(rows)
                 ),
+                "memory_count_contrast_rate": _ratio_value(
+                    sum(row.count_contrast_action_flips for row in rows),
+                    sum(row.count_contrast_count for row in rows),
+                ),
+                "memory_count_behavior_change_rate": _ratio_value(
+                    sum(row.count_contrast_behavior_changes for row in rows),
+                    sum(row.count_contrast_count for row in rows),
+                ),
             }
         )
     return tuple(output)
@@ -402,8 +436,18 @@ def compute_qualification_metrics(
             new_memory_ids = {
                 event.memory_id
                 for event in write.events
-                if event.native_event in {"ADD", "UPDATE", "OBSERVED_ADD"}
+                if getattr(event, "normalized_event", "") in {"add", "update"}
             }
+            event_by_memory = {
+                event.memory_id: event
+                for event in write.events
+                if event.memory_id in new_memory_ids
+            }
+            new_provenance = tuple(
+                _event_provenance(event_by_memory[memory_id])
+                for memory_id in sorted(new_memory_ids)
+                if memory_id in event_by_memory
+            )
             future_needed = tuple(
                 state_id
                 for state_id, state in replay.current.items()
@@ -438,6 +482,12 @@ def compute_qualification_metrics(
                             Counter(event.native_event.lower() for event in write.events).items()
                         )
                     ),
+                    new_memory_provenance=new_provenance,
+                    live_memory_provenance=tuple(
+                        _attribution_mode(alignment.attributions, item.memory_id)
+                        for item in write.inventory.items
+                    ),
+                    provenance_complete=not (write.n_write > 0 and not write.events),
                 )
             )
 
@@ -482,6 +532,12 @@ def compute_qualification_metrics(
                     item.evaluations[0].selected_action_id != baseline_action
                     for item in loo
                 )
+                count_contrasts = tuple(
+                    item
+                    for item in row.interventions
+                    if getattr(item, "count_contrast", None)
+                    in {"delete_one", "add_one"}
+                )
                 opportunity = opportunity_by_id[row.opportunity_id]
                 checkpoint_replay = replay_plan(
                     spec.plan,
@@ -505,6 +561,16 @@ def compute_qualification_metrics(
                         ),
                         leave_one_out_count=len(loo),
                         leave_one_out_action_flips=action_flips,
+                        count_contrast_count=len(count_contrasts),
+                        count_contrast_action_flips=sum(
+                            bool(getattr(item.classification, "action_changed", False))
+                            for item in count_contrasts
+                        ),
+                        count_contrast_behavior_changes=sum(
+                            bool(getattr(item.classification, "action_changed", False))
+                            or bool(getattr(item.classification, "checker_changed", False))
+                            for item in count_contrasts
+                        ),
                         live_memory_count=_live_count_at_checkpoint(
                             task.writes,
                             row.checkpoint_session,
@@ -515,6 +581,11 @@ def compute_qualification_metrics(
                         is_conflict_opportunity=_is_state_conflict_opportunity(
                             opportunity,
                             checkpoint_replay.invalidated,
+                            pre_update_state_ids=tuple(
+                                state.state_id
+                                for state in spec.plan.state_units
+                                if state.valid_from > row.checkpoint_session
+                            ),
                         ),
                     )
                 )
@@ -646,7 +717,12 @@ def multisystem_observations_from_results(
                     continue
                 checkpoint = _artifact_checkpoint(artifact, sceu.checkpoint_session)
                 inventory = checkpoint.inventory if checkpoint is not None else None
-                attribution = _artifact_attributions(spec, inventory, sceu.checkpoint_session)
+                attribution = _artifact_attributions(
+                    spec,
+                    inventory,
+                    checkpoint,
+                    sceu.checkpoint_session,
+                )
                 candidate_ids = tuple(getattr(row, "candidate_memory_ids", ()))
                 retrieved_ids = tuple(getattr(row, "retrieved_memory_ids", ()))
                 visible_ids = tuple(getattr(row, "model_visible_memory_ids", ()))
@@ -663,6 +739,13 @@ def multisystem_observations_from_results(
                 intervention_labels = tuple(
                     str(getattr(getattr(item, "classification", None), "label", "indeterminate"))
                     for item in intervention_rows
+                )
+                count_contrasts = tuple(
+                    item
+                    for item in intervention_rows
+                    if str(getattr(item, "count_contrast", ""))
+                    in {"delete_one", "add_one"}
+                    or str(getattr(item, "intervention_kind", "")) == "count_contrast"
                 )
                 selected = str(getattr(row, "selected_action_id", ""))
                 flips = sum(
@@ -708,6 +791,34 @@ def multisystem_observations_from_results(
                         intervention_labels=intervention_labels,
                         leave_one_out_count=len(loo_rows),
                         leave_one_out_action_flips=flips,
+                        count_contrast_count=len(count_contrasts),
+                        count_contrast_action_flips=sum(
+                            bool(
+                                getattr(
+                                    getattr(item, "classification", None),
+                                    "action_changed",
+                                    False,
+                                )
+                            )
+                            for item in count_contrasts
+                        ),
+                        count_contrast_behavior_changes=sum(
+                            bool(
+                                getattr(
+                                    getattr(item, "classification", None),
+                                    "action_changed",
+                                    False,
+                                )
+                            )
+                            or bool(
+                                getattr(
+                                    getattr(item, "classification", None),
+                                    "checker_changed",
+                                    False,
+                                )
+                            )
+                            for item in count_contrasts
+                        ),
                         drift_flags=tuple(getattr(row, "normalized_drift_flags", ())),
                         matched_group=str(getattr(row, "matched_group", "")),
                         checkpoint_session=sceu.checkpoint_session,
@@ -751,6 +862,140 @@ def compute_schema_v2_metrics(
         state_checkpoints=state_checkpoints,
         usages=usages,
     )
+
+
+def multisystem_state_checkpoints_from_artifacts(
+    results: Sequence[object] | object,
+    specs: Mapping[str, SoftwareMem0VerticalSpec],
+    *,
+    prefix_artifacts: Mapping[str, object] | None = None,
+) -> tuple[StateCheckpointMetricInput, ...]:
+    """Extract storage-side checkpoint rows from frozen native prefixes.
+
+    Native evaluation results deliberately do not duplicate mutable backend
+    state.  This join reconstructs the immutable write/inventory chain so the
+    report can score exact versus inferred storage provenance at the same
+    checkpoints used by continuation outcomes.
+    """
+    rows = getattr(results, "task_results", None)
+    tasks = tuple(rows) if rows is not None else tuple(results)  # type: ignore[arg-type]
+    artifacts = prefix_artifacts or {}
+    output: list[StateCheckpointMetricInput] = []
+    seen: set[tuple[str, str, int]] = set()
+    for task in tasks:
+        spec = specs.get(str(getattr(task, "episode_id", "")))
+        if spec is None:
+            continue
+        artifact = _artifact_for_task(task, artifacts)
+        if artifact is None:
+            continue
+        for checkpoint in artifact.checkpoints:
+            inventory = checkpoint.inventory
+            if inventory is None:
+                continue
+            key = (
+                spec.plan.episode_id,
+                str(getattr(artifact, "backend", "")),
+                checkpoint.checkpoint_session,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            writes = tuple(checkpoint.writes)
+            events = tuple(event for write in writes for event in write.events)
+            event_by_memory: dict[str, object] = {}
+            for event in events:
+                event_by_memory[event.memory_id] = event
+            attribution = _artifact_attributions(
+                spec,
+                inventory,
+                checkpoint,
+                checkpoint.checkpoint_session,
+            )
+            replay = replay_plan(spec.plan, checkpoint.checkpoint_session)
+            new_ids = tuple(
+                sorted(
+                    {
+                        event.memory_id
+                        for event in events
+                        if getattr(event, "normalized_event", "") in {"add", "update"}
+                    }
+                )
+            )
+            eligible = eligible_write_state_ids(
+                spec.plan,
+                max(0, checkpoint.checkpoint_session - 1),
+            )
+            future = tuple(
+                state_id
+                for state_id, state in replay.current.items()
+                if any(
+                    session >= checkpoint.checkpoint_session
+                    for session in state.future_need_sessions
+                )
+            )
+            output.append(
+                StateCheckpointMetricInput(
+                    eligible_write_state_ids=eligible if new_ids else (),
+                    new_memory_state_ids=tuple(
+                        attribution.get(memory_id, MemoryAttribution(
+                            memory_id=memory_id,
+                            state_ids=(),
+                            method="ambiguous",
+                            contributes_positive_coverage=False,
+                            reason="missing evaluator attribution",
+                        )).state_ids
+                        for memory_id in new_ids
+                    ),
+                    current_state_ids=tuple(sorted(replay.current)),
+                    future_needed_state_ids=tuple(sorted(future)),
+                    retired_state_ids=tuple(sorted(replay.invalidated)),
+                    live_memory_state_ids=tuple(
+                        attribution.get(item.memory_id, MemoryAttribution(
+                            memory_id=item.memory_id,
+                            state_ids=(),
+                            method="ambiguous",
+                            contributes_positive_coverage=False,
+                            reason="missing evaluator attribution",
+                        )).state_ids
+                        for item in inventory.items
+                    ),
+                    live_content_hashes=tuple(item.content_hash for item in inventory.items),
+                    n_write=sum(
+                        getattr(write, "n_write", 0) for write in writes
+                    ),
+                    n_live=inventory.n_live,
+                    write_latency_seconds=sum(
+                        float(getattr(write, "latency_seconds", 0.0)) for write in writes
+                    ),
+                    is_final_checkpoint=(
+                        checkpoint.checkpoint_session == spec.plan.n_sessions
+                    ),
+                    mutation_counts=tuple(
+                        sorted(Counter(event.native_event.lower() for event in events).items())
+                    ),
+                    new_memory_provenance=tuple(
+                        _event_provenance(event_by_memory[memory_id])
+                        for memory_id in new_ids
+                        if memory_id in event_by_memory
+                    ),
+                    live_memory_provenance=tuple(
+                        attribution.get(item.memory_id, MemoryAttribution(
+                            memory_id=item.memory_id,
+                            state_ids=(),
+                            method="ambiguous",
+                            contributes_positive_coverage=False,
+                            reason="missing evaluator attribution",
+                        )).provenance_mode
+                        for item in inventory.items
+                    ),
+                    provenance_complete=not (
+                        any(getattr(write, "n_write", 0) > 0 for write in writes)
+                        and not events
+                    ),
+                )
+            )
+    return tuple(output)
 
 
 def _artifact_for_task(
@@ -800,11 +1045,18 @@ def _artifact_checkpoint(
 def _artifact_attributions(
     spec: SoftwareMem0VerticalSpec,
     inventory: InventorySnapshot | None,
+    checkpoint: MemoryPrefixCheckpoint | None,
     checkpoint_session: int,
 ) -> dict[str, MemoryAttribution]:
     if inventory is None:
         return {}
     signatures = build_software_fact_signatures(spec.plan)
+    signature_by_state = {signature.state_id: signature for signature in signatures}
+    events_by_memory: dict[str, list[object]] = defaultdict(list)
+    if checkpoint is not None:
+        for write in checkpoint.writes:
+            for event in write.events:
+                events_by_memory[event.memory_id].append(event)
     output: dict[str, MemoryAttribution] = {}
     for item in inventory.items:
         metadata = dict(item.metadata)
@@ -814,12 +1066,55 @@ def _artifact_attributions(
             if isinstance(source_session, int) and source_session < checkpoint_session
             else ()
         )
+        events = events_by_memory.get(item.memory_id, [])
+        provenance_mode: ProvenanceMode = (
+            "native/exact"
+            if any(_event_provenance(event) == "native/exact" for event in events)
+            else "inferred"
+            if events
+            else "unavailable"
+        )
         attribution = attribute_memory(
             item.memory_id,
             item.content,
             signatures,
             unique_write_state_ids=eligible,
+            provenance_mode=provenance_mode,
+            source_event_ids=tuple(
+                str(getattr(event, "operation_id", ""))
+                for event in events
+                if getattr(event, "operation_id", "")
+            ),
+            source_session=(
+                int(source_session) if isinstance(source_session, int) else None
+            ),
         )
+        gold_event_ids = tuple(
+            sorted(
+                {
+                    event_id
+                    for state_id in attribution.state_ids
+                    for event_id in (
+                        signature_by_state[state_id].source_event_ids
+                        if state_id in signature_by_state
+                        else ()
+                    )
+                }
+            )
+        )
+        if gold_event_ids:
+            attribution = MemoryAttribution(
+                memory_id=attribution.memory_id,
+                state_ids=attribution.state_ids,
+                method=attribution.method,
+                contributes_positive_coverage=attribution.contributes_positive_coverage,
+                reason=attribution.reason,
+                provenance_mode=attribution.provenance_mode,
+                source_event_ids=tuple(
+                    sorted(set(attribution.source_event_ids) | set(gold_event_ids))
+                ),
+                source_session=attribution.source_session,
+            )
         output[item.memory_id] = attribution
     return output
 
@@ -856,7 +1151,12 @@ def _checkpoint_rerank_latency(checkpoint: object | None, opportunity_id: str) -
 def _state_metrics(
     values: dict[str, MetricValue],
     observations: Sequence[StateCheckpointMetricInput],
+    *,
+    prefix: str = "",
 ) -> None:
+    def metric(name: str) -> str:
+        return f"{prefix}{name}"
+
     write_covered = 0
     write_eligible = 0
     selective_objects = 0
@@ -919,56 +1219,136 @@ def _state_metrics(
             final_write_count += item.n_write
             final_live_count += item.n_live
 
-    values["write_coverage"] = safe_ratio(write_covered, write_eligible)
-    values["write_selectivity"] = safe_ratio(selective_objects, written_objects)
+    values[metric("write_coverage")] = safe_ratio(write_covered, write_eligible)
+    values[metric("write_selectivity")] = safe_ratio(selective_objects, written_objects)
     precision = safe_ratio(current_objects, live_objects)
     recall = safe_ratio(represented_current, current_states)
-    values["current_state_storage_precision"] = precision
-    values["current_state_storage_recall"] = recall
-    values["current_state_storage_f1"] = _f1(precision, recall)
-    values["stale_state_retention_rate"] = safe_ratio(stale_objects, live_objects)
-    values["current_stale_coexistence_rate"] = safe_ratio(
+    values[metric("current_state_storage_precision")] = precision
+    values[metric("current_state_storage_recall")] = recall
+    values[metric("current_state_storage_f1")] = _f1(precision, recall)
+    values[metric("stale_state_retention_rate")] = safe_ratio(stale_objects, live_objects)
+    values[metric("current_stale_coexistence_rate")] = safe_ratio(
         current_stale_coexistence,
         live_objects,
     )
-    values["duplicate_live_memory_rate"] = safe_ratio(
+    values[metric("duplicate_live_memory_rate")] = safe_ratio(
         duplicate_objects,
         aligned_live_objects,
     )
-    values["update_delete_responsiveness"] = safe_ratio(
+    values[metric("update_delete_responsiveness")] = safe_ratio(
         responsive_retired,
         retired_states,
     )
-    values["write_to_continuation_alignment"] = safe_ratio(
+    values[metric("write_to_continuation_alignment")] = safe_ratio(
         aligned_future,
         future_states,
     )
-    values["memory_write_count"] = safe_ratio(
+    values[metric("memory_write_count")] = safe_ratio(
         final_write_count,
         final_checkpoints,
     )
-    values["memory_write_count_total"] = (
+    values[metric("memory_write_count_total")] = (
         safe_ratio(final_write_count, 1)
         if final_checkpoints
         else safe_ratio(0, 0)
     )
-    values["live_memory_count"] = safe_ratio(
+    values[metric("live_memory_count")] = safe_ratio(
         final_live_count,
         final_checkpoints,
     )
-    values["live_memory_count_total"] = (
+    values[metric("live_memory_count_total")] = (
         safe_ratio(final_live_count, 1)
         if final_checkpoints
         else safe_ratio(0, 0)
     )
-    values["mean_write_latency_seconds"] = safe_ratio(
+    values[metric("mean_write_latency_seconds")] = safe_ratio(
         write_latency,
         len(observations),
     )
+    values[metric("storage_provenance_completeness")] = safe_ratio(
+        sum(item.provenance_complete for item in observations),
+        len(observations),
+    )
     for event_name in ("add", "update", "delete", "observed_add", "observed_delta", "merge"):
-        values[f"mutation_{event_name}_count"] = safe_ratio(
+        values[metric(f"mutation_{event_name}_count")] = safe_ratio(
             mutation_totals[event_name], 1 if observations else 0
         )
+
+
+def _filter_state_observations(
+    observations: Sequence[StateCheckpointMetricInput],
+    mode: str,
+) -> tuple[StateCheckpointMetricInput, ...]:
+    """Project immutable checkpoint records onto one provenance track."""
+    projected: list[StateCheckpointMetricInput] = []
+    for item in observations:
+        new_pairs = tuple(
+            pair
+            for pair, provenance in zip(
+                item.new_memory_state_ids,
+                item.new_memory_provenance,
+                strict=False,
+            )
+            if provenance == mode
+        )
+        live_pairs = tuple(
+            pair
+            for pair, provenance in zip(
+                item.live_memory_state_ids,
+                item.live_memory_provenance,
+                strict=False,
+            )
+            if provenance == mode
+        )
+        if not new_pairs and not live_pairs:
+            continue
+        projected.append(
+            StateCheckpointMetricInput(
+                eligible_write_state_ids=(
+                    item.eligible_write_state_ids if new_pairs else ()
+                ),
+                new_memory_state_ids=new_pairs,
+                current_state_ids=item.current_state_ids,
+                future_needed_state_ids=item.future_needed_state_ids,
+                retired_state_ids=item.retired_state_ids,
+                live_memory_state_ids=live_pairs,
+                live_content_hashes=tuple(
+                    content_hash
+                    for content_hash, provenance in zip(
+                        item.live_content_hashes,
+                        item.live_memory_provenance,
+                        strict=False,
+                    )
+                    if provenance == mode
+                ),
+                n_write=len(new_pairs),
+                n_live=len(live_pairs),
+                write_latency_seconds=item.write_latency_seconds,
+                is_final_checkpoint=item.is_final_checkpoint,
+                mutation_counts=item.mutation_counts,
+                new_memory_provenance=(mode,) * len(new_pairs),
+                live_memory_provenance=(mode,) * len(live_pairs),
+                provenance_complete=item.provenance_complete,
+            )
+        )
+    return tuple(projected)
+
+
+def _event_provenance(event: object) -> str:
+    source = str(getattr(event, "source", ""))
+    native_event = str(getattr(event, "native_event", ""))
+    if source in {"inventory_diff", "inventory_delta", "snapshot_diff", "neo4j_graph_diff"}:
+        return "inferred"
+    if native_event.upper().startswith("INFERRED"):
+        return "inferred"
+    return "native/exact"
+
+
+def _attribution_mode(attributions: Sequence[object], memory_id: str) -> str:
+    for item in attributions:
+        if getattr(item, "memory_id", None) == memory_id:
+            return str(getattr(item, "provenance_mode", "unavailable"))
+    return "unavailable"
 
 
 def _retrieval_metrics(
@@ -1127,6 +1507,15 @@ def _behavior_metrics(
         loo_flips,
         loo_count,
     )
+    count_contrasts = sum(item.count_contrast_count for item in observations)
+    values["memory_count_contrast_rate"] = safe_ratio(
+        sum(item.count_contrast_action_flips for item in observations),
+        count_contrasts,
+    )
+    values["memory_count_behavior_change_rate"] = safe_ratio(
+        sum(item.count_contrast_behavior_changes for item in observations),
+        count_contrasts,
+    )
     flag_names = (
         "constraint_loss",
         "plan_deviation",
@@ -1183,16 +1572,22 @@ def _behavior_metrics(
 def _is_state_conflict_opportunity(
     opportunity: ContinuationOpportunity,
     invalidated_state_ids: Collection[str],
+    *,
+    pre_update_state_ids: Collection[str] = (),
 ) -> bool:
     if opportunity.challenge_type in {"scope-conflict", "valid-update"}:
         return True
     if opportunity.challenge_type != "matched-branch":
         return False
     invalidated = set(invalidated_state_ids)
+    pre_update = set(pre_update_state_ids)
     valid_actions = set(opportunity.valid_action_ids)
     return any(
         action.action_id not in valid_actions
-        and bool(invalidated.intersection(action.satisfies_state_ids))
+        and bool(
+            invalidated.intersection(action.satisfies_state_ids)
+            or pre_update.intersection(action.satisfies_state_ids)
+        )
         for action in opportunity.action_catalog
     )
 
@@ -1573,5 +1968,6 @@ __all__ = [
     "compute_schema_v2_metrics",
     "compute_qualification_metrics",
     "multisystem_observations_from_results",
+    "multisystem_state_checkpoints_from_artifacts",
     "safe_ratio",
 ]

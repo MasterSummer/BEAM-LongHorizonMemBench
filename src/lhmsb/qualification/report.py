@@ -15,11 +15,13 @@ from typing import Any
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.qualification.metrics import (
+    _artifact_attributions,
     compute_multisystem_metrics,
     compute_multisystem_metrics_by_cell,
     compute_multisystem_scorecard,
     compute_qualification_metrics,
     multisystem_observations_from_results,
+    multisystem_state_checkpoints_from_artifacts,
 )
 from lhmsb.qualification.prefix import MemoryPrefixArtifact
 from lhmsb.qualification.runner import (
@@ -84,6 +86,8 @@ _SCORECARD_FIELDS = (
     "stale_state_action_rate",
     "local_over_global_rate",
     "aggregate_drift_rate",
+    "memory_count_contrast_rate",
+    "memory_count_behavior_change_rate",
 )
 
 
@@ -113,7 +117,11 @@ def write_qualification_report(
 ) -> ReportArtifacts:
     """Write the complete deterministic report and hash every non-manifest file."""
     output_directory.mkdir(parents=True, exist_ok=True)
-    rows = _flatten_rows(matrix, prefix_artifacts=prefix_artifacts)
+    rows = _flatten_rows(
+        matrix,
+        prefix_artifacts=prefix_artifacts,
+        specs=specs,
+    )
     for name in _JSONL_ARTIFACTS:
         _atomic_write(
             output_directory / name,
@@ -129,7 +137,15 @@ def write_qualification_report(
             specs,
             prefix_artifacts=prefix_artifacts,
         )
-        metrics = compute_multisystem_metrics(observations)
+        state_checkpoints = multisystem_state_checkpoints_from_artifacts(
+            matrix,
+            specs,
+            prefix_artifacts=prefix_artifacts,
+        )
+        metrics = compute_multisystem_metrics(
+            observations,
+            state_checkpoints=state_checkpoints,
+        )
         metrics_by_cell = compute_multisystem_metrics_by_cell(observations)
         scorecard_rows = list(compute_multisystem_scorecard(observations))
     else:
@@ -207,6 +223,7 @@ def _flatten_rows(
     matrix: QualificationMatrixResult,
     *,
     prefix_artifacts: Mapping[str, object] | None = None,
+    specs: Mapping[str, SoftwareMem0VerticalSpec] | None = None,
 ) -> dict[str, list[dict[str, object]]]:
     rows: dict[str, list[dict[str, object]]] = {
         name: [] for name in _JSONL_ARTIFACTS
@@ -234,14 +251,54 @@ def _flatten_rows(
             # Export one inventory snapshot per checkpoint so the report keeps
             # the stored-state side of the retrieval chain auditable.
             if not getattr(task, "writes", ()):
+                spec = (specs or {}).get(str(getattr(task, "episode_id", "")))
                 for checkpoint in artifact.checkpoints:
                     if checkpoint.inventory is not None:
+                        attribution_payload: dict[str, object] = {}
+                        if spec is not None:
+                            attribution_payload = {
+                                item.memory_id: {
+                                    "state_ids": list(item.state_ids),
+                                    "provenance_mode": item.provenance_mode,
+                                    "source_event_ids": list(item.source_event_ids),
+                                    "source_session": item.source_session,
+                                    "method": item.method,
+                                }
+                                for item in _artifact_attributions(
+                                    spec,
+                                    checkpoint.inventory,
+                                    checkpoint,
+                                    checkpoint.checkpoint_session,
+                                ).values()
+                            }
                         rows["memory_inventory.jsonl"].append(
                             {
                                 **task_context,
+                                "evaluator_attribution_by_memory": attribution_payload,
                                 **_jsonable(asdict(checkpoint.inventory)),
                             }
                         )
+                    for write in checkpoint.writes:
+                        for event in write.events:
+                            rows["memory_events.jsonl"].append(
+                                {
+                                    **task_context,
+                                    "session_index": write.session_index,
+                                    "provenance_mode": (
+                                        "inferred"
+                                        if event.source
+                                        in {
+                                            "inventory_diff",
+                                            "inventory_delta",
+                                            "snapshot_diff",
+                                            "neo4j_graph_diff",
+                                        }
+                                        or event.native_event.upper().startswith("INFERRED")
+                                        else "native/exact"
+                                    ),
+                                    **_jsonable(asdict(event)),
+                                }
+                            )
             for checkpoint in artifact.checkpoints:
                 for key, value in checkpoint.graph_diagnostics:
                     rows["graph_diagnostics.jsonl"].append(
@@ -638,7 +695,60 @@ def _summary(
         ),
         "n_prefix_manifests": len(rows["prefix_manifests.jsonl"]),
         "n_graph_diagnostics": len(rows["graph_diagnostics.jsonl"]),
+        "storage_provenance": _storage_provenance_diagnostics(rows),
+        "n_memory_count_contrasts": sum(
+            row.get("count_contrast") in {"delete_one", "add_one"}
+            or row.get("intervention_kind") == "count_contrast"
+            for row in rows["interventions.jsonl"]
+        ),
     }
+
+
+def _storage_provenance_diagnostics(
+    rows: Mapping[str, Sequence[dict[str, object]]],
+) -> dict[str, object]:
+    counts: dict[str, int] = {"native/exact": 0, "inferred": 0, "unavailable": 0}
+    by_source: dict[str, int] = defaultdict(int)
+    event_tasks: set[str] = set()
+    for row in rows["memory_events.jsonl"]:
+        mode = str(row.get("provenance_mode", ""))
+        if mode not in counts:
+            mode = "inferred" if mode else "unavailable"
+        counts[mode] += 1
+        source = str(row.get("source", "unknown"))
+        by_source[source] += 1
+        event_tasks.add(str(row.get("task_id", "")))
+    incomplete_tasks = sorted(
+        {
+            str(row.get("task_id", ""))
+            for row in rows["memory_inventory.jsonl"]
+            if _as_int(row.get("n_write", 0)) > 0
+            and str(row.get("task_id", "")) not in event_tasks
+        }
+    )
+    return {
+        "native_exact_event_count": counts["native/exact"],
+        "inferred_event_count": counts["inferred"],
+        "unavailable_event_count": counts["unavailable"],
+        "event_source_counts": dict(sorted(by_source.items())),
+        "incomplete_write_tasks": incomplete_tasks,
+        "status": (
+            "complete"
+            if counts["unavailable"] == 0 and not incomplete_tasks
+            else "incomplete"
+        ),
+    }
+
+
+def _as_int(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _scorecard_rows(
@@ -682,6 +792,13 @@ def _scorecard_rows(
         intervention_labels = [
             intervention.classification.label
             for intervention in interventions
+        ]
+        count_contrasts = [
+            intervention
+            for intervention in interventions
+            if getattr(intervention, "count_contrast", None)
+            in {"delete_one", "add_one"}
+            or getattr(intervention, "intervention_kind", None) == "count_contrast"
         ]
         drift_flags = [
             flag
@@ -768,6 +885,21 @@ def _scorecard_rows(
                 "aggregate_drift_rate": _ratio_value(
                     sum(bool(row.normalized_drift_flags) for row in rows),
                     len(rows),
+                ),
+                "memory_count_contrast_rate": _ratio_value(
+                    sum(
+                        bool(getattr(item.classification, "action_changed", False))
+                        for item in count_contrasts
+                    ),
+                    len(count_contrasts),
+                ),
+                "memory_count_behavior_change_rate": _ratio_value(
+                    sum(
+                        bool(getattr(item.classification, "action_changed", False))
+                        or bool(getattr(item.classification, "checker_changed", False))
+                        for item in count_contrasts
+                    ),
+                    len(count_contrasts),
                 ),
             }
         )

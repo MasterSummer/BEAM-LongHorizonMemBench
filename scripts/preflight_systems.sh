@@ -10,8 +10,8 @@ source "${SCRIPT_DIR}/lib/systems_services.sh"
 REPO_ROOT="$(systems_repo_root)"
 DATA_ROOT="${LHMSB_DATA_ROOT:-/data/lhmsb}"
 ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
-DATASET="${LHMSB_SYSTEM_DATASET:-${DATA_ROOT}/datasets/software_v2}"
-CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_zen.yaml"
+DATASET="${LHMSB_SYSTEM_DATASET:-${DATA_ROOT}/datasets/software_v3}"
+CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only.yaml"
 DRY_RUN=0
 ALLOW_DIRTY=0
 
@@ -34,7 +34,7 @@ EOF
 
 while (($#)); do
   case "$1" in
-    --data-root) systems_require_value "$1" "${2:-}" || exit 2; DATA_ROOT="$2"; DATASET="${DATA_ROOT}/datasets/software_v2"; shift 2 ;;
+    --data-root) systems_require_value "$1" "${2:-}" || exit 2; DATA_ROOT="$2"; DATASET="${DATA_ROOT}/datasets/software_v3"; shift 2 ;;
     --env-file) systems_require_value "$1" "${2:-}" || exit 2; ENV_FILE="$2"; shift 2 ;;
     --dataset) systems_require_value "$1" "${2:-}" || exit 2; DATASET="$2"; shift 2 ;;
     --config) systems_require_value "$1" "${2:-}" || exit 2; CONFIG="$2"; shift 2 ;;

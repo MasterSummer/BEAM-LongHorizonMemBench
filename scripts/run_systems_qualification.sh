@@ -8,12 +8,13 @@ REPO_ROOT="$(systems_repo_root)"
 DATA_ROOT="${LHMSB_DATA_ROOT:-/data/lhmsb}"
 ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
 RUN_NAME="${LHMSB_RUN_NAME:-systems-qualification}"
-DATASET="${LHMSB_SYSTEM_DATASET:-${DATA_ROOT}/datasets/software_v2}"
-CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_zen.yaml"
+DATASET="${LHMSB_SYSTEM_DATASET:-${DATA_ROOT}/datasets/software_v3}"
+CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only.yaml"
 DRY_RUN=0
 FORCE=0
 KEEP_GOING=0
 ALLOW_DIRTY=0
+PREPARE_ONLY=0
 
 usage() {
   cat <<'EOF'
@@ -30,6 +31,7 @@ Options:
   --force           replace a conflicting run identity
   --allow-dirty    allow a working tree with runtime-only untracked files
   --keep-going      continue independent tasks after a failed cell
+  --prepare-only    plan, prepare, and finalize; leave evaluation to a Slurm array
   --dry-run         print commands without network, GPU, secrets, or writes
   -h, --help        show this help
 EOF
@@ -37,7 +39,7 @@ EOF
 
 while (($#)); do
   case "$1" in
-    --data-root) systems_require_value "$1" "${2:-}" || exit 2; DATA_ROOT="$2"; DATASET="${DATA_ROOT}/datasets/software_v2"; shift 2 ;;
+    --data-root) systems_require_value "$1" "${2:-}" || exit 2; DATA_ROOT="$2"; DATASET="${DATA_ROOT}/datasets/software_v3"; shift 2 ;;
     --env-file) systems_require_value "$1" "${2:-}" || exit 2; ENV_FILE="$2"; shift 2 ;;
     --dataset) systems_require_value "$1" "${2:-}" || exit 2; DATASET="$2"; shift 2 ;;
     --config) systems_require_value "$1" "${2:-}" || exit 2; CONFIG="$2"; shift 2 ;;
@@ -45,6 +47,7 @@ while (($#)); do
     --force) FORCE=1; shift ;;
     --allow-dirty) ALLOW_DIRTY=1; shift ;;
     --keep-going) KEEP_GOING=1; shift ;;
+    --prepare-only) PREPARE_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) systems_unknown_argument "$1" || exit $? ;;
@@ -66,6 +69,9 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   done
   systems_print_command "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
     finalize-evaluation-plan --run-dir "${RUN_DIR}"
+  if [[ "${PREPARE_ONLY}" == "1" ]]; then
+    exit 0
+  fi
   systems_print_command "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
     run-evaluation-matrix --run-dir "${RUN_DIR}" --keep-going
   systems_print_command "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
@@ -102,6 +108,9 @@ for pair in "core 0" "mem0 1" "amem 2" "memos 3"; do
     --run-dir "${RUN_DIR}" --task-index "${task_index}"
 done
 systems_run_cli "${DATA_ROOT}" core finalize-evaluation-plan --run-dir "${RUN_DIR}"
+if [[ "${PREPARE_ONLY}" == "1" ]]; then
+  exit 0
+fi
 MATRIX=(run-evaluation-matrix --run-dir "${RUN_DIR}")
 [[ "${KEEP_GOING}" == "1" ]] && MATRIX+=(--keep-going)
 systems_run_cli "${DATA_ROOT}" core "${MATRIX[@]}"

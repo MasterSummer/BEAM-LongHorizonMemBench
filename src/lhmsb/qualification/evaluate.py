@@ -66,6 +66,7 @@ class BehaviorChecker(Protocol):
         *,
         checkpoint_session: int,
         visible_state_ids: tuple[str, ...] | None = None,
+        opportunity_id: str | None = None,
     ) -> BehaviorResult: ...
 
 
@@ -161,6 +162,11 @@ class EvaluationIntervention:
     replacement_memory_id: str | None
     evaluations: tuple[EvaluationCall, ...]
     classification: CausalUseResult
+    # Count-matched intervention metadata.  ``leave_one_out`` is a delete-one
+    # contrast; ``count_add`` is an evaluator-controlled extra object.
+    baseline_memory_count: int = 0
+    intervention_memory_count: int = 0
+    count_contrast: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -169,6 +175,9 @@ class EvaluationIntervention:
             "replacement_memory_id": self.replacement_memory_id,
             "evaluations": [item.to_dict() for item in self.evaluations],
             "classification": asdict(self.classification),
+            "baseline_memory_count": self.baseline_memory_count,
+            "intervention_memory_count": self.intervention_memory_count,
+            "count_contrast": self.count_contrast,
         }
 
 
@@ -702,10 +711,12 @@ def _calls(
         if action_id not in actions:
             raise EvaluationError("structured_output_failure", "unknown evaluator action")
         try:
-            behavior = checker.check_action(
+            behavior = _check_action(
+                checker,
                 action_id,
                 checkpoint_session=sceu.checkpoint_session,
                 visible_state_ids=visible_state_ids,
+                opportunity_id=sceu.opportunity_id,
             )
         except Exception as exc:
             raise EvaluationError("checker_failure", str(exc)) from exc
@@ -806,6 +817,9 @@ def _interventions(
                 replacement_memory_id=None,
                 evaluations=loo,
                 classification=classification,
+                baseline_memory_count=len(readout.visible_candidates),
+                intervention_memory_count=len(remaining),
+                count_contrast="delete_one",
             )
         )
         if role != "contradicts_current_state":
@@ -854,7 +868,80 @@ def _interventions(
                 classification=replacement_classification,
             )
         )
+    # A matched add-one contrast uses a real object from the same frozen
+    # checkpoint that was not already visible.  It changes only the model-visible
+    # memory count; the latent checkpoint and workspace remain identical.
+    visible_ids = {item.memory_id for item in readout.visible_candidates}
+    added = next(
+        (
+            item
+            for item in readout.inventory
+            if item.memory_id not in visible_ids
+        ),
+        None,
+    )
+    if added is not None:
+        extra = _candidate_from_memory_object(added, len(readout.visible_candidates) + 1)
+        added_visible = tuple(readout.visible_candidates) + (extra,)
+        add_calls = _calls(
+            policy,
+            checker,
+            task,
+            result_id,
+            spec,
+            public,
+            surface,
+            sceu,
+            added_visible,
+            additional_context,
+            workspace_hash,
+            _visible_state_ids(
+                tuple(item.memory_id for item in added_visible),
+                attributions,
+            ),
+            "count_add",
+            repeats,
+            max_output_tokens,
+            actions,
+        )
+        add_role = _memory_role(
+            attributions.get(added.memory_id),
+            current_ids=current_ids,
+        )
+        add_classification = classify_causal_use(
+            memory_id=added.memory_id,
+            intervention_kind="count_add",
+            memory_role=add_role,
+            baseline=_outcome_pair(baselines),
+            intervention=_outcome_pair(add_calls),
+        )
+        result.append(
+            EvaluationIntervention(
+                intervention_kind="count_add",
+                target_memory_id=added.memory_id,
+                replacement_memory_id=None,
+                evaluations=add_calls,
+                classification=add_classification,
+                baseline_memory_count=len(readout.visible_candidates),
+                intervention_memory_count=len(added_visible),
+                count_contrast="add_one",
+            )
+        )
     return tuple(result)
+
+
+def _candidate_from_memory_object(item: MemoryObject, native_rank: int) -> RetrievalCandidate:
+    return RetrievalCandidate(
+        memory_id=item.memory_id,
+        content=item.content,
+        content_hash=item.content_hash,
+        native_rank=native_rank,
+        score=None,
+        score_details=(),
+        metadata=item.metadata,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
 
 
 def _submit(policy: PolicyClient, request: PolicyRequest) -> PolicyResponse:
@@ -985,6 +1072,12 @@ def _normalized_drift(
         for item in spec.plan.state_units
         if item.valid_from <= checkpoint_session and item.state_id not in current
     )
+    future = tuple(
+        item.state_id
+        for item in spec.plan.state_units
+        if item.valid_from > checkpoint_session
+        and item.state_id in action.satisfies_state_ids
+    )
     local = tuple(
         state_id
         for state_id in action.satisfies_state_ids
@@ -1017,9 +1110,41 @@ def _normalized_drift(
                 for state_id, state in current.items()
                 if state.kind in {"global_goal", "constraint"}
             ),
+            future_state_ids=future,
         )
     )
     return result.flags
+
+
+def _check_action(
+    checker: BehaviorChecker,
+    action: str,
+    *,
+    checkpoint_session: int,
+    visible_state_ids: tuple[str, ...],
+    opportunity_id: str,
+) -> BehaviorResult:
+    """Call new checkers with opportunity context while keeping old test doubles.
+
+    The opportunity is evaluator-only and is required for the valid-local
+    accelerator exception.  Older schema-v1 checker doubles do not accept the
+    keyword, so they retain their previous call contract.
+    """
+    try:
+        return checker.check_action(
+            action,
+            checkpoint_session=checkpoint_session,
+            visible_state_ids=visible_state_ids,
+            opportunity_id=opportunity_id,
+        )
+    except TypeError as exc:
+        if "opportunity_id" not in str(exc):
+            raise
+        return checker.check_action(
+            action,
+            checkpoint_session=checkpoint_session,
+            visible_state_ids=visible_state_ids,
+        )
 
 
 def _oracle_context(

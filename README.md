@@ -122,19 +122,23 @@ All commands assume the repository root as working directory and an activated vi
 
 ### Mem0 A100 qualification
 
-The first real long-horizon qualification slice is frozen separately from the
-legacy v1 pilot. The server entry points default to
-`configs/experiments/mem0_controlled_zen.yaml`, which runs three policy models
-over `workspace_only`, `oracle_current_state`, and `mem0_controlled`; the
-current Controlled-Zen run excludes `mem0_native`. Claude Opus 4.8 and GPT-5.6
-Sol use OpenCode Zen, while DeepSeek V4 Pro stays on the official DeepSeek API.
+The first repaired long-horizon qualification slice is frozen separately from
+the legacy v1 pilot. The native server entry points default to
+`configs/experiments/systems_controlled_gpt_only.yaml`, which runs GPT-5.6 Sol
+over workspace-only, full-context, oracle-current-state, flat retrieval, Mem0,
+A-MEM, and MemOS. Native memory writers may use the fixed DeepSeek profile, but
+it is not a continuation/policy comparison model.
+The historical three-policy Mem0 run remains documented at
+`configs/experiments/mem0_controlled_zen.yaml` and is excluded from this
+GPT-only pilot (`workspace_only`, `oracle_current_state`, and
+`mem0_controlled`; it excludes `mem0_native`).
 The qualification records the full
 `stored → retrieved → visible → causal use → behavior` chain and emits
 programmatic state-evolution and behavioral-drift metrics.
 
-On a clean Linux server with Docker, the NVIDIA container runtime, and at least
-two visible A100 GPUs, run the live preflight, smoke, and qualification. These
-live tests run on the server, not this workstation:
+On a clean Linux server with native Python virtual environments, host services,
+Slurm, and at least two visible NVIDIA GPUs, run the live preflight, smoke, and
+qualification. These live tests run on the server, not this workstation:
 
 ```bash
 sudo install -d -m 0750 -o "$(id -un)" -g "$(id -gn)" /data/lhmsb
@@ -142,17 +146,17 @@ cp .env.example .env
 chmod 600 .env
 # Fill OPENCODE_ZEN_API_KEY and DEEPSEEK_API_KEY.
 
-scripts/bootstrap_server.sh --data-root /data/lhmsb --env-file .env
-scripts/preflight_mem0.sh --data-root /data/lhmsb --env-file .env
-scripts/run_mem0_smoke.sh --data-root /data/lhmsb --env-file .env
-scripts/run_mem0_qualification.sh \
+scripts/bootstrap_systems_server.sh --data-root /data/lhmsb --env-file .env
+scripts/preflight_systems.sh --data-root /data/lhmsb --env-file .env
+scripts/run_systems_smoke.sh --data-root /data/lhmsb --env-file .env
+scripts/run_systems_qualification.sh \
   --data-root /data/lhmsb --env-file .env \
-  --run-name "mem0-q1-$(git rev-parse --short HEAD)"
+  --run-name "gpt-only-q1-$(git rev-parse --short HEAD)"
 ```
 
-See [the Mem0 server workflow](docs/mem0-server-workflow.md) for the pinned
-matrix, directory contract, Slurm commands, resume procedure, outputs, and
-metric mapping.
+See [the native systems server workflow](docs/systems-server-workflow.md) for
+the pinned matrix, directory contract, Slurm commands, resume procedure,
+outputs, and metric mapping.
 
 ### Smoke Run (offline, ~30 seconds)
 

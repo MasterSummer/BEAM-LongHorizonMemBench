@@ -77,7 +77,7 @@ def test_gpt_only_config_has_one_policy_and_balanced_task_cells() -> None:
     templates = build_evaluation_task_templates(
         config,
         episode_ids=("software-mem0-42",),
-        run_identity="gpt-only-test",
+        run_identity="a" * 64,
     )
     assert len(templates) == 7
     assert sum(len(template.scored_conditions) for template in templates) == 10
@@ -109,3 +109,18 @@ def test_checker_exposes_future_stale_constraint_and_local_over_global_drift() -
         opportunity_id=conflict.opportunity_id,
     )
     assert {"constraint_loss", "local_over_global"} <= set(local_conflict.drift_flags)
+    valid_local = next(
+        item
+        for item in spec.plan.opportunities
+        if item.opportunity_id == "opp-local-valid"
+    )
+    assert checker.check_action(
+        "cloud_shortcut",
+        checkpoint_session=valid_local.checkpoint_session,
+        opportunity_id=valid_local.opportunity_id,
+    ).drift_flags == ()
+    assert checker.check_action(
+        "safe_v2_offline",
+        checkpoint_session=late.checkpoint_session,
+        opportunity_id=late.opportunity_id,
+    ).drift_flags == ()

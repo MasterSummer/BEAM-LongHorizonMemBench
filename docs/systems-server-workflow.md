@@ -6,8 +6,9 @@ processes, and Slurm. The benchmark never substitutes another process
 isolation runtime.
 
 The run contains Workspace-only, Full-context, Oracle-current-state, Flat
-retrieval, Mem0, official A-MEM, and MemOS-Tree. Policy calls use OpenCode Zen
-for Opus 4.8 and GPT-5.6 Sol, and DeepSeek for the fixed writer. Provider keys
+retrieval, Mem0, official A-MEM, and MemOS-Tree. The current repaired pilot uses
+GPT-5.6 Sol as the only continuation/policy model through OpenCode Zen; native
+memory systems may use DeepSeek for the fixed writer. Provider keys
 are read only by the policy process and never enter service environments,
 manifests, or result hashes.
 
@@ -36,6 +37,26 @@ dependency or runtime installation.
 
 ## Validate and run
 
+Create the repaired GPT-only release before the smoke (the smoke may use a
+four-session fixture with the same schema):
+
+```bash
+SEEDS=$(seq 0 29)
+python -m lhmsb.datasets generate-mem0-stateful \
+  --seeds ${SEEDS} --n-episodes 1 --n-sessions 16 \
+  --out /data/lhmsb/datasets/software_v3.stage
+python -m lhmsb.datasets freeze-mem0-stateful \
+  --src /data/lhmsb/datasets/software_v3.stage \
+  --out /data/lhmsb/datasets/software_v3
+python -m lhmsb.datasets verify-mem0-stateful \
+  --frozen /data/lhmsb/datasets/software_v3
+python -m lhmsb.datasets regen-check-mem0-stateful \
+  --frozen /data/lhmsb/datasets/software_v3
+```
+
+The manifest should report 30 episodes, 16 sessions, and release
+`software-vertical-mem0-v0.3.0`. Do not run the pilot from a dirty checkout.
+
 Every wrapper supports a side-effect-free dry run:
 
 ```bash
@@ -59,14 +80,25 @@ The four-session smoke must produce four prefix artifacts and a valid report.
 After inspection, submit the 16-session qualification:
 
 ```bash
-sbatch --export=ALL,LHMSB_SLURM_MODE=qualification \
-  deploy/slurm/systems_qualification.sbatch
+scripts/run_systems_qualification.sh --prepare-only \
+  --data-root /data/lhmsb --env-file /data/lhmsb/env/operator.env \
+  --run-name gpt-only-v3
+sbatch --array=0-209%16 \
+  --export=ALL,LHMSB_RUN_NAME=gpt-only-v3 \
+  deploy/slurm/systems_evaluate_task.sbatch
+"${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
+  aggregate-systems --run-dir /data/lhmsb/runs/systems/gpt-only-v3 \
+  --out /data/lhmsb/runs/systems/gpt-only-v3/report
+"${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
+  validate-systems --report /data/lhmsb/runs/systems/gpt-only-v3/report \
+  --json /data/lhmsb/runs/systems/gpt-only-v3/validation.json
 ```
 
-The Slurm recipe requests two generic NVIDIA GPUs, assigns one to embedding and
-one to reranking, serializes run names with a filesystem lock, starts native
-services, and tears them down on completion or signal. Prefixes and task results
-remain on disk after service cleanup so a failed cell can be retried with the
+The preparation job requests two generic NVIDIA GPUs, assigns one to embedding
+and one to reranking, serializes run names with a filesystem lock, starts native
+services, and tears them down after prefixes are frozen. The 210 read-only GPT
+evaluation tasks run as a Slurm array and do not start memory services. Prefixes
+and task results remain on disk so a failed array cell can be retried with the
 same run identity.
 
 ## Expected outputs

@@ -952,7 +952,15 @@ class SystemsQualificationConfig:
                 1,
             ),
         )
-        if tuple(_policy_identity(item) for item in self.policy_profiles) != expected_policies:
+        actual_policies = tuple(_policy_identity(item) for item in self.policy_profiles)
+        # The released controlled track uses all three policy profiles, while
+        # the repaired pilot intentionally runs GPT-5.6 alone.  Both are
+        # canonical configurations; accepting the singleton here keeps the
+        # same schema and artifact contract for the pilot.
+        if actual_policies not in {
+            expected_policies,
+            (expected_policies[2],),
+        }:
             raise ValueError("schema-v2 continuation policy identities are not canonical")
         expected_writer = (
             "deepseek_v4_pro_writer",
