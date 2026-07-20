@@ -15,6 +15,7 @@ from typing import Any
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.qualification.metrics import (
+    UsageMetricInput,
     _artifact_attributions,
     compute_multisystem_metrics,
     compute_multisystem_metrics_by_cell,
@@ -145,8 +146,15 @@ def write_qualification_report(
         metrics = compute_multisystem_metrics(
             observations,
             state_checkpoints=state_checkpoints,
+            usages=_metric_usages(rows["api_usage.jsonl"]),
         )
-        metrics_by_cell = compute_multisystem_metrics_by_cell(observations)
+        metrics_by_cell = compute_multisystem_metrics_by_cell(
+            observations,
+            usages_by_cell=_metric_usages_by_cell(
+                observations,
+                rows["api_usage.jsonl"],
+            ),
+        )
         scorecard_rows = list(compute_multisystem_scorecard(observations))
     else:
         metrics = compute_qualification_metrics(matrix, specs)
@@ -298,6 +306,16 @@ def _flatten_rows(
                                     ),
                                     **_jsonable(asdict(event)),
                                 }
+                            )
+                        for usage in write.usage_events:
+                            _append_internal_usage(
+                                rows["api_usage.jsonl"],
+                                seen_calls,
+                                {
+                                    **task_context,
+                                    "session_index": write.session_index,
+                                },
+                                usage,
                             )
             for checkpoint in artifact.checkpoints:
                 for key, value in checkpoint.graph_diagnostics:
@@ -534,11 +552,13 @@ def _append_internal_usage(
     if usage.call_id in seen_calls:
         return
     seen_calls.add(usage.call_id)
+    call_kind = _canonical_usage_component(usage.component)
     rows.append(
         {
             **context,
             "call_id": usage.call_id,
-            "call_kind": usage.component,
+            "call_kind": call_kind,
+            "provider_component": usage.component,
             "provider": usage.provider,
             "model_id": usage.model_id,
             "endpoint_identity": usage.endpoint_identity,
@@ -559,6 +579,77 @@ def _append_internal_usage(
             "started_at_utc": usage.started_at_utc,
             "ended_at_utc": usage.ended_at_utc,
         }
+    )
+
+
+def _canonical_usage_component(component: object) -> str:
+    """Normalize historical writer labels to the report metric namespace."""
+    value = str(component)
+    if value == "memory_writer":
+        return "memory_internal_llm"
+    return value
+
+
+def _metric_usages(
+    rows: Sequence[Mapping[str, object]],
+) -> tuple[UsageMetricInput, ...]:
+    """Convert the deduplicated API ledger into aggregate metric inputs."""
+    return tuple(_metric_usage(row) for row in rows)
+
+
+def _metric_usages_by_cell(
+    observations: Sequence[object],
+    rows: Sequence[Mapping[str, object]],
+) -> dict[tuple[str, str, str], tuple[UsageMetricInput, ...]]:
+    """Attach policy calls exactly and shared prefix costs to each readout cell."""
+    cell_keys = {
+        (
+            str(getattr(item, "policy_profile_id", "")),
+            str(getattr(item, "condition", "")),
+            str(getattr(item, "readout", "")),
+        )
+        for item in observations
+    }
+    grouped: dict[tuple[str, str, str], list[UsageMetricInput]] = defaultdict(list)
+    for row in rows:
+        policy_id = str(row.get("policy_profile_id", ""))
+        condition = str(row.get("condition", ""))
+        readout = row.get("readout")
+        usage = _metric_usage(row)
+        if isinstance(readout, str) and readout:
+            key = (policy_id, condition, readout)
+            if key in cell_keys:
+                grouped[key].append(usage)
+            continue
+        # Prefix preparation is shared by all readouts of the same backend.
+        # Each cell reports the cost of independently running that cell; the
+        # aggregate ledger above still counts every provider call only once.
+        for key in sorted(cell_keys):
+            if key[:2] == (policy_id, condition):
+                grouped[key].append(usage)
+    return {key: tuple(value) for key, value in grouped.items()}
+
+
+def _metric_usage(row: Mapping[str, object]) -> UsageMetricInput:
+    is_policy = isinstance(row.get("policy_request_hash"), str) and bool(
+        row.get("policy_request_hash")
+    )
+    component = (
+        "policy"
+        if is_policy
+        else _canonical_usage_component(row.get("call_kind", ""))
+    )
+    return UsageMetricInput(
+        input_tokens=_optional_int(row.get("input_tokens")),
+        output_tokens=_optional_int(row.get("output_tokens")),
+        cached_tokens=_optional_int(row.get("cached_tokens")),
+        reasoning_tokens=_optional_int(row.get("reasoning_tokens")),
+        latency_seconds=_as_float(row.get("latency_seconds")),
+        retry_count=_as_int(row.get("retry_count")),
+        terminal_failure=row.get("error_class") is not None,
+        component=component,
+        input_count=_as_int(row.get("input_count", 1)),
+        usage_observed=bool(row.get("usage_observed", False)),
     )
 
 
@@ -749,6 +840,28 @@ def _as_int(value: object) -> int:
         return int(str(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value: object) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, int | float):
+        return float(value)
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _scorecard_rows(

@@ -63,6 +63,7 @@ def test_bridge_converts_schema_and_records_usage() -> None:
     assert result.payload["context"] == "test"
     assert result.usage_event.provider == "deepseek"
     assert result.usage_event.model_id == "deepseek-v4-pro"
+    assert result.usage_event.component == "memory_internal_llm"
     assert result.usage_event.input_tokens == 10
     assert result.usage_event.output_tokens == 4
     assert len(bridge.calls) == 1

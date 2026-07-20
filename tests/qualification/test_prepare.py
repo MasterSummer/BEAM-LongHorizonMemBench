@@ -9,12 +9,14 @@ import pytest
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.qualification.config import canonical_hash
+from lhmsb.qualification.evaluate import EvaluationTaskResult
 from lhmsb.qualification.memory_runtime import (
     CandidateSearch,
     InventorySnapshot,
     LifecycleCapabilities,
     MemoryMutationEvent,
     MemoryObject,
+    ProviderUsageEvent,
     RetrievalCandidate,
     StorageFootprint,
     WriteSessionResult,
@@ -26,6 +28,8 @@ from lhmsb.qualification.prepare import (
     _artifact_identity,
     prepare_prefix,
 )
+from lhmsb.qualification.report import _flatten_rows, _metric_usages
+from lhmsb.qualification.runner import QualificationMatrixResult
 from lhmsb.qualification.schema import PreparationTask
 from lhmsb.qualification.storage import QualificationStorage, QualificationStorageError
 from lhmsb.qualification.tei import RerankCandidate, RerankResult
@@ -86,6 +90,28 @@ class FakeRuntime:
             inventory=inventory,
             n_write=inventory.n_write,
             latency_seconds=0.0,
+            usage_events=(
+                ProviderUsageEvent(
+                    call_id=f"writer-{session_index}",
+                    component="memory_writer",
+                    provider="fake",
+                    model_id="fake-writer",
+                    endpoint_identity="local://fake-writer",
+                    request_hash=sha256_text(f"request-{session_index}"),
+                    response_hash=sha256_text(f"response-{session_index}"),
+                    input_tokens=10,
+                    output_tokens=2,
+                    cached_tokens=None,
+                    reasoning_tokens=None,
+                    usage_observed=True,
+                    input_count=1,
+                    latency_seconds=0.01,
+                    retry_count=0,
+                    error_class=None,
+                    started_at_utc="2026-07-20T00:00:00+00:00",
+                    ended_at_utc="2026-07-20T00:00:00.010000+00:00",
+                ),
+            ),
         )
 
     def snapshot_inventory(self, *, checkpoint_session: int) -> InventorySnapshot:
@@ -413,6 +439,37 @@ def test_prepare_replays_public_sessions_and_searches_before_current_write(tmp_p
     )
     assert len(state_rows) == 5
     assert state_rows[-1].is_final_checkpoint
+
+
+def test_schema_v2_report_exports_and_scores_prefix_writer_usage(tmp_path: Path) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    task = _task(spec.plan.episode_id, backend="mem0")
+    storage = QualificationStorage(tmp_path / "run", run_identity=task.run_identity)
+    artifact = prepare_prefix(task, spec, FakeRuntime(), FakeReranker(), storage)
+    result = EvaluationTaskResult(
+        task_id="evaluate-mem0",
+        episode_id=spec.plan.episode_id,
+        policy_profile_id="gpt_5_6_sol_zen",
+        condition="mem0",
+        prefix_artifact_hash=artifact.artifact_hash,
+        status="complete",
+        condition_results=(),
+        result_hash=sha256_text("result"),
+    )
+
+    rows = _flatten_rows(
+        QualificationMatrixResult(task.run_identity, (result,)),  # type: ignore[arg-type]
+        prefix_artifacts={"mem0": artifact},
+        specs={spec.plan.episode_id: spec},
+    )
+    usage_rows = rows["api_usage.jsonl"]
+
+    assert len(usage_rows) == spec.plan.n_sessions
+    assert {row["call_kind"] for row in usage_rows} == {"memory_internal_llm"}
+    assert {row["provider_component"] for row in usage_rows} == {"memory_writer"}
+    usage_metrics = _metric_usages(usage_rows)
+    assert len(usage_metrics) == spec.plan.n_sessions
+    assert all(item.component == "memory_internal_llm" for item in usage_metrics)
 
 
 def test_prepare_is_deterministic_and_second_run_is_read_only(tmp_path: Path) -> None:

@@ -201,7 +201,7 @@ class DeepSeekJSONBridge:
         usage = _usage_fields(raw)
         event = ProviderUsageEvent(
             call_id=request_id or f"deepseek-writer-{len(self.calls):06d}",
-            component="memory_writer",
+            component="memory_internal_llm",
             provider="deepseek",
             model_id=self.model_id,
             endpoint_identity=self.endpoint,
