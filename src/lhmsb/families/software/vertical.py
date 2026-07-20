@@ -752,6 +752,21 @@ class SoftwareVerticalFamily:
                 queue.extend(state_map[state_id].dependency_ids)
             checkpoint = min(opportunity.checkpoint_session, len(workspaces) - 1)
             workspace = workspaces[checkpoint]
+            # The scoped authorization is the action-discriminative fact for
+            # the valid local-accelerator pair.  C1 alone cannot identify its
+            # causal contribution: removing the global offline constraint can
+            # leave the locally authorized action unchanged.  Declare L1 as
+            # the evaluator's leave-one-out target so the intervention tests
+            # the state that actually changes the valid continuation.
+            intervention_target_ids: tuple[str, ...]
+            if opportunity.challenge_type == "valid-local-accelerator":
+                intervention_target_ids = ("L1",)
+            else:
+                intervention_target_ids = tuple(
+                    state_id
+                    for state_id in sorted(closure)
+                    if state_id in {"C1", "C2", "P2", "U1"}
+                )
             out.append(
                 SCEU(
                     sceu_id=f"sceu-{index:02d}",
@@ -766,11 +781,7 @@ class SoftwareVerticalFamily:
                     ),
                     opportunity_id=opportunity.opportunity_id,
                     matched_group=opportunity.matched_group,
-                    intervention_target_ids=tuple(
-                        state_id
-                        for state_id in sorted(closure)
-                        if state_id in {"C1", "C2", "P2", "U1"}
-                    ),
+                    intervention_target_ids=intervention_target_ids,
                 )
             )
         return tuple(out)

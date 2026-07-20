@@ -51,6 +51,16 @@ def test_local_proposal_and_authorization_are_distinct_state_events() -> None:
     assert authorized.current["L1"].workspace_recoverability == "absent"
 
 
+def test_valid_local_accelerator_declares_authorization_as_causal_target() -> None:
+    spec = SoftwareVerticalFamily.generate(seed=42, n_sessions=16, trajectory_seed=2)
+
+    for opportunity_id in ("opp-local-valid", "opp-local-valid-recheck"):
+        sceu = next(
+            unit for unit in spec.plan.sceu_units if unit.opportunity_id == opportunity_id
+        )
+        assert sceu.intervention_target_ids == ("L1",)
+
+
 def test_vertical_generation_is_reproducible_and_horizon_parameterized() -> None:
     first = SoftwareVerticalFamily.generate(seed=42, n_sessions=16, trajectory_seed=0)
     second = SoftwareVerticalFamily.generate(seed=42, n_sessions=16, trajectory_seed=0)

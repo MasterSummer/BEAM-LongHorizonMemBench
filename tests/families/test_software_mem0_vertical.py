@@ -23,6 +23,20 @@ def test_template_separates_goal_from_offline_constraint() -> None:
     assert "cloud services" in _state_text(spec, "C1").lower()
 
 
+def test_valid_local_accelerator_targets_scoped_authorization_for_intervention() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=16, trajectory_seed=2)
+
+    targets = {
+        unit.opportunity_id: unit.intervention_target_ids
+        for unit in spec.plan.sceu_units
+        if unit.opportunity_id in {"opp-local-valid", "opp-local-valid-recheck"}
+    }
+    assert targets == {
+        "opp-local-valid": ("L1",),
+        "opp-local-valid-recheck": ("L1",),
+    }
+
+
 def test_recoverability_variants_share_latent_state_but_change_workspace() -> None:
     explicit = SoftwareMem0VerticalFamily.generate(42, trajectory_seed=0)
     derivable = SoftwareMem0VerticalFamily.generate(42, trajectory_seed=1)
