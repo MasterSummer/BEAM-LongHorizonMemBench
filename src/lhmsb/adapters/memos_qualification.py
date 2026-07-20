@@ -398,12 +398,18 @@ class MemOSTreeQualificationAdapter:
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
         errors: list[str] = []
+        try:
+            self._wait_reorganizer()
+        except Exception as exc:  # pragma: no cover - defensive cleanup
+            errors.append(f"reorganizer barrier: {exc}")
+        manager = getattr(self.backend, "memory_manager", None)
+        # The official manager owns background threads that can still be using
+        # the injected LLMs.  Stop it before closing those bridges.
         for target in (
-            *self.llm_bridges,
+            manager,
             self.backend,
-            getattr(self.backend, "memory_manager", None),
+            *self.llm_bridges,
             self.graph,
         ):
             close = getattr(target, "close", None)
@@ -412,6 +418,7 @@ class MemOSTreeQualificationAdapter:
                     close()
                 except Exception as exc:  # pragma: no cover - defensive cleanup
                     errors.append(f"{type(target).__name__}: {exc}")
+        self._closed = True
         if errors:
             raise MemOSQualificationError("resource_cleanup_failure", "; ".join(errors))
 
@@ -661,6 +668,21 @@ class MemOSTreeQualificationAdapter:
             raise MemOSQualificationError("reorganizer_timeout", str(exc)) from exc
         except Exception as exc:
             raise MemOSQualificationError("reorganizer_failure", str(exc)) from exc
+        # MemOS 2.0.23 checks ``queue.empty()`` before calling ``queue.join()``.
+        # A consumer may already have dequeued an item while its LLM work is
+        # still active, so empty() can be true with unfinished_tasks > 0.  Wait
+        # on that counter explicitly to make graph snapshots and shutdown a
+        # real barrier.
+        reorganizer = getattr(manager, "reorganizer", None) if manager is not None else None
+        queue = getattr(reorganizer, "queue", None)
+        unfinished = getattr(queue, "unfinished_tasks", None)
+        while isinstance(unfinished, int) and not isinstance(unfinished, bool) and unfinished > 0:
+            if time.perf_counter() - started > self.reorganizer_timeout_seconds:
+                raise MemOSQualificationError(
+                    "reorganizer_timeout", "MemOS reorganizer still has unfinished tasks"
+                )
+            time.sleep(0.01)
+            unfinished = getattr(queue, "unfinished_tasks", None)
         if result is False or time.perf_counter() - started > self.reorganizer_timeout_seconds:
             raise MemOSQualificationError(
                 "reorganizer_timeout", "MemOS reorganizer did not become idle"

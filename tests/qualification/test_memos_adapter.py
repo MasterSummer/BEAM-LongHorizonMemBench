@@ -141,6 +141,51 @@ def test_missing_wait_api_and_nonempty_namespace_are_terminal() -> None:
         MemOSTreeQualificationAdapter(NoWait(), graph=FakeNeo4jTransport())
 
 
+def test_reorganizer_barrier_waits_for_dequeued_unfinished_task() -> None:
+    adapter, backend, _graph = _adapter()
+
+    class RaceQueue:
+        reads = 0
+
+        @property
+        def unfinished_tasks(self) -> int:
+            self.reads += 1
+            return 1 if self.reads == 1 else 0
+
+    queue = RaceQueue()
+    backend.memory_manager = SimpleNamespace(
+        reorganizer=SimpleNamespace(queue=queue),
+        wait_reorganizer=lambda: None,
+        close=lambda: None,
+    )
+    adapter._wait_reorganizer()
+    assert queue.reads >= 2
+
+
+def test_close_stops_manager_before_closing_llm_bridge() -> None:
+    adapter, backend, _graph = _adapter()
+    order: list[str] = []
+
+    class Bridge:
+        calls: list[object] = []
+
+        def close(self) -> None:
+            order.append("bridge")
+
+    class Manager:
+        def wait_reorganizer(self) -> None:
+            return None
+
+        def close(self) -> None:
+            assert "bridge" not in order
+            order.append("manager")
+
+    backend.memory_manager = Manager()
+    adapter.llm_bridges = (Bridge(),)
+    adapter.close()
+    assert order == ["manager", "bridge"]
+
+
 def test_tree_config_uses_explicit_native_embedding_and_neo4j_identity() -> None:
     profile = MemOSTreeProfile(profile_id="memos_tree_controlled")
     components = tuple(
