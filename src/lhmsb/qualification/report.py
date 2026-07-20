@@ -25,7 +25,7 @@ from lhmsb.qualification.metrics import (
     multisystem_observations_from_results,
     multisystem_state_checkpoints_from_artifacts,
 )
-from lhmsb.qualification.prefix import MemoryPrefixArtifact
+from lhmsb.qualification.prefix import CommonRerankTrace, MemoryPrefixArtifact
 from lhmsb.qualification.runner import (
     PolicyEvaluation,
     QualificationMatrixResult,
@@ -267,6 +267,14 @@ def _flatten_rows(
             if not getattr(task, "writes", ()):
                 spec = (specs or {}).get(str(getattr(task, "episode_id", "")))
                 for checkpoint in artifact.checkpoints:
+                    for rerank in checkpoint.common_reranks:
+                        _append_prefix_reranker_usage(
+                            rows["api_usage.jsonl"],
+                            seen_calls,
+                            task_context,
+                            checkpoint_session=checkpoint.checkpoint_session,
+                            trace=rerank,
+                        )
                     if checkpoint.inventory is not None:
                         attribution_payload: dict[str, object] = {}
                         if spec is not None:
@@ -734,6 +742,63 @@ def _append_reranker_usage(
             "sceu_id": trace.sceu_id,
             "opportunity_id": trace.opportunity_id,
             "checkpoint_session": trace.checkpoint_session,
+            "call_id": call_id,
+            "call_kind": "reranker",
+            "provider": "local_tei",
+            "model_id": result.model,
+            "model_revision": result.revision,
+            "endpoint_identity": "local://tei-reranker",
+            "provider_request_id": None,
+            "request_hash": result.request_hash,
+            "response_hash": result.response_hash,
+            "policy_request_hash": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "cached_tokens": None,
+            "reasoning_tokens": None,
+            "usage_observed": False,
+            "input_count": result.input_count,
+            "latency_seconds": result.latency_seconds,
+            "retry_count": 0,
+            "format_repair_used": False,
+            "error_class": None,
+            "started_at_utc": None,
+            "ended_at_utc": None,
+        }
+    )
+
+
+def _append_prefix_reranker_usage(
+    rows: list[dict[str, object]],
+    seen_calls: set[str],
+    context: Mapping[str, object],
+    *,
+    checkpoint_session: int,
+    trace: CommonRerankTrace,
+) -> None:
+    """Export one benchmark-owned prefix rerank to the API ledger.
+
+    Schema-v2 evaluation tasks reference an immutable prefix artifact instead
+    of copying its retrieval traces into every task result.  Consequently the
+    generic task-trace exporter above cannot see these calls.  Keep them bound
+    to the common-rerank readout so native cells do not inherit a reranker cost
+    they did not use.
+    """
+    result = trace.result
+    task_id = str(context.get("task_id", ""))
+    call_id = (
+        f"reranker-prefix:{task_id}:{checkpoint_session}:"
+        f"{trace.opportunity_id}:{result.request_hash}"
+    )
+    if call_id in seen_calls:
+        return
+    seen_calls.add(call_id)
+    rows.append(
+        {
+            **context,
+            "readout": "common_rerank",
+            "opportunity_id": trace.opportunity_id,
+            "checkpoint_session": checkpoint_session,
             "call_id": call_id,
             "call_kind": "reranker",
             "provider": "local_tei",

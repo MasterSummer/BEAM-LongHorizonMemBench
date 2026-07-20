@@ -550,15 +550,21 @@ def test_schema_v2_report_exports_and_scores_prefix_writer_usage(tmp_path: Path)
         specs={spec.plan.episode_id: spec},
     )
     usage_rows = rows["api_usage.jsonl"]
+    writer_rows = [
+        row for row in usage_rows if row["call_kind"] == "memory_internal_llm"
+    ]
+    reranker_rows = [row for row in usage_rows if row["call_kind"] == "reranker"]
 
-    assert len(usage_rows) == spec.plan.n_sessions
-    assert len({row["call_id"] for row in usage_rows}) == spec.plan.n_sessions
-    assert {row["provider_call_id"] for row in usage_rows} == {
+    assert len(writer_rows) == spec.plan.n_sessions
+    assert len({row["call_id"] for row in writer_rows}) == spec.plan.n_sessions
+    assert {row["provider_call_id"] for row in writer_rows} == {
         "deepseek-writer-000000"
     }
-    assert {row["call_kind"] for row in usage_rows} == {"memory_internal_llm"}
-    assert {row["provider_component"] for row in usage_rows} == {"memory_writer"}
-    usage_metrics = _metric_usages(usage_rows)
+    assert {row["provider_component"] for row in writer_rows} == {"memory_writer"}
+    assert len(reranker_rows) == len(spec.plan.sceu_units)
+    assert {row["readout"] for row in reranker_rows} == {"common_rerank"}
+    assert {row["provider"] for row in reranker_rows} == {"local_tei"}
+    usage_metrics = _metric_usages(writer_rows)
     assert len(usage_metrics) == spec.plan.n_sessions
     assert all(item.component == "memory_internal_llm" for item in usage_metrics)
 

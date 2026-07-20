@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.longhorizon.replay import replay_plan
 from lhmsb.qualification.metrics import (
@@ -7,6 +9,7 @@ from lhmsb.qualification.metrics import (
     RetrievalMetricInput,
     StateCheckpointMetricInput,
     UsageMetricInput,
+    _checkpoint_rerank_latency,
     _is_state_conflict_opportunity,
     compute_metric_collection,
     safe_ratio,
@@ -22,6 +25,24 @@ def test_safe_ratio_keeps_undefined_denominators_nullable() -> None:
     assert undefined.numerator == 0
     assert undefined.denominator == 0
     assert undefined.value is None
+
+
+def test_checkpoint_rerank_latency_matches_opportunity_and_nested_result() -> None:
+    checkpoint = SimpleNamespace(
+        common_reranks=(
+            SimpleNamespace(
+                opportunity_id="opp-first",
+                result=SimpleNamespace(latency_seconds=0.1),
+            ),
+            SimpleNamespace(
+                opportunity_id="opp-target",
+                result=SimpleNamespace(latency_seconds=0.25),
+            ),
+        )
+    )
+
+    assert _checkpoint_rerank_latency(checkpoint, "opp-target") == 0.25
+    assert _checkpoint_rerank_latency(checkpoint, "opp-missing") is None
 
 
 def test_write_state_maintenance_formulas_are_hand_computed() -> None:

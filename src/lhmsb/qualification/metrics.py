@@ -863,9 +863,13 @@ def multisystem_observations_from_results(
                             checkpoint,
                             sceu.opportunity_id,
                         ),
-                        rerank_latency_seconds=_checkpoint_rerank_latency(
-                            checkpoint,
-                            sceu.opportunity_id,
+                        rerank_latency_seconds=(
+                            _checkpoint_rerank_latency(
+                                checkpoint,
+                                sceu.opportunity_id,
+                            )
+                            if readout == "common_rerank"
+                            else None
                         ),
                         status=str(getattr(condition_result, "status", "complete")),
                         baseline_stable=bool(
@@ -1193,8 +1197,10 @@ def _checkpoint_rerank_latency(checkpoint: object | None, opportunity_id: str) -
     if checkpoint is None:
         return None
     for rerank in getattr(checkpoint, "common_reranks", ()):
-        _ = opportunity_id
-        return float(getattr(rerank, "latency_seconds", 0.0))
+        if getattr(rerank, "opportunity_id", None) != opportunity_id:
+            continue
+        result = getattr(rerank, "result", None)
+        return float(getattr(result, "latency_seconds", 0.0))
     return None
 
 

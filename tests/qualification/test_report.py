@@ -5,8 +5,10 @@ from pathlib import Path
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.longhorizon.interventions import ContinuationOutcome
+from lhmsb.qualification.prefix import CommonRerankTrace
 from lhmsb.qualification.report import (
     REQUIRED_REPORT_ARTIFACTS,
+    _append_prefix_reranker_usage,
     _evaluation_trace_id,
     _storage_provenance_diagnostics,
     write_qualification_report,
@@ -17,6 +19,7 @@ from lhmsb.qualification.runner import (
     QualificationTaskResult,
     SCEURunResult,
 )
+from lhmsb.qualification.tei import RerankResult
 
 
 def _matrix() -> tuple[QualificationMatrixResult, dict[str, object]]:
@@ -207,3 +210,45 @@ def test_storage_provenance_uses_checkpoint_write_deltas() -> None:
             "event_count": 0,
         }
     ]
+
+
+def test_prefix_reranker_usage_is_exported_for_common_readout_only() -> None:
+    trace = CommonRerankTrace(
+        opportunity_id="opp-early",
+        query_hash="1" * 64,
+        candidate_memory_ids=("memory-1", "memory-2"),
+        visible_memory_ids=("memory-2",),
+        result=RerankResult(
+            ordered_memory_ids=("memory-2",),
+            scores=(0.9,),
+            model="BAAI/bge-reranker-v2-m3",
+            revision="revision-1",
+            input_count=2,
+            request_hash="2" * 64,
+            response_hash="3" * 64,
+            latency_seconds=0.125,
+        ),
+    )
+    rows: list[dict[str, object]] = []
+    seen_calls: set[str] = set()
+
+    _append_prefix_reranker_usage(
+        rows,
+        seen_calls,
+        {"task_id": "task-memory", "condition": "mem0"},
+        checkpoint_session=3,
+        trace=trace,
+    )
+    _append_prefix_reranker_usage(
+        rows,
+        seen_calls,
+        {"task_id": "task-memory", "condition": "mem0"},
+        checkpoint_session=3,
+        trace=trace,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["readout"] == "common_rerank"
+    assert rows[0]["call_kind"] == "reranker"
+    assert rows[0]["input_count"] == 2
+    assert rows[0]["latency_seconds"] == 0.125
