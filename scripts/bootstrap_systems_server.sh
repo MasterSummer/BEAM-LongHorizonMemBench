@@ -291,9 +291,17 @@ temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encod
 temporary.replace(path)
 PY
 
-uv run python -m lhmsb.qualification preflight-systems \
-  --repository-only \
-  --dataset "${DATA_ROOT}/datasets/software_v3" \
-  --config "${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only.yaml" \
-  --data-root "${DATA_ROOT}" \
-  --json "${DATA_ROOT}/runs/preflight-systems/repository.json"
+if [[ -f "${DATA_ROOT}/datasets/software_v3/MANIFEST.json" ]]; then
+  uv run python -m lhmsb.qualification preflight-systems \
+    --repository-only \
+    --dataset "${DATA_ROOT}/datasets/software_v3" \
+    --config "${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only.yaml" \
+    --data-root "${DATA_ROOT}" \
+    --json "${DATA_ROOT}/runs/preflight-systems/repository.json"
+else
+  printf '\nBootstrap complete. The GPT-only v0.3 dataset is not present yet.\n'
+  printf 'Generate and freeze it before running preflight or qualification:\n'
+  printf '  SEEDS=$(seq 0 29)\n'
+  printf '  python -m lhmsb.datasets generate-mem0-stateful --seeds ${SEEDS} --n-episodes 1 --n-sessions 16 --out %q/datasets/software_v3.stage\n' "${DATA_ROOT}"
+  printf '  python -m lhmsb.datasets freeze-mem0-stateful --src %q/datasets/software_v3.stage --out %q/datasets/software_v3\n' "${DATA_ROOT}" "${DATA_ROOT}"
+fi
