@@ -105,7 +105,8 @@ class MemOSLLMConfig:
 class MemOSLLMBridge(Protocol):
     """Structural bridge accepted by fake and official MemOS LLM components."""
 
-    calls: list[ProviderUsageEvent]
+    @property
+    def calls(self) -> Sequence[ProviderUsageEvent]: ...
 
     def close(self) -> None: ...
 
@@ -202,6 +203,7 @@ class MemOSTreeQualificationAdapter:
         embedding: object | None = None,
         reader: object | None = None,
         llm_components: Sequence[MemOSLLMConfig] = (),
+        llm_bridges: Sequence[MemOSLLMBridge] = (),
         require_fresh_namespace: bool = True,
         reorganize: bool = True,
         internet_retrieval: bool = False,
@@ -243,6 +245,7 @@ class MemOSTreeQualificationAdapter:
         self.embedding = embedding_runtime or embedding
         self.reader = reader
         self.llm_components = tuple(llm_components)
+        self.llm_bridges = tuple(llm_bridges)
         self.reorganizer_timeout_seconds = reorganizer_timeout_seconds
         self._n_write = 0
         self._last_write_session = -1
@@ -344,6 +347,14 @@ class MemOSTreeQualificationAdapter:
         if reader is not None:
             _set_if_possible(backend, "reader", reader)
             _set_if_possible(backend, "memory_reader", reader)
+        bridges = {
+            component.component: MemOSDeepSeekBridge(
+                component,
+                transport=http_transport,
+            )
+            for component in components
+        }
+        _install_memos_bridges(backend, reader, bridges)
         _assert_runtime_configuration(backend, components)
         graph = neo4j_transport
         if graph is None:
@@ -365,6 +376,7 @@ class MemOSTreeQualificationAdapter:
             embedding_runtime=embedding_runtime,
             reader=reader,
             llm_components=components,
+            llm_bridges=tuple(bridges.values()),
             require_fresh_namespace=True,
             reorganize=True,
             internet_retrieval=False,
@@ -386,7 +398,12 @@ class MemOSTreeQualificationAdapter:
             return
         self._closed = True
         errors: list[str] = []
-        for target in (self.backend, getattr(self.backend, "memory_manager", None), self.graph):
+        for target in (
+            *self.llm_bridges,
+            self.backend,
+            getattr(self.backend, "memory_manager", None),
+            self.graph,
+        ):
             close = getattr(target, "close", None)
             if callable(close):
                 try:
@@ -713,7 +730,7 @@ class MemOSTreeQualificationAdapter:
 
     def _new_usage_events(self) -> tuple[ProviderUsageEvent, ...]:
         events: list[ProviderUsageEvent] = []
-        for component in self.llm_components:
+        for component in self.llm_bridges:
             calls = getattr(component, "calls", None)
             if isinstance(calls, Sequence) and not isinstance(calls, str | bytes):
                 events.extend(item for item in calls if isinstance(item, ProviderUsageEvent))
@@ -1128,6 +1145,74 @@ def _assert_runtime_configuration(backend: object, components: Sequence[MemOSLLM
             model in repr(value) and endpoint in repr(value) for model, endpoint in expected
         ):
             continue
+
+
+def _install_memos_bridges(
+    backend: object,
+    reader: object | None,
+    bridges: Mapping[str, MemOSLLMBridge],
+) -> None:
+    """Replace every official MemOS LLM reference with the controlled bridge.
+
+    TreeTextMemory copies its extractor into the asynchronous reorganizer and
+    its nested helpers during construction.  Replacing only the two public
+    attributes therefore leaves native reasoning-enabled clients active.  The
+    reader likewise keeps three aliases for its LLM.  All of these references
+    must point to benchmark-owned DeepSeek bridges before the first write.
+    """
+    required = {"reader", "extractor", "reorganizer", "dispatcher"}
+    if set(bridges) != required:
+        raise MemOSQualificationError(
+            "writer_bridge_mismatch",
+            "MemOS requires reader/extractor/reorganizer/dispatcher bridges",
+        )
+
+    _replace_required(backend, "extractor_llm", bridges["extractor"])
+    _replace_required(backend, "dispatcher_llm", bridges["dispatcher"])
+
+    manager = getattr(backend, "memory_manager", None)
+    reorganizer = getattr(manager, "reorganizer", None)
+    if reorganizer is None:
+        raise MemOSQualificationError(
+            "upstream_api_mismatch", "MemOS memory manager lacks reorganizer"
+        )
+    reorganizer_bridge = bridges["reorganizer"]
+    _replace_required(reorganizer, "llm", reorganizer_bridge)
+    _replace_required(
+        getattr(reorganizer, "relation_detector", None),
+        "llm",
+        reorganizer_bridge,
+    )
+    _replace_required(
+        getattr(reorganizer, "resolver", None),
+        "llm",
+        reorganizer_bridge,
+    )
+
+    if reader is None:
+        raise MemOSQualificationError(
+            "upstream_api_mismatch", "controlled MemOS requires the official reader"
+        )
+    reader_bridge = bridges["reader"]
+    for name in ("llm", "general_llm", "preference_extractor_llm"):
+        _replace_required(reader, name, reader_bridge)
+
+
+def _replace_required(target: object | None, name: str, value: object) -> None:
+    if target is None or not hasattr(target, name):
+        raise MemOSQualificationError(
+            "upstream_api_mismatch", f"MemOS component lacks {name} LLM reference"
+        )
+    try:
+        setattr(target, name, value)
+    except Exception as exc:
+        raise MemOSQualificationError(
+            "writer_bridge_install_failure", f"cannot replace MemOS {name} LLM"
+        ) from exc
+    if getattr(target, name, None) is not value:
+        raise MemOSQualificationError(
+            "writer_bridge_install_failure", f"MemOS {name} LLM replacement did not stick"
+        )
 
 
 def _set_if_possible(target: object, name: str, value: object) -> None:

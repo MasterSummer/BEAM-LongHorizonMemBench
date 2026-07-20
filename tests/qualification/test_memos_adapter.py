@@ -10,6 +10,7 @@ from lhmsb.adapters.memos_qualification import (
     MemOSTreeQualificationAdapter,
     _build_official_reader,
     _build_tree_config,
+    _install_memos_bridges,
 )
 from lhmsb.qualification.memory_runtime import LifecycleCapabilities
 from lhmsb.qualification.neo4j import FakeNeo4jTransport
@@ -186,6 +187,48 @@ def test_tree_config_uses_explicit_native_embedding_and_neo4j_identity() -> None
         "auto_create": False,
         "embedding_dimension": 1024,
     }
+
+
+def test_controlled_bridges_replace_every_official_memos_llm_reference() -> None:
+    class FakeBridge:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+
+        def close(self) -> None:
+            return None
+
+    relation_detector = SimpleNamespace(llm=object())
+    resolver = SimpleNamespace(llm=object())
+    reorganizer = SimpleNamespace(
+        llm=object(),
+        relation_detector=relation_detector,
+        resolver=resolver,
+    )
+    backend = SimpleNamespace(
+        extractor_llm=object(),
+        dispatcher_llm=object(),
+        memory_manager=SimpleNamespace(reorganizer=reorganizer),
+    )
+    reader = SimpleNamespace(
+        llm=object(),
+        general_llm=object(),
+        preference_extractor_llm=object(),
+    )
+    bridges = {
+        name: FakeBridge()
+        for name in ("reader", "extractor", "reorganizer", "dispatcher")
+    }
+
+    _install_memos_bridges(backend, reader, bridges)
+
+    assert backend.extractor_llm is bridges["extractor"]
+    assert backend.dispatcher_llm is bridges["dispatcher"]
+    assert reorganizer.llm is bridges["reorganizer"]
+    assert relation_detector.llm is bridges["reorganizer"]
+    assert resolver.llm is bridges["reorganizer"]
+    assert reader.llm is bridges["reader"]
+    assert reader.general_llm is bridges["reader"]
+    assert reader.preference_extractor_llm is bridges["reader"]
 
 
 def test_official_reader_uses_registered_openai_embedding_provider(monkeypatch) -> None:
