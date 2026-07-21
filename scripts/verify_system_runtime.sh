@@ -51,8 +51,10 @@ for environment in core mem0 amem memos; do
   systems_assert_generated_lock "${DATA_ROOT}" "${environment}"
   python="$(systems_venv_python "${DATA_ROOT}" "${environment}")"
   [[ -x "${python}" ]] || { printf 'missing Python environment: %s\n' "${python}" >&2; exit 1; }
-  "${python}" -c 'import sys; assert sys.version_info[:2] == (3, 11); import lhmsb'
-  "${python}" -m lhmsb.qualification --help >/dev/null
+  PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${python}" -c 'import sys; assert sys.version_info[:2] == (3, 11); import lhmsb'
+  PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${python}" -m lhmsb.qualification --help >/dev/null
 done
 
 for required in "${LHMSB_QDRANT_BIN}" "${LHMSB_NEO4J_HOME}/bin/neo4j" \

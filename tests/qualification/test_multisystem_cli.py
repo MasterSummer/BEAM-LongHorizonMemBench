@@ -180,6 +180,27 @@ def test_formal_worker_requires_the_planned_clean_commit(monkeypatch) -> None:
         multisystem_cli._assert_planned_code_identity(manifest)
 
 
+def test_runtime_source_must_match_selected_repository(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from lhmsb.qualification import multisystem_cli
+
+    actual = tmp_path / "actual"
+    selected = tmp_path / "selected"
+    monkeypatch.setattr(multisystem_cli, "_runtime_source_root", lambda: actual)
+    monkeypatch.setenv("LHMSB_REPO_ROOT", str(selected))
+
+    with pytest.raises(
+        multisystem_cli.MultisystemCliError,
+        match="runtime lhmsb source differs",
+    ):
+        multisystem_cli._assert_runtime_source_root()
+
+    monkeypatch.setenv("LHMSB_REPO_ROOT", str(actual))
+    assert multisystem_cli._assert_runtime_source_root() == actual
+
+
 def test_manifest_hash_rejects_non_digest_environment_values(tmp_path: Path) -> None:
     dataset = _dataset(tmp_path)
     from lhmsb.qualification.multisystem_cli import MultisystemCliError, plan_systems_run

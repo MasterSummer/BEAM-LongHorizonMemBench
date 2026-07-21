@@ -151,8 +151,24 @@ def _integer(value: object, label: str) -> int:
     return value
 
 
+def _runtime_source_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _assert_runtime_source_root() -> Path:
+    """Ensure the imported package comes from the operator-selected checkout."""
+    root = _runtime_source_root()
+    configured = os.environ.get("LHMSB_REPO_ROOT")
+    if configured and root != Path(configured).expanduser().resolve():
+        raise MultisystemCliError(
+            "runtime lhmsb source differs from LHMSB_REPO_ROOT: "
+            f"imported {root}, configured {Path(configured).expanduser().resolve()}"
+        )
+    return root
+
+
 def _git_identity() -> tuple[str, bool, str]:
-    root = Path(__file__).resolve().parents[3]
+    root = _assert_runtime_source_root()
     try:
         commit = subprocess.check_output(
             ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
@@ -429,6 +445,7 @@ def plan_systems_run(
         "config_path": str(config_path.resolve()),
         "dataset_release": config.dataset_release,
         "code_ref": ref,
+        "code_source_root": str(_runtime_source_root()),
         "task_count": len(preparations),
         "preparation_task_count": len(preparations),
         "evaluation_template_count": len(templates),

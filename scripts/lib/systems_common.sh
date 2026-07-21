@@ -86,8 +86,13 @@ systems_venv_python() {
 systems_run_cli() {
   local data_root="$1"
   local environment="$2"
+  local repo_root="${LHMSB_REPO_ROOT:-$(systems_repo_root)}"
+  local pythonpath="${repo_root}/src"
   shift 2
-  "$(systems_venv_python "${data_root}" "${environment}")" \
+  if [[ -n "${PYTHONPATH:-}" ]]; then
+    pythonpath="${pythonpath}:${PYTHONPATH}"
+  fi
+  PYTHONPATH="${pythonpath}" "$(systems_venv_python "${data_root}" "${environment}")" \
     -m lhmsb.qualification "$@"
 }
 

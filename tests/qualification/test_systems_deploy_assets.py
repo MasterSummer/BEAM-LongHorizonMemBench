@@ -67,6 +67,19 @@ def test_current_slurm_scripts_resolve_repo_outside_slurm_spool() -> None:
         assert 'dirname "${BASH_SOURCE[0]}"' not in text
 
 
+def test_native_cli_forces_selected_checkout_ahead_of_editable_install() -> None:
+    common = (ROOT / "scripts" / "lib" / "systems_common.sh").read_text(
+        encoding="utf-8"
+    )
+    verify = (ROOT / "scripts" / "verify_system_runtime.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'local pythonpath="${repo_root}/src"' in common
+    assert 'PYTHONPATH="${pythonpath}"' in common
+    assert 'PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"' in verify
+
+
 def test_native_services_are_loopback_only() -> None:
     text = (ROOT / "scripts" / "lib" / "systems_services.sh").read_text(
         encoding="utf-8"
