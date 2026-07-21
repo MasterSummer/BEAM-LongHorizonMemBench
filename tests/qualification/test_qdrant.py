@@ -95,6 +95,57 @@ def test_http_boundary_sends_namespace_filter_and_validates_responses() -> None:
     client.close()
 
 
+def test_http_collection_creation_is_idempotent_across_episode_namespaces() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "PUT":
+            return httpx.Response(
+                400,
+                json={"status": {"error": "Collection `c` already exists!"}},
+            )
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "config": {"params": {"vectors": {"size": 2}}},
+                    }
+                },
+            )
+        raise AssertionError(request)
+
+    client = QdrantHttpTransport(
+        "http://qdrant",
+        collection_name="c",
+        vector_size=2,
+        transport=httpx.MockTransport(handler),
+    )
+    client.create_collection()
+    assert [request.method for request in requests] == ["PUT", "GET"]
+
+
+def test_http_repeated_collection_rejects_dimension_mismatch() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            return httpx.Response(409, text="collection already exists")
+        return httpx.Response(
+            200,
+            json={"result": {"config": {"params": {"vectors": {"size": 3}}}}},
+        )
+
+    client = QdrantHttpTransport(
+        "http://qdrant",
+        collection_name="c",
+        vector_size=2,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(QdrantError) as caught:
+        client.create_collection()
+    assert caught.value.error_class == "vector_dimension_mismatch"
+
+
 def test_http_boundary_maps_arbitrary_benchmark_ids_to_qdrant_uuid_and_back() -> None:
     requests: list[httpx.Request] = []
     wire_id: str | None = None

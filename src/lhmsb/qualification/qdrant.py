@@ -497,12 +497,33 @@ class QdrantHttpTransport:
         self._validate_dimension(dimension)
         if not distance:
             raise QdrantError("invalid_distance", "distance must be non-empty")
-        self._request(
-            "PUT",
-            f"/collections/{collection}",
-            {"vectors": {"size": dimension, "distance": distance}},
-            error_class="create_collection_failure",
-        )
+        try:
+            self._request(
+                "PUT",
+                f"/collections/{collection}",
+                {"vectors": {"size": dimension, "distance": distance}},
+                error_class="create_collection_failure",
+            )
+        except QdrantError as exc:
+            # Multiple episode namespaces intentionally share the controlled
+            # flat-retrieval collection.  Qdrant reports a repeated PUT as a
+            # client error, while the in-memory transport already treats the
+            # same operation as idempotent.  Verify the existing dimension
+            # before accepting the repeated creation request.
+            if exc.status_code not in {400, 409} or "already exists" not in str(exc).lower():
+                raise
+            raw = self._request(
+                "GET",
+                f"/collections/{collection}",
+                None,
+                error_class="collection_inspection_failure",
+            )
+            existing_dimension = _collection_vector_size(raw)
+            if existing_dimension != dimension:
+                raise QdrantError(
+                    "vector_dimension_mismatch",
+                    f"collection dimension {existing_dimension} != requested {dimension}",
+                ) from exc
 
     def count(self, *, collection_name: str | None = None, namespace: str) -> int:
         collection = self._collection(collection_name)
@@ -653,7 +674,7 @@ class QdrantHttpTransport:
         self,
         method: str,
         path: str,
-        body: dict[str, object],
+        body: dict[str, object] | None,
         *,
         error_class: str,
     ) -> dict[str, object]:
@@ -671,6 +692,23 @@ class QdrantHttpTransport:
         if not isinstance(raw, Mapping):
             raise QdrantError(error_class, "Qdrant response must be an object")
         return {str(key): value for key, value in raw.items()}
+
+
+def _collection_vector_size(raw: Mapping[str, object]) -> int:
+    result = _result_object(raw, "collection response")
+    config = result.get("config")
+    if not isinstance(config, Mapping):
+        raise QdrantError("invalid_response", "collection response lacks config")
+    params = config.get("params")
+    if not isinstance(params, Mapping):
+        raise QdrantError("invalid_response", "collection config lacks params")
+    vectors = params.get("vectors")
+    if not isinstance(vectors, Mapping):
+        raise QdrantError("invalid_response", "collection params lack vectors")
+    size = vectors.get("size")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+        raise QdrantError("invalid_response", "collection vector size is invalid")
+    return size
 
 
 def _point_json(point: QdrantPoint) -> dict[str, object]:
