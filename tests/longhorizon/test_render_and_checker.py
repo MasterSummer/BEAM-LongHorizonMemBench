@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from lhmsb.families.software.vertical import SoftwareVerticalFamily
 from lhmsb.families.software.vertical_checker import BehaviorResult, SoftwareVerticalChecker
 from lhmsb.longhorizon.render import render_surfaces, surfaces_hash
@@ -87,3 +89,35 @@ def test_checker_marks_local_convenience_over_global_constraint() -> None:
     assert {"constraint_loss", "local_over_global"}.issubset(cloud.drift_flags)
     assert safe.is_correct
     assert not safe.drift_flags
+
+
+def test_checker_programmatically_checks_hosted_service_invocation() -> None:
+    spec = SoftwareVerticalFamily.generate(seed=42, n_sessions=16, trajectory_seed=0)
+    opportunity = next(
+        item
+        for item in spec.plan.opportunities
+        if item.opportunity_id == "opp-local-valid"
+    )
+    cloud = spec.action_map["cloud_shortcut"]
+    malformed = replace(
+        cloud,
+        files=tuple(
+            (
+                path,
+                content.replace(
+                    '"hosted_service_invoked": True',
+                    '"hosted_service_invoked": False',
+                ),
+            )
+            for path, content in cloud.files
+        ),
+    )
+
+    result = SoftwareVerticalChecker(spec).check_action(
+        malformed,
+        checkpoint_session=opportunity.checkpoint_session,
+        opportunity_id=opportunity.opportunity_id,
+    )
+
+    assert not result.is_correct
+    assert result.failed_tests == ("test_current_branch_and_offline_gate",)

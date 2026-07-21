@@ -11,9 +11,9 @@ from lhmsb.datasets.cli import main
 from lhmsb.datasets.mem0_stateful_pipeline import (
     MEM0_STATEFUL_GENERATOR_VERSION,
     MEM0_STATEFUL_GENERATOR_VERSION_V3,
-    MEM0_STATEFUL_GENERATOR_VERSION_V7,
+    MEM0_STATEFUL_GENERATOR_VERSION_V8,
     MEM0_STATEFUL_RELEASE_ID_V3,
-    MEM0_STATEFUL_RELEASE_ID_V7,
+    MEM0_STATEFUL_RELEASE_ID_V8,
     Mem0StatefulDatasetError,
     build_mem0_release_archive,
     freeze_mem0_stateful,
@@ -103,12 +103,12 @@ def test_full_horizon_smoke_uses_v03_release_contract(tmp_path: Path) -> None:
     assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V3
 
 
-def test_fifty_episode_release_passes_all_audits_and_uses_v07(tmp_path: Path) -> None:
+def test_fifty_episode_release_passes_all_audits_and_uses_v08(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
     frozen = tmp_path / "frozen"
     generated = generate_mem0_stateful_to_staging(
         stage,
-        seeds=range(50),
+        seeds=range(5, 55),
         n_sessions=16,
     )
     manifest = freeze_mem0_stateful(stage, frozen)
@@ -116,8 +116,8 @@ def test_fifty_episode_release_passes_all_audits_and_uses_v07(tmp_path: Path) ->
     assert len(generated) == 50
     assert len({item.plan_hash for item in generated}) == 50
     assert len({item.surface_hash for item in generated}) == 50
-    assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V7
-    assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V7
+    assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V8
+    assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V8
     audit = json.loads(
         (frozen / "evaluator" / "dataset_audit.json").read_text(encoding="utf-8")
     )
@@ -126,8 +126,8 @@ def test_fifty_episode_release_passes_all_audits_and_uses_v07(tmp_path: Path) ->
     assert len(audit["scenario_schedule_cell_counts"]) == 50
     assert set(audit["scenario_schedule_cell_counts"].values()) == {1}
     assert audit["recoverability_variant_counts"] == {
-        "absent": 16,
-        "derivable": 17,
+        "absent": 17,
+        "derivable": 16,
         "explicit": 17,
     }
     assert all(audit["checks"].values())
@@ -143,9 +143,9 @@ def test_fifty_episode_release_passes_all_audits_and_uses_v07(tmp_path: Path) ->
     assert regen_check_mem0_stateful(frozen).ok
 
 
-def test_v07_audit_rejects_misbalanced_seed_expansion(tmp_path: Path) -> None:
+def test_v08_audit_rejects_misbalanced_seed_expansion(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
-    with pytest.raises(Mem0StatefulDatasetError, match="formal v0.7 dataset audit"):
+    with pytest.raises(Mem0StatefulDatasetError, match="formal v0.8 dataset audit"):
         generate_mem0_stateful_to_staging(
             stage,
             seeds=[42],

@@ -36,6 +36,8 @@ MEM0_STATEFUL_GENERATOR_VERSION_V6 = "software-project-mem0-vertical-0.6"
 MEM0_STATEFUL_RELEASE_ID_V6 = "software-vertical-mem0-v0.6.0"
 MEM0_STATEFUL_GENERATOR_VERSION_V7 = "software-project-mem0-vertical-0.7"
 MEM0_STATEFUL_RELEASE_ID_V7 = "software-vertical-mem0-v0.7.0"
+MEM0_STATEFUL_GENERATOR_VERSION_V8 = "software-project-mem0-vertical-0.8"
+MEM0_STATEFUL_RELEASE_ID_V8 = "software-vertical-mem0-v0.8.0"
 _RELEASE_TIMESTAMP = "2026-07-16T00:00:00Z"
 
 
@@ -376,7 +378,7 @@ def _write_stage(out: Path, generated: Sequence[Mem0StatefulGenerated]) -> None:
         )
         if failures:
             raise Mem0StatefulDatasetError(
-                "formal v0.7 dataset audit failed: " + ", ".join(failures)
+                "formal v0.8 dataset audit failed: " + ", ".join(failures)
             )
     release_id, generator_version = _release_for_generation(
         n_episodes=len(generated),
@@ -611,11 +613,11 @@ def _release_for_generation(
 ) -> tuple[str, str]:
     """Select the release contract without changing legacy CI fixtures.
 
-    The repaired 50-episode diversified release uses v0.7. Earlier 16-session and
+    The repaired 50-episode diversified release uses v0.8. Earlier 16-session and
     30-episode pilots retain v0.3, while small CI fixtures retain v0.2.
     """
     if n_episodes >= 50:
-        return MEM0_STATEFUL_RELEASE_ID_V7, MEM0_STATEFUL_GENERATOR_VERSION_V7
+        return MEM0_STATEFUL_RELEASE_ID_V8, MEM0_STATEFUL_GENERATOR_VERSION_V8
     if n_sessions >= 16 or n_episodes >= 30:
         return MEM0_STATEFUL_RELEASE_ID_V3, MEM0_STATEFUL_GENERATOR_VERSION_V3
     return MEM0_STATEFUL_RELEASE_ID, MEM0_STATEFUL_GENERATOR_VERSION
@@ -738,12 +740,14 @@ __all__ = [
     "MEM0_STATEFUL_GENERATOR_VERSION_V5",
     "MEM0_STATEFUL_GENERATOR_VERSION_V6",
     "MEM0_STATEFUL_GENERATOR_VERSION_V7",
+    "MEM0_STATEFUL_GENERATOR_VERSION_V8",
     "MEM0_STATEFUL_RELEASE_ID",
     "MEM0_STATEFUL_RELEASE_ID_V3",
     "MEM0_STATEFUL_RELEASE_ID_V4",
     "MEM0_STATEFUL_RELEASE_ID_V5",
     "MEM0_STATEFUL_RELEASE_ID_V6",
     "MEM0_STATEFUL_RELEASE_ID_V7",
+    "MEM0_STATEFUL_RELEASE_ID_V8",
     "MEM0_STATEFUL_SCHEMA_VERSION",
     "Mem0StatefulDatasetError",
     "Mem0StatefulGenerated",

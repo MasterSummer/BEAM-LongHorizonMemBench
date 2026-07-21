@@ -5,9 +5,15 @@ import pytest
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.families.software.vertical_checker import BehaviorResult
 from lhmsb.longhorizon.attribution import MemoryAttribution
+from lhmsb.longhorizon.replay import replay_plan
 from lhmsb.qualification.config import NO_PREFIX_ARTIFACT, canonical_hash
 from lhmsb.qualification.context import FullContextLimitError
-from lhmsb.qualification.evaluate import EvaluationError, _sham_target, evaluate_task
+from lhmsb.qualification.evaluate import (
+    EvaluationError,
+    _oracle_context,
+    _sham_target,
+    evaluate_task,
+)
 from lhmsb.qualification.memory_runtime import (
     CandidateSearch,
     InventorySnapshot,
@@ -62,6 +68,25 @@ class _Checker:
             violated_state_ids=() if correct else ("C1",),
             drift_flags=(),
         )
+
+
+def test_oracle_context_exposes_authority_and_scope_without_gold_ids() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=16)
+    sceu = next(
+        item
+        for item in spec.plan.sceu_units
+        if item.opportunity_id == "opp-global-local-conflict"
+    )
+    current = replay_plan(spec.plan, sceu.checkpoint_session).current
+
+    rendered = _oracle_context(sceu, current)
+
+    assert "authority=project-owner" in rendered
+    assert "scope=all-code" in rendered
+    assert "authority=local-operator" in rendered
+    assert "scope=isolated-local-profiler" in rendered
+    assert "C1" not in rendered
+    assert "D1" not in rendered
 
 
 class _Runtime:

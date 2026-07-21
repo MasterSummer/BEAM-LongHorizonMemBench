@@ -165,7 +165,7 @@ def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
         ):
             assert marker in text
     assert "--episode-limit 1" in smoke
-    assert "datasets/software_v7" in smoke
+    assert "datasets/software_v8" in smoke
     assert "systems_controlled_gpt_only_aaai.yaml" in smoke
 
 
@@ -175,7 +175,7 @@ def test_preflight_and_bootstrap_default_to_the_confirmatory_release() -> None:
         ROOT / "scripts" / "bootstrap_systems_server.sh",
     ):
         text = path.read_text(encoding="utf-8")
-        assert "datasets/software_v7" in text
+        assert "datasets/software_v8" in text
         assert "systems_controlled_gpt_only_aaai.yaml" in text
 
 
@@ -218,6 +218,34 @@ def test_qualification_supports_five_episode_calibration(tmp_path: Path) -> None
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "plan-systems" in result.stdout
     assert "--episode-limit 5" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        ROOT / "scripts" / "preflight_systems.sh",
+        ROOT / "scripts" / "run_systems_smoke.sh",
+        ROOT / "scripts" / "run_systems_qualification.sh",
+    ),
+)
+def test_system_dataset_environment_override_survives_data_root(
+    path: Path,
+    tmp_path: Path,
+) -> None:
+    held_out = tmp_path / "held-out-dataset"
+    environment = dict(os.environ)
+    environment["LHMSB_SYSTEM_DATASET"] = str(held_out)
+    result = _run(
+        path,
+        "--dry-run",
+        "--data-root",
+        str(tmp_path / "data"),
+        "--env-file",
+        str(tmp_path / "missing.env"),
+        env=environment,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert str(held_out) in result.stdout
 
 
 def test_qualification_rejects_invalid_episode_limit(tmp_path: Path) -> None:

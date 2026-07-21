@@ -238,6 +238,9 @@ class SoftwareVerticalChecker:
             path.write_text(
                 content.replace("__EXPECTED_VERSION__", repr(expected_version)).replace(
                     "__EXPECTED_PROFILER_BACKEND__", repr(expected_profiler_backend)
+                ).replace(
+                    "__EXPECTED_HOSTED_SERVICE_INVOKED__",
+                    repr(expected_profiler_backend == "hosted"),
                 ),
                 encoding="utf-8",
             )

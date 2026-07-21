@@ -1472,7 +1472,13 @@ def _oracle_context(
     required = tuple(item for item in sceu.required_state_ids if item in current)
     if not required:
         required = tuple(item for item in sceu.focal_state_ids if item in current)
-    lines = [_state_text(current[item]) for item in required]
+    lines = [
+        (
+            f"[kind={current[item].kind}; authority={current[item].authority}; "
+            f"scope={current[item].scope}] {_state_text(current[item])}"
+        )
+        for item in required
+    ]
     return (
         "Current project state (evaluator-provided):\n" + "\n".join(f"- {line}" for line in lines)
         if lines

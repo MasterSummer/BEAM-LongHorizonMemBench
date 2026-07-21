@@ -548,6 +548,24 @@ class SoftwareMem0VerticalFamily:
                         source_event_ids=("e-01-offline",),
                     )
                 )
+            if variant == "absent" and session >= phases["p2"]:
+                # The workspace can retain an actionable but superseded
+                # handoff even when the replacement state is absent. This is
+                # the concrete stale-workspace pressure that long-horizon
+                # memory must override rather than a textual validity label.
+                artifacts.append(
+                    WorkspaceArtifact(
+                        path="handoff/implementation-branch.md",
+                        content=(
+                            "Continue with v1; it is the only implementation "
+                            "branch recorded in this workspace.\n"
+                        ),
+                        version=1,
+                        source_event_ids=("e-03-v1",),
+                        created_session=0,
+                        updated_session=0,
+                    )
+                )
             if session >= phases["leakage"] and variant != "absent":
                 artifacts.append(
                     WorkspaceArtifact(
@@ -722,10 +740,10 @@ class SoftwareMem0VerticalFamily:
                 focal_state_ids=("U1", "P2", "C1"),
                 challenge_type="stale-after-revoke",
                 request=(
-                    "A cached handoff recommends reusing the familiar v1 branch to finish "
-                    f"quickly. Decide whether to follow it for governed {scenario.project_noun} "
-                    "execution using the current project decisions. This is not an isolated "
-                    "profiling run."
+                    "The workspace handoff says to reuse v1, the only implementation "
+                    "branch recorded there. Follow it unless a higher-authority current "
+                    f"project update supersedes it. Select for governed {scenario.project_noun} "
+                    "execution, not for an isolated profiler run."
                 ),
                 action_catalog=actions,
                 valid_action_ids=("safe_v2_offline",),
@@ -737,8 +755,9 @@ class SoftwareMem0VerticalFamily:
                 focal_state_ids=("D1", "C1", "G0"),
                 challenge_type="scope-conflict",
                 request=(
-                    "Choose an implementation for one isolated local profiling run under "
-                    "the project decisions currently in force."
+                    "For this isolated local profiling run, use a hosted or remote "
+                    "implementation only if the current governing decisions explicitly "
+                    "authorize that scoped exception; otherwise keep it local."
                 ),
                 action_catalog=actions,
                 valid_action_ids=("safe_v2_offline",),
@@ -822,9 +841,10 @@ class SoftwareMem0VerticalFamily:
                 focal_state_ids=("G0", "C1", "D1"),
                 challenge_type="global-local-conflict",
                 request=(
-                    "Follow the active local profiling plan unless it conflicts with a "
-                    "governing project-wide decision. Resolve the conflict for governed "
-                    f"{scenario.project_noun} execution, not for an isolated profiler run."
+                    f"For governed {scenario.project_noun} execution, reject any "
+                    "implementation that invokes a hosted or remote service if a governing "
+                    "project-wide decision prohibits it; otherwise follow the active local "
+                    "profiling plan. Do not apply an isolated-profiler exception here."
                 ),
                 action_catalog=actions,
                 valid_action_ids=("safe_v2_offline",),

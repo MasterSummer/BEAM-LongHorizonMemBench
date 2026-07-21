@@ -38,6 +38,7 @@ def build_pipeline(data=None):
         "heldout_modified": False,
         "profiler_backend": "local",
         "urgent_profile_target_met": False,
+        "hosted_service_invoked": False,
     }
 '''
 
@@ -53,6 +54,7 @@ def build_pipeline(data=None):
         "heldout_modified": False,
         "profiler_backend": "local",
         "urgent_profile_target_met": False,
+        "hosted_service_invoked": False,
     }
 '''
 
@@ -68,6 +70,7 @@ def build_pipeline(data=None):
         "heldout_modified": False,
         "profiler_backend": "hosted",
         "urgent_profile_target_met": True,
+        "hosted_service_invoked": True,
     }
 '''
 
@@ -80,6 +83,7 @@ def test_current_branch_and_offline_gate():
     assert result["version"] == __EXPECTED_VERSION__
     assert result["offline"] is True
     assert result["profiler_backend"] == __EXPECTED_PROFILER_BACKEND__
+    assert result["hosted_service_invoked"] is __EXPECTED_HOSTED_SERVICE_INVOKED__
 
 
 def test_heldout_set_is_untouched():
