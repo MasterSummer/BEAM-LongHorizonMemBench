@@ -797,7 +797,8 @@ def _alignment_snapshot(
         if lifecycle is not None:
             mode = (
                 "inferred"
-                if lifecycle.source in {"inventory_diff", "inventory_delta"}
+                if lifecycle.source
+                in {"inventory_diff", "inventory_delta", "inventory_snapshot_diff"}
                 or lifecycle.native_event.startswith("INFERRED")
                 else "native/exact"
             )

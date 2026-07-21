@@ -1346,6 +1346,7 @@ def _provenance_mode(event: object) -> ProvenanceMode:
     if source in {
         "inventory_diff",
         "inventory_delta",
+        "inventory_snapshot_diff",
         "snapshot_diff",
         "neo4j_graph_diff",
     } or native_event.upper().startswith("INFERRED"):

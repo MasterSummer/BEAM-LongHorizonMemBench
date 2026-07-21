@@ -32,6 +32,8 @@ MEM0_STATEFUL_GENERATOR_VERSION_V4 = "software-project-mem0-vertical-0.4"
 MEM0_STATEFUL_RELEASE_ID_V4 = "software-vertical-mem0-v0.4.0"
 MEM0_STATEFUL_GENERATOR_VERSION_V5 = "software-project-mem0-vertical-0.5"
 MEM0_STATEFUL_RELEASE_ID_V5 = "software-vertical-mem0-v0.5.0"
+MEM0_STATEFUL_GENERATOR_VERSION_V6 = "software-project-mem0-vertical-0.6"
+MEM0_STATEFUL_RELEASE_ID_V6 = "software-vertical-mem0-v0.6.0"
 _RELEASE_TIMESTAMP = "2026-07-16T00:00:00Z"
 
 
@@ -372,7 +374,7 @@ def _write_stage(out: Path, generated: Sequence[Mem0StatefulGenerated]) -> None:
         )
         if failures:
             raise Mem0StatefulDatasetError(
-                "formal v0.5 dataset audit failed: " + ", ".join(failures)
+                "formal v0.6 dataset audit failed: " + ", ".join(failures)
             )
     release_id, generator_version = _release_for_generation(
         n_episodes=len(generated),
@@ -456,15 +458,15 @@ def _dataset_audit(
         and isinstance(best_option_accuracy, int | float)
         and float(best_option_accuracy) <= 0.40
     )
-    formal_v05 = len(generated) >= 50
-    scenario_balance_ok = not formal_v05 or (
+    formal_release = len(generated) >= 50
+    scenario_balance_ok = not formal_release or (
         len(scenarios) == 5 and max(scenarios.values()) - min(scenarios.values()) <= 1
     )
-    schedule_balance_ok = not formal_v05 or (
+    schedule_balance_ok = not formal_release or (
         len(schedules) == 10
         and max(schedules.values()) - min(schedules.values()) <= 1
     )
-    factorial_coverage_ok = not formal_v05 or (
+    factorial_coverage_ok = not formal_release or (
         len(cells) == 50 and max(cells.values()) - min(cells.values()) <= 1
     )
     return {
@@ -542,6 +544,48 @@ def _audit_spec(spec: SoftwareMem0VerticalSpec) -> None:
             normalized_constraint in text or "network_access = false" in text
         ):
             raise Mem0StatefulDatasetError("absent C1 workspace still exposes the constraint")
+        if latent.checkpoint_session < state_by_id["P2"].valid_from:
+            continue
+        for state_id in ("U1", "P2", "V2"):
+            state = state_by_id[state_id]
+            if (
+                latent.checkpoint_session >= state.valid_from
+                and latent.recoverability[state_id] != variant
+            ):
+                raise Mem0StatefulDatasetError(
+                    f"{state_id} recoverability mismatch in session "
+                    f"{latent.checkpoint_session}"
+                )
+        workspace_surface = "\n".join(
+            f"{artifact.path}\n{artifact.content}"
+            for artifact in public.workspace.artifacts
+        ).casefold()
+        explicit_branch = "current authorized branch: v2"
+        if variant == "explicit" and explicit_branch not in workspace_surface:
+            raise Mem0StatefulDatasetError(
+                "explicit plan workspace does not identify the authorized v2 branch"
+            )
+        if variant == "derivable" and (
+            "pipeline/v2/core.py" not in workspace_surface
+            or "logs/leakage-report.txt" not in workspace_surface
+            or explicit_branch in workspace_surface
+        ):
+            raise Mem0StatefulDatasetError(
+                "derivable plan workspace lacks indirect v2 evidence or states it explicitly"
+            )
+        if variant == "absent" and any(
+            marker in workspace_surface
+            for marker in (
+                "pipeline/v2",
+                "logs/leakage-report.txt",
+                '"branch": "v2"',
+                "superseded",
+                "results/heldout-audit.json",
+            )
+        ):
+            raise Mem0StatefulDatasetError(
+                "absent plan workspace still exposes the v2 transition"
+            )
 
 
 def _dataset_card(manifest: Mem0StatefulManifest) -> str:
@@ -565,11 +609,11 @@ def _release_for_generation(
 ) -> tuple[str, str]:
     """Select the release contract without changing legacy CI fixtures.
 
-    The repaired 50-episode diversified release uses v0.5.  Earlier 16-session and
+    The repaired 50-episode diversified release uses v0.6. Earlier 16-session and
     30-episode pilots retain v0.3, while small CI fixtures retain v0.2.
     """
     if n_episodes >= 50:
-        return MEM0_STATEFUL_RELEASE_ID_V5, MEM0_STATEFUL_GENERATOR_VERSION_V5
+        return MEM0_STATEFUL_RELEASE_ID_V6, MEM0_STATEFUL_GENERATOR_VERSION_V6
     if n_sessions >= 16 or n_episodes >= 30:
         return MEM0_STATEFUL_RELEASE_ID_V3, MEM0_STATEFUL_GENERATOR_VERSION_V3
     return MEM0_STATEFUL_RELEASE_ID, MEM0_STATEFUL_GENERATOR_VERSION
@@ -690,10 +734,12 @@ __all__ = [
     "MEM0_STATEFUL_GENERATOR_VERSION_V3",
     "MEM0_STATEFUL_GENERATOR_VERSION_V4",
     "MEM0_STATEFUL_GENERATOR_VERSION_V5",
+    "MEM0_STATEFUL_GENERATOR_VERSION_V6",
     "MEM0_STATEFUL_RELEASE_ID",
     "MEM0_STATEFUL_RELEASE_ID_V3",
     "MEM0_STATEFUL_RELEASE_ID_V4",
     "MEM0_STATEFUL_RELEASE_ID_V5",
+    "MEM0_STATEFUL_RELEASE_ID_V6",
     "MEM0_STATEFUL_SCHEMA_VERSION",
     "Mem0StatefulDatasetError",
     "Mem0StatefulGenerated",

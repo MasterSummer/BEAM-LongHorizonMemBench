@@ -26,6 +26,7 @@ from lhmsb.qualification.metrics import multisystem_state_checkpoints_from_artif
 from lhmsb.qualification.prepare import (
     PrefixPreparationError,
     _artifact_identity,
+    _reconcile_async_inventory,
     prepare_prefix,
 )
 from lhmsb.qualification.report import (
@@ -501,6 +502,61 @@ def test_prepare_replays_public_sessions_and_searches_before_current_write(tmp_p
     assert state_rows[-1].live_memory_provenance == (
         "native/exact",
     ) * state_rows[-1].n_live
+
+
+def test_async_inventory_diff_infers_add_update_and_delete_provenance() -> None:
+    def memory(memory_id: str, content: str) -> MemoryObject:
+        return MemoryObject(
+            memory_id=memory_id,
+            content=content,
+            content_hash=sha256_text(content),
+            metadata=(),
+            created_at="",
+            updated_at="",
+            history_length=1,
+        )
+
+    old_update = memory("m-update", "old")
+    deleted = memory("m-delete", "delete me")
+    updated = memory("m-update", "new")
+    added = memory("m-add", "background summary")
+    before = InventorySnapshot(
+        checkpoint_session=0,
+        n_write=2,
+        n_live=2,
+        items=(deleted, old_update),
+        store_hash=sha256_text("before"),
+        backend_count=2,
+    )
+    observed = InventorySnapshot(
+        checkpoint_session=1,
+        n_write=3,
+        n_live=2,
+        items=(added, updated),
+        store_hash=sha256_text("after"),
+        backend_count=2,
+    )
+    write = WriteSessionResult(
+        session_index=0,
+        events=(),
+        inventory=before,
+        n_write=2,
+        latency_seconds=0.0,
+    )
+
+    reconciled = _reconcile_async_inventory(write, observed)
+
+    assert {event.native_event for event in reconciled.events} == {
+        "INFERRED_ASYNC_ADD",
+        "INFERRED_ASYNC_UPDATE",
+        "INFERRED_ASYNC_DELETE",
+    }
+    assert {event.source for event in reconciled.events} == {"inventory_snapshot_diff"}
+    assert len({event.operation_id for event in reconciled.events}) == 3
+    assert reconciled.n_write == observed.n_write
+    assert reconciled.inventory.checkpoint_session == write.session_index
+    assert reconciled.inventory.items == observed.items
+    assert _reconcile_async_inventory(write, observed) == reconciled
 
 
 def test_cumulative_write_count_does_not_mark_noop_session_incomplete(

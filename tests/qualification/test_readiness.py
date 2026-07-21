@@ -115,6 +115,7 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
             selected_action_id="oracle-action",
             opportunity_id=opportunity_id,
             drift_eligible_categories=(drift[index % len(drift)],),
+            normalized_drift_flags=(),
         )
         for index, opportunity_id in enumerate(opportunities)
     )
@@ -122,6 +123,7 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
         SimpleNamespace(
             selected_action_id=("workspace-action" if index < 2 else "oracle-action"),
             opportunity_id=opportunity_id,
+            normalized_drift_flags=((drift[index],) if index < len(drift) else ()),
         )
         for index, opportunity_id in enumerate(opportunities)
     )
@@ -155,6 +157,7 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
             "status": "complete",
             "n_memory_objects": 1,
             "method_counts": {"exact_signature": 1},
+            "lifecycle_provenance_counts": {"native/exact": 1},
         },
     }
 
@@ -166,7 +169,40 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
     )
 
     assert payload["measurement_ready"] is True
-    assert payload["gate_counts"] == {"pass": 18}
+    assert payload["gate_counts"] == {"pass": 20}
+
+    summary["semantic_attribution"]["lifecycle_provenance_counts"] = {
+        "unavailable": 1
+    }
+    missing_provenance = compute_measurement_gates(
+        SimpleNamespace(task_results=(task,)),
+        specs,
+        summary=summary,
+        heuristic_baselines=compute_heuristic_baselines(specs),
+    )
+    missing_provenance_gates = {
+        item["gate_id"]: item for item in missing_provenance["gates"]
+    }
+    assert missing_provenance_gates["stored_object_provenance_complete"]["status"] == "fail"
+    summary["semantic_attribution"]["lifecycle_provenance_counts"] = {
+        "native/exact": 1
+    }
+
+    original_workspace_flags = tuple(row.normalized_drift_flags for row in workspace_rows)
+    for row in workspace_rows:
+        row.normalized_drift_flags = ()
+    missing_drift_signal = compute_measurement_gates(
+        SimpleNamespace(task_results=(task,)),
+        specs,
+        summary=summary,
+        heuristic_baselines=compute_heuristic_baselines(specs),
+    )
+    missing_drift_gates = {
+        item["gate_id"]: item for item in missing_drift_signal["gates"]
+    }
+    assert missing_drift_gates["workspace_oracle_drift_separation"]["status"] == "fail"
+    for row, flags in zip(workspace_rows, original_workspace_flags, strict=True):
+        row.normalized_drift_flags = flags
 
     # A managed system may demonstrate causal use even when raw flat retrieval
     # contains relevant text that the policy does not behaviorally use. That is

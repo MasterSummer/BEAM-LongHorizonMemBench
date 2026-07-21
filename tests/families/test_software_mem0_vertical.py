@@ -71,8 +71,31 @@ def test_recoverability_variants_share_latent_state_but_change_workspace() -> No
     assert explicit.plan.workspaces[checkpoint].recoverability["C1"] == "explicit"
     assert derivable.plan.workspaces[checkpoint].recoverability["C1"] == "derivable"
     assert absent.plan.workspaces[checkpoint].recoverability["C1"] == "absent"
+    for state_id in ("U1", "P2", "V2"):
+        assert explicit.plan.workspaces[checkpoint].recoverability[state_id] == "explicit"
+        assert derivable.plan.workspaces[checkpoint].recoverability[state_id] == "derivable"
+        assert absent.plan.workspaces[checkpoint].recoverability[state_id] == "absent"
     assert explicit.plan.workspaces[checkpoint] != derivable.plan.workspaces[checkpoint]
     assert derivable.plan.workspaces[checkpoint] != absent.plan.workspaces[checkpoint]
+
+    explicit_surface = "\n".join(
+        f"{item.path}\n{item.content}"
+        for item in explicit.plan.workspaces[checkpoint].artifacts
+    ).lower()
+    derivable_surface = "\n".join(
+        f"{item.path}\n{item.content}"
+        for item in derivable.plan.workspaces[checkpoint].artifacts
+    ).lower()
+    absent_surface = "\n".join(
+        f"{item.path}\n{item.content}"
+        for item in absent.plan.workspaces[checkpoint].artifacts
+    ).lower()
+    assert "current authorized branch: v2" in explicit_surface
+    assert "pipeline/v2/core.py" in derivable_surface
+    assert "current authorized branch: v2" not in derivable_surface
+    assert "pipeline/v2" not in absent_surface
+    assert '"branch": "v2"' not in absent_surface
+    assert "superseded" not in absent_surface
 
 
 def test_absent_workspace_does_not_semantically_repeat_c1() -> None:

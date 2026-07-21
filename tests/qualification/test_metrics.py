@@ -77,9 +77,33 @@ def test_write_state_maintenance_formulas_are_hand_computed() -> None:
     assert metrics["stale_state_retention_rate"].value == 0.25
     assert metrics["duplicate_live_memory_rate"].value == 1 / 3
     assert metrics["update_delete_responsiveness"].value == 0.5
+    assert metrics["physical_retirement_rate"].value == 0.5
     assert metrics["write_to_continuation_alignment"].value == 0.5
     assert metrics["memory_write_count"].value == 3
     assert metrics["live_memory_count"].value == 4
+
+
+def test_retained_audit_memory_is_responsive_when_successor_is_stored() -> None:
+    metrics = compute_metric_collection(
+        state_checkpoints=(
+            StateCheckpointMetricInput(
+                eligible_write_state_ids=(),
+                new_memory_state_ids=(),
+                current_state_ids=("P2",),
+                future_needed_state_ids=("P2",),
+                retired_state_ids=("P1",),
+                live_memory_state_ids=(("P1",), ("P2",)),
+                live_content_hashes=("old", "new"),
+                n_write=2,
+                n_live=2,
+                retired_replacement_state_ids=(("P2",),),
+            ),
+        ),
+    )
+
+    assert metrics["physical_retirement_rate"].value == 0.0
+    assert metrics["superseding_state_storage_rate"].value == 1.0
+    assert metrics["update_delete_responsiveness"].value == 1.0
 
 
 def test_memory_counts_are_checkpoint_means_with_explicit_totals() -> None:

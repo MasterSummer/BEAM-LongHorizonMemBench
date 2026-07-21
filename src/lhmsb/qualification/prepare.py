@@ -15,7 +15,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any, Protocol, cast
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
@@ -28,6 +28,7 @@ from lhmsb.qualification.context import PublicHistoryUnit, build_public_history_
 from lhmsb.qualification.memory_runtime import (
     CandidateSearch,
     InventorySnapshot,
+    MemoryMutationEvent,
     MemoryRuntime,
     ProviderUsageEvent,
     WriteSessionResult,
@@ -274,6 +275,11 @@ def _replay_prefix(
             backend=task.backend,
             expected_units=history_units,
         )
+        if previous_write is not None:
+            previous_write = _reconcile_async_inventory(
+                previous_write,
+                current_inventory,
+            )
         retrievals: list[CandidateSearch] = []
         common: list[CommonRerankTrace] = []
         diagnostics: list[tuple[str, object]] = [
@@ -385,6 +391,78 @@ def _replay_prefix(
         model_files_hash=cast(str, identity["model_files_hash"]),
         checkpoints=tuple(checkpoints),
         storage_footprints=tuple(runtime.storage_footprints()),
+    )
+
+
+def _reconcile_async_inventory(
+    write: WriteSessionResult,
+    observed: InventorySnapshot,
+) -> WriteSessionResult:
+    """Infer mutations completed after ``write_session`` returned.
+
+    Native systems may finish background consolidation before the next
+    continuation boundary. The boundary snapshot is authoritative, so attach
+    a deterministic inventory-diff event instead of leaving those objects
+    without lifecycle provenance.
+    """
+    before = {item.memory_id: item for item in write.inventory.items}
+    after = {item.memory_id: item for item in observed.items}
+    inferred: list[MemoryMutationEvent] = []
+    for memory_id in sorted(before.keys() | after.keys()):
+        old = before.get(memory_id)
+        new = after.get(memory_id)
+        if old is None and new is not None:
+            kind = "ADD"
+            text = new.content
+            old_hash = None
+            new_hash = new.content_hash
+        elif old is not None and new is None:
+            kind = "DELETE"
+            text = old.content
+            old_hash = old.content_hash
+            new_hash = None
+        elif old is not None and new is not None and old.content_hash != new.content_hash:
+            kind = "UPDATE"
+            text = new.content
+            old_hash = old.content_hash
+            new_hash = new.content_hash
+        else:
+            continue
+        digest = hashlib.sha256(
+            f"{write.session_index}\0{kind}\0{memory_id}\0{old_hash}\0{new_hash}".encode()
+        ).hexdigest()[:20]
+        inferred.append(
+            MemoryMutationEvent(
+                operation_id=f"async-{write.session_index:06d}-{kind.lower()}-{digest}",
+                session_index=write.session_index,
+                native_event=f"INFERRED_ASYNC_{kind}",
+                memory_id=memory_id,
+                memory_text=text,
+                old_content_hash=old_hash,
+                new_content_hash=new_hash,
+                source="inventory_snapshot_diff",
+                latency_seconds=0.0,
+            )
+        )
+    known = {
+        (event.native_event, event.memory_id, event.old_content_hash, event.new_content_hash)
+        for event in write.events
+    }
+    additions = tuple(
+        event
+        for event in inferred
+        if (event.native_event, event.memory_id, event.old_content_hash, event.new_content_hash)
+        not in known
+    )
+    settled_inventory = replace(
+        observed,
+        checkpoint_session=write.session_index,
+    )
+    return replace(
+        write,
+        events=(*write.events, *additions),
+        inventory=settled_inventory,
+        n_write=settled_inventory.n_write,
     )
 
 

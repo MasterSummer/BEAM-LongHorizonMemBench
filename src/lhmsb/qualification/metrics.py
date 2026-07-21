@@ -16,7 +16,7 @@ from lhmsb.longhorizon.attribution import (
     build_software_fact_signatures,
     eligible_write_state_ids,
 )
-from lhmsb.longhorizon.replay import replay_plan
+from lhmsb.longhorizon.replay import ReplayResult, replay_plan
 from lhmsb.longhorizon.schema import ContinuationOpportunity
 from lhmsb.qualification.memory_runtime import InventorySnapshot, WriteSessionResult
 from lhmsb.qualification.prefix import MemoryPrefixArtifact, MemoryPrefixCheckpoint
@@ -129,6 +129,10 @@ class StateCheckpointMetricInput:
     new_memory_attribution_methods: tuple[str, ...] = ()
     live_memory_attribution_methods: tuple[str, ...] = ()
     provenance_complete: bool = True
+    # One tuple per sorted retired state. Each child tuple lists current states
+    # that supersede the retired state in the same kind and scope. Retaining an
+    # audit copy is responsive when the active replacement is also represented.
+    retired_replacement_state_ids: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -631,6 +635,28 @@ def _aggregate_observation_status(statuses: Sequence[str]) -> str:
     return "partial"
 
 
+def _retired_replacements(
+    spec: SoftwareMem0VerticalSpec,
+    replay: ReplayResult,
+) -> tuple[tuple[str, ...], ...]:
+    """Map each retired state to active same-kind, same-scope successors."""
+    states = {state.state_id: state for state in spec.plan.state_units}
+    active = tuple(replay.current.values())
+    return tuple(
+        tuple(
+            sorted(
+                candidate.state_id
+                for candidate in active
+                if retired is not None
+                and candidate.kind == retired.kind
+                and candidate.scope == retired.scope
+            )
+        )
+        for retired_id in sorted(replay.invalidated)
+        for retired in (states.get(retired_id),)
+    )
+
+
 def compute_qualification_metrics(
     matrix: QualificationMatrixResult,
     specs: Mapping[str, SoftwareMem0VerticalSpec],
@@ -757,6 +783,7 @@ def compute_qualification_metrics(
                         for item in write.inventory.items
                     ),
                     provenance_complete=not (write_delta > 0 and not write.events),
+                    retired_replacement_state_ids=_retired_replacements(spec, replay),
                 )
             )
 
@@ -1349,6 +1376,7 @@ def multisystem_state_checkpoints_from_artifacts(
                         for item in inventory.items
                     ),
                     provenance_complete=not (write_delta > 0 and not events),
+                    retired_replacement_state_ids=_retired_replacements(spec, replay),
                 )
             )
     return tuple(output)
@@ -1548,7 +1576,10 @@ def _state_metrics(
     duplicate_objects = 0
     aligned_live_objects = 0
     responsive_retired = 0
+    physically_retired = 0
     retired_states = 0
+    represented_successors = 0
+    retired_states_with_successors = 0
     current_stale_coexistence = 0
     mutation_totals: Counter[str] = Counter()
     aligned_future = 0
@@ -1597,7 +1628,22 @@ def _state_metrics(
         )
         duplicate_objects += sum(max(0, count - 1) for count in counts.values())
         aligned_live_objects += sum(bool(states) for states in live)
-        responsive_retired += len(retired - represented)
+        replacements = {
+            retired_id: set(successors)
+            for retired_id, successors in zip(
+                sorted(retired),
+                item.retired_replacement_state_ids,
+                strict=False,
+            )
+        }
+        for retired_id in sorted(retired):
+            absent = retired_id not in represented
+            successors = replacements.get(retired_id, set())
+            physically_retired += absent
+            responsive_retired += absent or bool(successors & represented)
+            if successors:
+                retired_states_with_successors += 1
+                represented_successors += bool(successors & represented)
         retired_states += len(retired)
         future = set(item.future_needed_state_ids)
         aligned_future += len(future & represented)
@@ -1635,6 +1681,14 @@ def _state_metrics(
     values[metric("update_delete_responsiveness")] = safe_ratio(
         responsive_retired,
         retired_states,
+    )
+    values[metric("physical_retirement_rate")] = safe_ratio(
+        physically_retired,
+        retired_states,
+    )
+    values[metric("superseding_state_storage_rate")] = safe_ratio(
+        represented_successors,
+        retired_states_with_successors,
     )
     values[metric("write_to_continuation_alignment")] = safe_ratio(
         aligned_future,
@@ -1785,6 +1839,7 @@ def _filter_state_observations(
                 new_memory_attribution_methods=new_methods,
                 live_memory_attribution_methods=live_methods,
                 provenance_complete=item.provenance_complete,
+                retired_replacement_state_ids=item.retired_replacement_state_ids,
             )
         )
     return tuple(projected)
@@ -1815,7 +1870,13 @@ def _aligned_attribution_methods(
 def _event_provenance(event: object) -> str:
     source = str(getattr(event, "source", ""))
     native_event = str(getattr(event, "native_event", ""))
-    if source in {"inventory_diff", "inventory_delta", "snapshot_diff", "neo4j_graph_diff"}:
+    if source in {
+        "inventory_diff",
+        "inventory_delta",
+        "inventory_snapshot_diff",
+        "snapshot_diff",
+        "neo4j_graph_diff",
+    }:
         return "inferred"
     if native_event.upper().startswith("INFERRED"):
         return "inferred"

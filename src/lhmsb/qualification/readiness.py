@@ -465,6 +465,42 @@ def compute_measurement_gates(
             "no-match without evaluator ambiguity."
         ),
     )
+    stored_lifecycle = (
+        semantic.get("lifecycle_provenance_counts", {})
+        if isinstance(semantic, Mapping)
+        else {}
+    )
+    stored_exact = (
+        int(stored_lifecycle.get("native/exact", 0))
+        if isinstance(stored_lifecycle, Mapping)
+        else 0
+    )
+    stored_inferred = (
+        int(stored_lifecycle.get("inferred", 0))
+        if isinstance(stored_lifecycle, Mapping)
+        else 0
+    )
+    stored_unavailable = (
+        int(stored_lifecycle.get("unavailable", 0))
+        if isinstance(stored_lifecycle, Mapping)
+        else semantic_total
+    )
+    _gate_boolean(
+        gates,
+        "stored_object_provenance_complete",
+        stored_unavailable == 0 and stored_exact + stored_inferred == semantic_total,
+        applicable=semantic_total > 0,
+        description=(
+            "Every object in the final native inventories has exact or explicitly "
+            "inferred lifecycle provenance."
+        ),
+        detail={
+            "native_exact": stored_exact,
+            "inferred": stored_inferred,
+            "unavailable": stored_unavailable,
+            "total": semantic_total,
+        },
+    )
     best_accuracy = heuristic_baselines.get("best_always_action_accuracy")
     _gate_scalar(
         gates,
@@ -536,6 +572,18 @@ def compute_measurement_gates(
         applicable=bool(divergence_by_episode),
         description="Workspace-only and oracle require distinct behavior within every episode.",
         detail=dict(sorted(divergence_by_episode.items())),
+    )
+    drift_separation = _control_drift_separation(condition_records)
+    _gate_boolean(
+        gates,
+        "workspace_oracle_drift_separation",
+        all(drift_separation[category] > 0 for category in _DRIFT_CATEGORIES),
+        applicable=bool(drift_separation.get("matched_pairs", 0)),
+        description=(
+            "Workspace-only produces every canonical behavioral-drift construct at "
+            "least once while the matched oracle continuation does not."
+        ),
+        detail=dict(drift_separation),
     )
     flat_rows = tuple(
         row
@@ -722,6 +770,37 @@ def _control_action_divergence(
             if workspace is not None and oracle is not None and workspace != oracle:
                 by_episode[episode_id] += 1
     return dict(by_episode)
+
+
+def _control_drift_separation(
+    condition_records: Sequence[tuple[str, object]],
+) -> dict[str, int]:
+    flags: dict[tuple[str, str, str], frozenset[str]] = {}
+    for episode_id, condition in condition_records:
+        name = str(getattr(condition, "condition", ""))
+        if name not in {"workspace_only", "oracle_current_state"}:
+            continue
+        for row in getattr(condition, "sceu_results", ()):
+            flags[(episode_id, name, str(getattr(row, "opportunity_id", "")))] = frozenset(
+                str(value)
+                for value in (getattr(row, "normalized_drift_flags", ()) or ())
+                if str(value) in _DRIFT_CATEGORIES
+            )
+    counts: Counter[str] = Counter()
+    matched = 0
+    keys = {(episode_id, opportunity_id) for episode_id, _name, opportunity_id in flags}
+    for episode_id, opportunity_id in sorted(keys):
+        workspace = flags.get((episode_id, "workspace_only", opportunity_id))
+        oracle = flags.get((episode_id, "oracle_current_state", opportunity_id))
+        if workspace is None or oracle is None:
+            continue
+        matched += 1
+        for category in _DRIFT_CATEGORIES:
+            counts[category] += category in workspace and category not in oracle
+    return {
+        "matched_pairs": matched,
+        **{category: counts[category] for category in _DRIFT_CATEGORIES},
+    }
 
 
 def _grouped_accuracy(

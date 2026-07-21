@@ -17,6 +17,11 @@ SCRIPTS = (
 COMMON = ROOT / "scripts" / "lib" / "systems_common.sh"
 SERVICES = ROOT / "scripts" / "lib" / "systems_services.sh"
 SLURM = ROOT / "deploy" / "slurm" / "systems_qualification.sbatch"
+SLURM_SCRIPTS = (
+    SLURM,
+    ROOT / "deploy" / "slurm" / "systems_evaluate_task.sbatch",
+    ROOT / "deploy" / "slurm" / "systems_report.sbatch",
+)
 
 
 def _run(
@@ -35,11 +40,15 @@ def _run(
 
 
 def test_system_scripts_are_executable_and_shell_valid() -> None:
-    for path in (*SCRIPTS, COMMON, SERVICES, SLURM):
+    for path in (*SCRIPTS, COMMON, SERVICES, *SLURM_SCRIPTS):
         assert path.is_file()
         assert path.stat().st_mode & (1 << 6), path
     result = subprocess.run(
-        ["bash", "-n", *(str(path) for path in (*SCRIPTS, COMMON, SERVICES, SLURM))],
+        [
+            "bash",
+            "-n",
+            *(str(path) for path in (*SCRIPTS, COMMON, SERVICES, *SLURM_SCRIPTS)),
+        ],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -88,6 +97,28 @@ def test_slurm_dry_run_does_not_require_slurm_or_gpu(tmp_path: Path) -> None:
     assert not (tmp_path / "data").exists()
 
 
+def test_report_slurm_dry_run_uses_canonical_aggregation_commands(tmp_path: Path) -> None:
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "LHMSB_SLURM_DRY_RUN": "1",
+            "LHMSB_DATA_ROOT": str(tmp_path / "data"),
+            "LHMSB_RUN_NAME": "report-dry-run",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(SLURM_SCRIPTS[-1])],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "aggregate-systems" in result.stdout
+    assert "validate-systems" in result.stdout
+
+
 def test_slurm_prepare_forwards_episode_limit(tmp_path: Path) -> None:
     environment = dict(os.environ)
     environment.update(
@@ -127,7 +158,7 @@ def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
         ):
             assert marker in text
     assert "--episode-limit 1" in smoke
-    assert "datasets/software_v5" in smoke
+    assert "datasets/software_v6" in smoke
     assert "systems_controlled_gpt_only_aaai.yaml" in smoke
 
 
@@ -137,7 +168,7 @@ def test_preflight_and_bootstrap_default_to_the_confirmatory_release() -> None:
         ROOT / "scripts" / "bootstrap_systems_server.sh",
     ):
         text = path.read_text(encoding="utf-8")
-        assert "datasets/software_v5" in text
+        assert "datasets/software_v6" in text
         assert "systems_controlled_gpt_only_aaai.yaml" in text
 
 

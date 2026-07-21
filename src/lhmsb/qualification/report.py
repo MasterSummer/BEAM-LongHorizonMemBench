@@ -157,6 +157,8 @@ _STORAGE_SCORECARD_FIELDS = (
     "current_state_storage_f1",
     "stale_state_retention_rate",
     "update_delete_responsiveness",
+    "physical_retirement_rate",
+    "superseding_state_storage_rate",
     "write_to_continuation_alignment",
     "semantic_attribution_resolvability",
     "storage_provenance_completeness",
@@ -723,6 +725,7 @@ def _flatten_rows(
                                         in {
                                             "inventory_diff",
                                             "inventory_delta",
+                                            "inventory_snapshot_diff",
                                             "snapshot_diff",
                                             "neo4j_graph_diff",
                                         }
@@ -1790,6 +1793,8 @@ def _storage_scorecard_rows(
         "current_state_storage_f1",
         "stale_state_retention_rate",
         "update_delete_responsiveness",
+        "physical_retirement_rate",
+        "superseding_state_storage_rate",
         "write_to_continuation_alignment",
         "storage_provenance_completeness",
         "live_memory_count",
