@@ -290,5 +290,6 @@ def test_runtime_verifier_is_native() -> None:
     text = (ROOT / "scripts" / "verify_system_runtime.sh").read_text(encoding="utf-8")
     assert "native-runtime.json" in text
     assert "system-sources.json" in text
+    assert 'MEMOS_BASE_PATH="${DATA_ROOT}/memos"' in text
     assert "venvs" in text
     assert "docker" not in text.lower()

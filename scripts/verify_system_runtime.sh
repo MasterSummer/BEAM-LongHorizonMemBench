@@ -75,6 +75,9 @@ for identity in \
   "amem amem agentic_memory.memory_system" \
   "memos memos memos.memories.textual.tree"; do
   read -r environment source_name module_name <<<"${identity}"
+  # Importing MemOS without this setting creates ``$PWD/.memos`` and dirties
+  # the immutable experiment checkout. The variable is harmless for A-MEM.
+  MEMOS_BASE_PATH="${DATA_ROOT}/memos" \
   LHMSB_DATA_ROOT="${DATA_ROOT}" \
   LHMSB_SOURCE_TREE_MANIFEST_PATH="${DATA_ROOT}/manifests/system-sources.json" \
   PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
