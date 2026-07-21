@@ -30,6 +30,8 @@ MEM0_STATEFUL_GENERATOR_VERSION_V3 = "software-project-mem0-vertical-0.3"
 MEM0_STATEFUL_RELEASE_ID_V3 = "software-vertical-mem0-v0.3.0"
 MEM0_STATEFUL_GENERATOR_VERSION_V4 = "software-project-mem0-vertical-0.4"
 MEM0_STATEFUL_RELEASE_ID_V4 = "software-vertical-mem0-v0.4.0"
+MEM0_STATEFUL_GENERATOR_VERSION_V5 = "software-project-mem0-vertical-0.5"
+MEM0_STATEFUL_RELEASE_ID_V5 = "software-vertical-mem0-v0.5.0"
 _RELEASE_TIMESTAMP = "2026-07-16T00:00:00Z"
 
 
@@ -370,7 +372,7 @@ def _write_stage(out: Path, generated: Sequence[Mem0StatefulGenerated]) -> None:
         )
         if failures:
             raise Mem0StatefulDatasetError(
-                "formal v0.4 dataset audit failed: " + ", ".join(failures)
+                "formal v0.5 dataset audit failed: " + ", ".join(failures)
             )
     release_id, generator_version = _release_for_generation(
         n_episodes=len(generated),
@@ -446,23 +448,23 @@ def _dataset_audit(
     action_dominance_ok = (
         not isinstance(best_action_accuracy, bool)
         and isinstance(best_action_accuracy, int | float)
-        and float(best_action_accuracy) <= 0.60
+        and float(best_action_accuracy) <= 0.50
     )
     best_option_accuracy = heuristic.get("best_always_option_accuracy")
     option_dominance_ok = (
         not isinstance(best_option_accuracy, bool)
         and isinstance(best_option_accuracy, int | float)
-        and float(best_option_accuracy) <= 0.50
+        and float(best_option_accuracy) <= 0.40
     )
-    formal_v04 = len(generated) >= 50
-    scenario_balance_ok = not formal_v04 or (
+    formal_v05 = len(generated) >= 50
+    scenario_balance_ok = not formal_v05 or (
         len(scenarios) == 5 and max(scenarios.values()) - min(scenarios.values()) <= 1
     )
-    schedule_balance_ok = not formal_v04 or (
+    schedule_balance_ok = not formal_v05 or (
         len(schedules) == 10
         and max(schedules.values()) - min(schedules.values()) <= 1
     )
-    factorial_coverage_ok = not formal_v04 or (
+    factorial_coverage_ok = not formal_v05 or (
         len(cells) == 50 and max(cells.values()) - min(cells.values()) <= 1
     )
     return {
@@ -481,8 +483,8 @@ def _dataset_audit(
             "unique_surface_hashes": len(
                 {item.surface_hash for item in generated}
             ) == len(generated),
-            "max_always_action_accuracy_le_0_60": action_dominance_ok,
-            "max_always_option_accuracy_le_0_50": option_dominance_ok,
+            "max_always_action_accuracy_le_0_50": action_dominance_ok,
+            "max_always_option_accuracy_le_0_40": option_dominance_ok,
             "formal_semantic_scenarios_balanced": scenario_balance_ok,
             "formal_phase_schedules_balanced": schedule_balance_ok,
             "formal_scenario_schedule_factorial_covered": factorial_coverage_ok,
@@ -563,11 +565,11 @@ def _release_for_generation(
 ) -> tuple[str, str]:
     """Select the release contract without changing legacy CI fixtures.
 
-    The 50-episode diversified release uses v0.4.  Earlier 16-session and
+    The repaired 50-episode diversified release uses v0.5.  Earlier 16-session and
     30-episode pilots retain v0.3, while small CI fixtures retain v0.2.
     """
     if n_episodes >= 50:
-        return MEM0_STATEFUL_RELEASE_ID_V4, MEM0_STATEFUL_GENERATOR_VERSION_V4
+        return MEM0_STATEFUL_RELEASE_ID_V5, MEM0_STATEFUL_GENERATOR_VERSION_V5
     if n_sessions >= 16 or n_episodes >= 30:
         return MEM0_STATEFUL_RELEASE_ID_V3, MEM0_STATEFUL_GENERATOR_VERSION_V3
     return MEM0_STATEFUL_RELEASE_ID, MEM0_STATEFUL_GENERATOR_VERSION
@@ -687,9 +689,11 @@ __all__ = [
     "MEM0_STATEFUL_GENERATOR_VERSION",
     "MEM0_STATEFUL_GENERATOR_VERSION_V3",
     "MEM0_STATEFUL_GENERATOR_VERSION_V4",
+    "MEM0_STATEFUL_GENERATOR_VERSION_V5",
     "MEM0_STATEFUL_RELEASE_ID",
     "MEM0_STATEFUL_RELEASE_ID_V3",
     "MEM0_STATEFUL_RELEASE_ID_V4",
+    "MEM0_STATEFUL_RELEASE_ID_V5",
     "MEM0_STATEFUL_SCHEMA_VERSION",
     "Mem0StatefulDatasetError",
     "Mem0StatefulGenerated",

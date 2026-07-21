@@ -156,3 +156,42 @@ def test_drift_rates_use_category_eligible_denominators() -> None:
     scorecard = compute_multisystem_scorecard(rows)[0]
     assert scorecard["stale_state_eligible_n"] == 1
     assert scorecard["aggregate_drift_eligible_n"] == 2
+
+
+def test_off_target_drift_is_reported_without_inflating_targeted_rates() -> None:
+    rows = (
+        MultisystemMetricInput(
+            policy_profile_id="policy-a",
+            condition="oracle_current_state",
+            readout="none",
+            result_id="targeted",
+            behavior_score=0.0,
+            is_correct=False,
+            drift_flags=("stale_state",),
+            drift_eligible_categories=("stale_state",),
+        ),
+        MultisystemMetricInput(
+            policy_profile_id="policy-a",
+            condition="oracle_current_state",
+            readout="none",
+            result_id="off-target",
+            behavior_score=0.0,
+            is_correct=False,
+            drift_flags=("constraint_loss",),
+            drift_eligible_categories=("stale_state",),
+        ),
+    )
+
+    metrics = compute_multisystem_metrics(rows)
+    assert metrics["aggregate_drift_rate"].value == 0.5
+    assert metrics["targeted_aggregate_drift_rate"].value == 0.5
+    assert metrics["observed_aggregate_drift_rate"].value == 1.0
+    assert metrics["off_target_drift_rate"].value == 0.5
+    assert metrics["observed_constraint_loss_rate"].value == 0.5
+    assert metrics["targeted_constraint_loss_rate"].value is None
+
+    scorecard = compute_multisystem_scorecard(rows)[0]
+    assert scorecard["targeted_aggregate_drift_rate"] == 0.5
+    assert scorecard["observed_aggregate_drift_rate"] == 1.0
+    assert scorecard["off_target_drift_rate"] == 0.5
+    assert scorecard["off_target_drift_n"] == 1

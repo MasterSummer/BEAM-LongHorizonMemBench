@@ -24,21 +24,31 @@ def test_policy_free_baselines_expose_action_and_option_shortcuts() -> None:
     payload = compute_heuristic_baselines(specs)
 
     assert payload["n_episodes"] == 5
-    assert payload["n_opportunities"] == 50
+    assert payload["n_opportunities"] == 60
     assert payload["gold_valid_assignment_counts"] == {
-        "cloud_shortcut": 10,
+        "cloud_shortcut": 15,
         "safe_v2_offline": 30,
-        "stale_v1": 10,
+        "stale_v1": 15,
     }
     assert payload["best_always_action"] == "safe_v2_offline"
-    assert payload["best_always_action_accuracy"] == 0.6
+    assert payload["best_always_action_accuracy"] == 0.5
     assert payload["uniform_random_expected_accuracy"] == pytest.approx(1 / 3)
     assert max(payload["always_option_accuracy"].values()) < 0.5  # type: ignore[union-attr]
 
 
 def test_measurement_gates_separate_artifact_completion_from_readiness() -> None:
     spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=16)
-    specs = {spec.plan.episode_id: spec}
+    specs = {
+        generated.plan.episode_id: generated
+        for index in range(5)
+        for generated in (
+            SoftwareMem0VerticalFamily.generate(
+                42 + index,
+                n_sessions=16,
+                trajectory_seed=index,
+            ),
+        )
+    }
     opportunities = tuple(item.opportunity_id for item in spec.plan.opportunities)
     drift = (
         "constraint_loss",
@@ -46,13 +56,24 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
         "stale_state",
         "local_over_global",
     )
+    sham_controls = tuple(
+        SimpleNamespace(
+            intervention_kind="sham_replacement",
+            classification=SimpleNamespace(action_changed=False),
+        )
+        for _index in range(6)
+    )
     memory_rows = tuple(
         SimpleNamespace(
             baseline_stable=True,
-            interventions=(
+            interventions=sham_controls
+            + (
                 SimpleNamespace(
-                    intervention_kind="sham_replacement",
-                    classification=SimpleNamespace(action_changed=False),
+                    intervention_kind="neutral_replacement",
+                    classification=SimpleNamespace(
+                        action_changed=index == 0,
+                        behaviorally_used=index == 0,
+                    ),
                 ),
             ),
             drift_eligible_categories=(drift[index % len(drift)],),
@@ -85,6 +106,7 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
         condition_results=(
             SimpleNamespace(
                 condition="flat_retrieval",
+                readout="common_rerank",
                 status="complete",
                 sceu_results=memory_rows,
             ),
@@ -100,12 +122,14 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
             ),
         ),
     )
+    task.policy_profile_id = "gpt-test"
     summary = {
         "n_inventory_snapshots": 1,
         "storage_provenance": {"status": "complete"},
         "semantic_attribution": {
             "status": "complete",
             "n_memory_objects": 1,
+            "method_counts": {"exact_signature": 1},
         },
     }
 
@@ -117,7 +141,46 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
     )
 
     assert payload["measurement_ready"] is True
-    assert payload["gate_counts"] == {"pass": 10}
+    assert payload["gate_counts"] == {"pass": 17}
+
+    summary["semantic_attribution"]["method_counts"] = {"ambiguous": 1}
+    ambiguous = compute_measurement_gates(
+        SimpleNamespace(task_results=(task,)),
+        specs,
+        summary=summary,
+        heuristic_baselines=compute_heuristic_baselines(specs),
+    )
+    ambiguous_gates = {item["gate_id"]: item for item in ambiguous["gates"]}
+    assert ambiguous_gates["semantic_attribution_resolvability"]["status"] == "fail"
+    summary["semantic_attribution"]["method_counts"] = {"exact_signature": 1}
+
+    for row in memory_rows:
+        row.interventions = row.interventions[:1] + row.interventions[-1:]
+    underpowered = compute_measurement_gates(
+        SimpleNamespace(task_results=(task,)),
+        specs,
+        summary=summary,
+        heuristic_baselines=compute_heuristic_baselines(specs),
+    )
+    underpowered_gates = {
+        item["gate_id"]: item for item in underpowered["gates"]
+    }
+    assert underpowered_gates["sham_action_flip_rate"]["status"] == "pass"
+    assert underpowered_gates["sham_action_flip_upper_bound"]["status"] == "fail"
+    for row in memory_rows:
+        row.interventions = sham_controls + row.interventions[-1:]
+
+    oracle_rows[0].is_correct = False
+    oracle_failure = compute_measurement_gates(
+        SimpleNamespace(task_results=(task,)),
+        specs,
+        summary=summary,
+        heuristic_baselines=compute_heuristic_baselines(specs),
+    )
+    oracle_gates = {item["gate_id"]: item for item in oracle_failure["gates"]}
+    assert oracle_gates["oracle_accuracy"]["status"] == "fail"
+    assert oracle_gates["oracle_accuracy_by_opportunity"]["status"] == "fail"
+    oracle_rows[0].is_correct = True
 
     memory_rows[0].baseline_stable = False
     memory_rows[1].baseline_stable = False

@@ -40,6 +40,10 @@ ControlKind = Literal[
     "valid_update",
     "no_conflict",
 ]
+ContinuationScope = Literal[
+    "governed_execution",
+    "isolated_profiler",
+]
 
 _STATE_KINDS = {
     "global_goal",
@@ -69,6 +73,10 @@ _CONTROL_KINDS = {
     "fresh_reminder",
     "valid_update",
     "no_conflict",
+}
+_CONTINUATION_SCOPES = {
+    "governed_execution",
+    "isolated_profiler",
 }
 
 
@@ -359,6 +367,7 @@ class ContinuationOpportunity:
     valid_action_ids: tuple[str, ...]
     matched_group: str
     control_kind: ControlKind = "native"
+    continuation_scope: ContinuationScope = "governed_execution"
 
     def __post_init__(self) -> None:
         if self.checkpoint_session < 0:
@@ -370,6 +379,10 @@ class ContinuationOpportunity:
             raise ValueError("valid_action_ids must refer to action_catalog")
         if self.control_kind not in _CONTROL_KINDS:
             raise ValueError(f"unknown control kind: {self.control_kind!r}")
+        if self.continuation_scope not in _CONTINUATION_SCOPES:
+            raise ValueError(
+                f"unknown continuation scope: {self.continuation_scope!r}"
+            )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> ContinuationOpportunity:
@@ -385,6 +398,10 @@ class ContinuationOpportunity:
             valid_action_ids=_tuple_strings(data.get("valid_action_ids")),
             matched_group=str(data.get("matched_group", "")),
             control_kind=cast(ControlKind, str(data.get("control_kind", "native"))),
+            continuation_scope=cast(
+                ContinuationScope,
+                str(data.get("continuation_scope", "governed_execution")),
+            ),
         )
 
 

@@ -308,7 +308,7 @@ def test_flat_prefix_readout_is_reused_without_memory_runtime(tmp_path) -> None:
     result = evaluate_task(eval_task, spec, artifact, policy, _Checker())
     assert result.status == "complete"
     assert any(row.candidate_memory_ids for row in result.sceu_results)
-    assert all(row.interventions for row in result.sceu_results if row.model_visible_memory_ids)
+    assert any(row.interventions for row in result.sceu_results if row.model_visible_memory_ids)
     assert all(
         sum(
             item.intervention_kind == "leave_one_out"
@@ -317,14 +317,27 @@ def test_flat_prefix_readout_is_reused_without_memory_runtime(tmp_path) -> None:
         <= 1
         for row in result.sceu_results
     )
+    count_opportunity_ids = {
+        "opp-premature-v2",
+        "opp-stale-v1",
+        "opp-local-valid",
+        "opp-global-local-conflict",
+    }
     assert all(
         sum(item.intervention_kind == "count_add" for item in row.interventions)
-        == 1
+        == (3 if row.opportunity_id in count_opportunity_ids else 0)
         for row in result.sceu_results
     )
     assert all(
-        item.target_memory_id == f"count-control:{row.sceu_id}"
-        and item.baseline_memory_count + 1 == item.intervention_memory_count
+        item.target_memory_id
+        == (
+            f"count-control-bundle:{row.sceu_id}:"
+            f"{item.intervention_memory_count - item.baseline_memory_count}"
+        )
+        and item.count_contrast
+        == f"add_{item.intervention_memory_count - item.baseline_memory_count}"
+        and item.intervention_memory_count - item.baseline_memory_count
+        in {1, 5, 20}
         for row in result.sceu_results
         for item in row.interventions
         if item.intervention_kind == "count_add"

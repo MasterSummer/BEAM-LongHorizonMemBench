@@ -30,11 +30,17 @@ def test_valid_local_accelerator_targets_scoped_authorization_for_intervention()
     targets = {
         unit.opportunity_id: unit.intervention_target_ids
         for unit in spec.plan.sceu_units
-        if unit.opportunity_id in {"opp-local-valid", "opp-local-valid-recheck"}
+        if unit.opportunity_id
+        in {
+            "opp-local-valid",
+            "opp-local-valid-recheck",
+            "opp-local-authority-confirmed",
+        }
     }
     assert targets == {
         "opp-local-valid": ("L1",),
         "opp-local-valid-recheck": ("L1",),
+        "opp-local-authority-confirmed": ("L1",),
     }
 
 
@@ -48,11 +54,11 @@ def test_gold_actions_are_balanced_against_a_single_default_policy() -> None:
 
     assert counts == {
         "safe_v2_offline": 6,
-        "stale_v1": 2,
-        "cloud_shortcut": 2,
+        "stale_v1": 3,
+        "cloud_shortcut": 3,
     }
-    assert max(counts.values()) / sum(counts.values()) <= 0.60
-    assert min(counts.values()) >= 2
+    assert max(counts.values()) / sum(counts.values()) <= 0.50
+    assert min(counts.values()) >= 3
 
 
 def test_recoverability_variants_share_latent_state_but_change_workspace() -> None:

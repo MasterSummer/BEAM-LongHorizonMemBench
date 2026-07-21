@@ -672,6 +672,7 @@ class SoftwareVerticalFamily:
                 ("safe_v2_offline",),
                 "local-only-control",
                 "wrong",
+                "isolated_profiler",
             ),
             ContinuationOpportunity(
                 "opp-local-valid",
@@ -683,6 +684,7 @@ class SoftwareVerticalFamily:
                 ("cloud_shortcut",),
                 "local-accelerator-validity",
                 "native",
+                "isolated_profiler",
             ),
             ContinuationOpportunity(
                 "opp-local-valid-recheck",
@@ -694,6 +696,7 @@ class SoftwareVerticalFamily:
                 ("cloud_shortcut",),
                 "local-accelerator-validity",
                 "native",
+                "isolated_profiler",
             ),
             ContinuationOpportunity(
                 "opp-valid-update",
@@ -759,7 +762,10 @@ class SoftwareVerticalFamily:
             # the evaluator's leave-one-out target so the intervention tests
             # the state that actually changes the valid continuation.
             intervention_target_ids: tuple[str, ...]
-            if opportunity.challenge_type == "valid-local-accelerator":
+            if (
+                opportunity.continuation_scope == "isolated_profiler"
+                and "L1" in opportunity.focal_state_ids
+            ):
                 intervention_target_ids = ("L1",)
             else:
                 intervention_target_ids = tuple(

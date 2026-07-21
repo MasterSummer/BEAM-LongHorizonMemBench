@@ -105,7 +105,7 @@ def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
         ):
             assert marker in text
     assert "--episode-limit 1" in smoke
-    assert "datasets/software_v4" in smoke
+    assert "datasets/software_v5" in smoke
     assert "systems_controlled_gpt_only_aaai.yaml" in smoke
 
 
@@ -115,7 +115,7 @@ def test_preflight_and_bootstrap_default_to_the_confirmatory_release() -> None:
         ROOT / "scripts" / "bootstrap_systems_server.sh",
     ):
         text = path.read_text(encoding="utf-8")
-        assert "datasets/software_v4" in text
+        assert "datasets/software_v5" in text
         assert "systems_controlled_gpt_only_aaai.yaml" in text
 
 
@@ -144,6 +144,35 @@ def test_qualification_forwards_allow_dirty_to_plan(tmp_path: Path) -> None:
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "plan-systems" in result.stdout
     assert "--allow-dirty" in result.stdout
+
+
+def test_qualification_supports_five_episode_calibration(tmp_path: Path) -> None:
+    result = _run(
+        ROOT / "scripts" / "run_systems_qualification.sh",
+        "--dry-run",
+        "--episode-limit",
+        "5",
+        "--data-root",
+        str(tmp_path / "data"),
+        "--env-file",
+        str(tmp_path / "missing.env"),
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "plan-systems" in result.stdout
+    assert "--episode-limit 5" in result.stdout
+
+
+def test_qualification_rejects_invalid_episode_limit(tmp_path: Path) -> None:
+    result = _run(
+        ROOT / "scripts" / "run_systems_qualification.sh",
+        "--dry-run",
+        "--episode-limit",
+        "0",
+        "--data-root",
+        str(tmp_path / "data"),
+    )
+    assert result.returncode == 2
+    assert "positive integer" in result.stderr
 
 
 def test_bootstrap_uses_native_venv_and_pinned_sources() -> None:

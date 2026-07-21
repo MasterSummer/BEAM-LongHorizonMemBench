@@ -4,6 +4,7 @@ import pytest
 
 from lhmsb.longhorizon.replay import StateReplayError, plan_hash, replay_plan
 from lhmsb.longhorizon.schema import (
+    ContinuationOpportunity,
     EpisodePlan,
     StateEvent,
     StateUnit,
@@ -99,6 +100,21 @@ def test_episode_plan_round_trips_to_canonical_json() -> None:
     restored = EpisodePlan.from_dict(plan.to_dict())
     assert restored == plan
     assert plan_hash(restored) == plan_hash(plan)
+
+
+def test_unknown_continuation_scope_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown continuation scope"):
+        ContinuationOpportunity(
+            opportunity_id="opp",
+            checkpoint_session=0,
+            focal_state_ids=(),
+            challenge_type="test",
+            request="continue",
+            action_catalog=(),
+            valid_action_ids=(),
+            matched_group="test",
+            continuation_scope="unknown",  # type: ignore[arg-type]
+        )
 
 
 def test_replay_tracks_current_state_and_history() -> None:

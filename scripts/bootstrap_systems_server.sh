@@ -85,7 +85,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   done
   systems_print_command verify_system_runtime.sh --data-root "${DATA_ROOT}"
   systems_print_command uv run python -m lhmsb.qualification preflight-systems \
-    --repository-only --dataset "${DATA_ROOT}/datasets/software_v4" \
+    --repository-only --dataset "${DATA_ROOT}/datasets/software_v5" \
     --config "${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only_aaai.yaml" \
     --data-root "${DATA_ROOT}"
   exit 0
@@ -291,17 +291,17 @@ temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encod
 temporary.replace(path)
 PY
 
-if [[ -f "${DATA_ROOT}/datasets/software_v4/MANIFEST.json" ]]; then
+if [[ -f "${DATA_ROOT}/datasets/software_v5/MANIFEST.json" ]]; then
   uv run python -m lhmsb.qualification preflight-systems \
     --repository-only \
-    --dataset "${DATA_ROOT}/datasets/software_v4" \
+    --dataset "${DATA_ROOT}/datasets/software_v5" \
     --config "${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only_aaai.yaml" \
     --data-root "${DATA_ROOT}" \
     --json "${DATA_ROOT}/runs/preflight-systems/repository.json"
 else
-  printf '\nBootstrap complete. The GPT-only v0.4 dataset is not present yet.\n'
+  printf '\nBootstrap complete. The GPT-only v0.5 dataset is not present yet.\n'
   printf 'Generate and freeze it before running preflight or qualification:\n'
   printf '  SEEDS=$(seq 0 49)\n'
-  printf '  python -m lhmsb.datasets generate-mem0-stateful --seeds ${SEEDS} --n-episodes 1 --n-sessions 16 --out %q/datasets/software_v4.stage\n' "${DATA_ROOT}"
-  printf '  python -m lhmsb.datasets freeze-mem0-stateful --src %q/datasets/software_v4.stage --out %q/datasets/software_v4\n' "${DATA_ROOT}" "${DATA_ROOT}"
+  printf '  python -m lhmsb.datasets generate-mem0-stateful --seeds ${SEEDS} --n-episodes 1 --n-sessions 16 --out %q/datasets/software_v5.stage\n' "${DATA_ROOT}"
+  printf '  python -m lhmsb.datasets freeze-mem0-stateful --src %q/datasets/software_v5.stage --out %q/datasets/software_v5\n' "${DATA_ROOT}" "${DATA_ROOT}"
 fi

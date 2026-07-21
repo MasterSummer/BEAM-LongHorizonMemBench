@@ -13,10 +13,12 @@ import importlib
 import inspect
 import json
 import os
+import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import IO, Any, Protocol, cast
 from urllib.parse import urlparse
 
 from lhmsb.qualification.context import PublicHistoryUnit
@@ -49,6 +51,36 @@ from lhmsb.qualification.schema import MemOSTreeProfile, PolicyProfile
 _PINNED_SOURCE_COMMIT = "583b07b998afc4debb6c5078439b0b3896f5b097"
 _OFFICIAL_TREE_MODULE = "memos.memories.textual.tree"
 _DEEPSEEK_ENDPOINT_DEFAULT = "https://api.deepseek.com"
+_EMBEDDING_ECHO_MARKER = "[search_by_embedding]"
+
+
+class _MemOSStdoutFilter:
+    """Drop an upstream debug print that serializes full embedding vectors."""
+
+    def __init__(self, target: IO[str]) -> None:
+        self.target = target
+
+    def write(self, value: str) -> int:
+        if _EMBEDDING_ECHO_MARKER in value:
+            return len(value)
+        return self.target.write(value)
+
+    def flush(self) -> None:
+        self.target.flush()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.target, name)
+
+
+@contextmanager
+def _filter_memos_stdout() -> Iterator[None]:
+    """Preserve useful upstream output while removing vector parameter dumps."""
+    current = sys.stdout
+    if isinstance(current, _MemOSStdoutFilter):
+        yield
+        return
+    with redirect_stdout(_MemOSStdoutFilter(current)):
+        yield
 
 
 class MemOSQualificationError(RuntimeError):
@@ -72,6 +104,7 @@ class MemOSLLMConfig:
     # The former 512-token cap truncated otherwise valid JSON in live runs.
     max_output_tokens: int = 4096
     provider: str = "deepseek"
+    output_language: str = "English"
 
     def __post_init__(self) -> None:
         if not self.component or not self.model_id or not self.api_key:
@@ -85,6 +118,8 @@ class MemOSLLMConfig:
             raise ValueError("MemOS controlled writer rejects the OpenAI default endpoint")
         if self.temperature < 0 or self.max_output_tokens < 1:
             raise ValueError("invalid MemOS LLM sampling configuration")
+        if self.output_language != "English":
+            raise ValueError("controlled MemOS output language must be English")
 
     @property
     def endpoint_identity(self) -> str:
@@ -151,7 +186,9 @@ class MemOSDeepSeekBridge:
         **kwargs: object,
     ) -> str:
         del kwargs
-        return self._bridge.generate_text(_memos_messages(messages))
+        return self._bridge.generate_text(
+            _memos_messages(messages, output_language=self.config.output_language)
+        )
 
     def complete(
         self,
@@ -169,7 +206,7 @@ class MemOSDeepSeekBridge:
     ) -> object:
         del kwargs
         result = self._bridge.generate_json(
-            messages,
+            _memos_messages(messages, output_language=self.config.output_language),
             response_format=response_format or {"type": "object"},
         )
         return result.payload
@@ -180,13 +217,26 @@ class MemOSDeepSeekBridge:
 
 def _memos_messages(
     value: Sequence[Mapping[str, str]] | Mapping[str, str] | str,
+    *,
+    output_language: str | None = None,
 ) -> tuple[Mapping[str, str], ...]:
     """Normalize the prompt shapes accepted by MemOS' generic LLM API."""
     if isinstance(value, str):
-        return ({"role": "user", "content": value},)
-    if isinstance(value, Mapping):
-        return (value,)
-    return tuple(value)
+        messages: tuple[Mapping[str, str], ...] = ({"role": "user", "content": value},)
+    elif isinstance(value, Mapping):
+        messages = (value,)
+    else:
+        messages = tuple(value)
+    if output_language is None:
+        return messages
+    instruction = {
+        "role": "system",
+        "content": (
+            "Preserve every format, schema, label, and token constraint in the task. "
+            f"Render all natural-language memory content in {output_language}."
+        ),
+    }
+    return (instruction, *messages)
 
 
 class MemOSTreeQualificationAdapter:
@@ -333,6 +383,7 @@ class MemOSTreeQualificationAdapter:
                 api_key=api_key,
                 temperature=0.0,
                 max_output_tokens=4096,
+                output_language=profile.output_language,
             )
             for name in ("reader", "extractor", "reorganizer", "dispatcher")
         )
@@ -440,6 +491,20 @@ class MemOSTreeQualificationAdapter:
         session_index: int,
         metadata: dict[str, object] | None = None,
     ) -> WriteSessionResult:
+        with _filter_memos_stdout():
+            return self._write_session(
+                messages,
+                session_index=session_index,
+                metadata=metadata,
+            )
+
+    def _write_session(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        session_index: int,
+        metadata: dict[str, object] | None = None,
+    ) -> WriteSessionResult:
         self._ensure_open()
         if (
             isinstance(session_index, bool)
@@ -507,6 +572,13 @@ class MemOSTreeQualificationAdapter:
         )
 
     def search_candidates(self, query: str, *, checkpoint_session: int) -> CandidateSearch:
+        with _filter_memos_stdout():
+            return self._search_candidates(
+                query,
+                checkpoint_session=checkpoint_session,
+            )
+
+    def _search_candidates(self, query: str, *, checkpoint_session: int) -> CandidateSearch:
         self._ensure_open()
         if not isinstance(query, str):
             raise ValueError("query must be text")
@@ -746,18 +818,21 @@ class MemOSTreeQualificationAdapter:
             provenance = [provenance]
         if not isinstance(provenance, Sequence) or isinstance(provenance, str | bytes):
             provenance = []
-        metadata = (
+        metadata_items: list[tuple[str, object]] = [
             (PROVENANCE_METADATA_KEY, {"backend": "memos_tree", "unit_ids": list(provenance)}),
             (GRAPH_METADATA_KEY, graph_meta),
-            ("session_index", _int(values.get("session_index", 0))),
             ("node_kind", node.kind),
             ("labels", list(labels)),
-        )
+        ]
+        # An absent upstream session is unknown, not session zero.  Omitting it
+        # lets evaluator-side lifecycle lineage supply the mutation session.
+        if "session_index" in values:
+            metadata_items.append(("session_index", _int(values["session_index"])))
         return MemoryObject(
             memory_id=node.node_id,
             content=content,
             content_hash=sha256_text(content),
-            metadata=metadata,
+            metadata=tuple(metadata_items),
             created_at=created,
             updated_at=updated,
             history_length=_int(values.get("history_length", values.get("version", 1)), minimum=0),
@@ -859,20 +934,9 @@ def _graph_diff_events(
                 "lineage": edge.relationship == "MERGED_TO",
             }
         )
-        if new_edge is not None and old_edge is None and new_edge.relationship == "MERGED_TO":
-            events.append(
-                MemoryMutationEvent(
-                    operation_id=f"memos-{session_index:06d}-edge-{edge_id}",
-                    session_index=session_index,
-                    native_event="MERGED_TO",
-                    memory_id=edge.target_id,
-                    memory_text=new_nodes.get(edge.target_id, Neo4jNode(edge.target_id)).content,
-                    old_content_hash=None,
-                    new_content_hash=None,
-                    source="neo4j_graph_diff",
-                    latency_seconds=0.0,
-                )
-            )
+        # Relationships are graph diagnostics, not memory-object mutations.
+        # Counting every MERGED_TO edge as a write inflated memory count and
+        # duplicated the same target object across reorganizer passes.
     return events, tuple(edge_events)
 
 

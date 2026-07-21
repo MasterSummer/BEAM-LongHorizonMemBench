@@ -253,8 +253,25 @@ class CausalSamplingProfile:
     intervention_repeats: int = 2
     provider_seed: int | None = None
     format_repair_attempts: int = 1
+    visible_memory_count_add_levels: tuple[int, ...] = (1, 5, 20)
+    visible_memory_count_opportunity_ids: tuple[str, ...] = (
+        "opp-premature-v2",
+        "opp-stale-v1",
+        "opp-local-valid",
+        "opp-global-local-conflict",
+    )
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "visible_memory_count_add_levels",
+            tuple(self.visible_memory_count_add_levels),
+        )
+        object.__setattr__(
+            self,
+            "visible_memory_count_opportunity_ids",
+            tuple(self.visible_memory_count_opportunity_ids),
+        )
         if self.temperature < 0:
             raise ValueError("temperature must be non-negative")
         if self.max_output_tokens < 1:
@@ -265,6 +282,22 @@ class CausalSamplingProfile:
             raise ValueError("provider_seed must be null or non-negative")
         if self.format_repair_attempts < 0:
             raise ValueError("format_repair_attempts must be non-negative")
+        if (
+            not self.visible_memory_count_add_levels
+            or any(value < 1 for value in self.visible_memory_count_add_levels)
+            or tuple(sorted(set(self.visible_memory_count_add_levels)))
+            != self.visible_memory_count_add_levels
+        ):
+            raise ValueError(
+                "visible memory count levels must be positive, unique, and increasing"
+            )
+        if (
+            not self.visible_memory_count_opportunity_ids
+            or len(self.visible_memory_count_opportunity_ids)
+            != len(set(self.visible_memory_count_opportunity_ids))
+            or any(not value for value in self.visible_memory_count_opportunity_ids)
+        ):
+            raise ValueError("visible memory count opportunity IDs must be non-empty and unique")
 
 
 @dataclass(frozen=True)
@@ -404,6 +437,7 @@ class MemOSTreeProfile:
     visible_k: int = 5
     readouts: tuple[ReadoutKind, ...] = ("native", "common_rerank")
     writer_profile_id: str = "deepseek_v4_pro_writer"
+    output_language: str = "English"
     vector_store: str = "neo4j"
     allow_fallback: bool = False
     fallback_backend: str | None = None
@@ -422,6 +456,7 @@ class MemOSTreeProfile:
             or self.source_url != "https://github.com/MemTensor/MemOS"
             or self.vector_store != "neo4j"
             or self.writer_profile_id != "deepseek_v4_pro_writer"
+            or self.output_language != "English"
         ):
             raise ValueError("MemOS Tree system profile identity is not canonical")
         _validate_common_retrieval(

@@ -71,7 +71,51 @@ done
   printf 'missing model bundle manifest\n' >&2
   exit 1
 }
-"${LHMSB_QDRANT_BIN}" --version >/dev/null
+qdrant_server_version="$("${LHMSB_QDRANT_BIN}" --version | awk '{print $2}')"
+qdrant_locked_version="$(
+  awk '
+    /^qdrant:/ { in_qdrant = 1; next }
+    in_qdrant && /^[^[:space:]]/ { exit }
+    in_qdrant && $1 == "version:" {
+      gsub(/"/, "", $2)
+      print $2
+      exit
+    }
+  ' "${REPO_ROOT}/deploy/native-runtime.lock.yaml"
+)"
+if [[ -z "${qdrant_locked_version}" ]]; then
+  printf 'Qdrant version is missing from deploy/native-runtime.lock.yaml\n' >&2
+  exit 1
+fi
+if [[ "${qdrant_server_version}" != "${qdrant_locked_version}" ]]; then
+  printf 'Qdrant server does not match native runtime lock: server=%s lock=%s\n' \
+    "${qdrant_server_version}" "${qdrant_locked_version}" >&2
+  exit 1
+fi
+for environment in core mem0; do
+  qdrant_client_version="$(
+    "$(systems_venv_python "${DATA_ROOT}" "${environment}")" -c \
+      'import importlib.metadata; print(importlib.metadata.version("qdrant-client"))'
+  )"
+  python3 - "${qdrant_server_version}" "${qdrant_client_version}" <<'PY'
+import re
+import sys
+
+def major_minor(value: str) -> tuple[int, int]:
+    match = re.match(r"^(\d+)\.(\d+)", value)
+    if match is None:
+        raise SystemExit(f"invalid Qdrant version: {value!r}")
+    return int(match.group(1)), int(match.group(2))
+
+server = major_minor(sys.argv[1])
+client = major_minor(sys.argv[2])
+if server[0] != client[0] or abs(server[1] - client[1]) > 1:
+    raise SystemExit(
+        "Qdrant client/server versions exceed the supported compatibility window: "
+        f"server={sys.argv[1]}, client={sys.argv[2]}"
+    )
+PY
+done
 JAVA_HOME="${LHMSB_JAVA_HOME}" "${LHMSB_NEO4J_HOME}/bin/neo4j" version >/dev/null
 "${LHMSB_JAVA_HOME}/bin/java" -version >/dev/null 2>&1
 "${LHMSB_TEI_BIN}" --help >/dev/null

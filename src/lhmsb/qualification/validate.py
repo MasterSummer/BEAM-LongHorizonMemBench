@@ -463,7 +463,13 @@ def _validate_semantic_attributions(
     errors: list[str],
 ) -> None:
     """Keep lifecycle provenance distinct from evaluator state attribution."""
-    allowed_methods = {"exact_signature", "unique_provenance", "ambiguous"}
+    allowed_methods = {
+        "exact_signature",
+        "lexical_signature",
+        "unique_provenance",
+        "no_match",
+        "ambiguous",
+    }
     allowed_lifecycle = {"native/exact", "inferred", "unavailable"}
     for row in inventory_rows:
         raw = row.get("evaluator_attribution_by_memory")
@@ -491,6 +497,10 @@ def _validate_semantic_attributions(
             if method == "ambiguous" and contributes is True:
                 errors.append(
                     f"ambiguous semantic attribution contributes positive coverage for {label}"
+                )
+            if method == "no_match" and contributes is True:
+                errors.append(
+                    f"no-match semantic attribution contributes positive coverage for {label}"
                 )
 
 

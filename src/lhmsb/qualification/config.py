@@ -350,6 +350,22 @@ def _load_sampling(value: object) -> CausalSamplingProfile:
                 value.get("format_repair_attempts", 1),
                 "sampling.format_repair_attempts",
             ),
+            visible_memory_count_add_levels=_integer_sequence(
+                value.get("visible_memory_count_add_levels", (1, 5, 20)),
+                "sampling.visible_memory_count_add_levels",
+            ),
+            visible_memory_count_opportunity_ids=_string_sequence(
+                value.get(
+                    "visible_memory_count_opportunity_ids",
+                    (
+                        "opp-premature-v2",
+                        "opp-stale-v1",
+                        "opp-local-valid",
+                        "opp-global-local-conflict",
+                    ),
+                ),
+                "sampling.visible_memory_count_opportunity_ids",
+            ),
         )
     except ValueError as exc:
         raise QualificationConfigError(str(exc)) from exc
@@ -454,6 +470,10 @@ def _load_system_profile(
                 writer_profile_id=_string(
                     data.get("writer_profile_id", writer_profile.profile_id),
                     "memos.writer_profile_id",
+                ),
+                output_language=_string(
+                    data.get("output_language", "English"),
+                    "memos.output_language",
                 ),
                 vector_store=_string(data.get("vector_store", "neo4j"), "memos.vector_store"),
             )
@@ -1132,6 +1152,12 @@ def _string_sequence(value: object, label: str) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise QualificationConfigError(f"{label} must be a string array")
     return tuple(_string(item, label) for item in value)
+
+
+def _integer_sequence(value: object, label: str) -> tuple[int, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise QualificationConfigError(f"{label} must be an integer array")
+    return tuple(_integer(item, label) for item in value)
 
 
 def _slug(value: str) -> str:

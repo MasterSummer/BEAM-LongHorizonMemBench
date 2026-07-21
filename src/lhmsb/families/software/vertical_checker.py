@@ -74,10 +74,20 @@ class SoftwareVerticalChecker:
         # graded against the latent current state.
         visible = set(visible_state_ids) if visible_state_ids is not None else set(current_ids)
         expected_version = "v2" if "P2" in current_ids else "v1"
-        local_exception = opportunity_id in {
-            "opp-local-valid",
-            "opp-local-valid-recheck",
-        } and "L1" in current_ids
+        continuation_scope = "governed_execution"
+        if opportunity_id is not None:
+            try:
+                opportunity = next(
+                    item
+                    for item in self._spec.plan.opportunities
+                    if item.opportunity_id == opportunity_id
+                )
+            except StopIteration as exc:
+                raise ValueError(
+                    f"unknown continuation opportunity: {opportunity_id}"
+                ) from exc
+            continuation_scope = opportunity.continuation_scope
+        local_exception = continuation_scope == "isolated_profiler" and "L1" in current_ids
         future_ids = {
             state.state_id
             for state in self._spec.plan.state_units
@@ -147,6 +157,7 @@ class SoftwareVerticalChecker:
             ("action_id", action_spec.action_id),
             ("checkpoint_session", str(checkpoint_session)),
             ("expected_version", expected_version),
+            ("continuation_scope", continuation_scope),
             ("visible_state_count", str(len(visible))),
             ("sandbox_total", str(result.total)),
             ("sandbox_returncode", str(result.returncode)),

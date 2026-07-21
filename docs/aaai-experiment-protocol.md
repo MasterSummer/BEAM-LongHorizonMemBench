@@ -6,7 +6,7 @@ response to full-run outcomes. Any later deviation is recorded as exploratory.
 
 ## Experimental unit and dataset
 
-- Dataset release: `software-vertical-mem0-v0.4.0`.
+- Dataset release: `software-vertical-mem0-v0.5.0`.
 - 50 generated episodes, 16 sessions and 15 handoffs per episode.
 - The episode is the primary repeated-trajectory unit. SCEUs within an episode
   are repeated measurements, not independent samples. Because episodes cross
@@ -37,7 +37,8 @@ readouts are reported separately.
 4. Storage quality on two independent axes: lifecycle-event provenance
    (`native event`, `inventory-diff inferred`, or `unavailable`) and semantic
    state attribution (`exact_signature`, `unique_provenance`, `ambiguous`, or
-   `unavailable`). Inferred lifecycle events are a labeled sensitivity analysis;
+   `unavailable`). Deterministic lexical signatures and supported `no_match`
+   assignments are also retained explicitly. Inferred lifecycle events are a labeled sensitivity analysis;
    a native event is never described as semantically exact merely because its
    add/update/delete operation was observed exactly.
 5. The four-stage retrieval chain: backend-retrieved, selected, model-visible,
@@ -58,9 +59,10 @@ are evaluated separately as state-evolution resolution, not counted as drift.
   (sham) object.
 - Leave-one-out is retained as a sensitivity analysis because it confounds
   content removal with memory count.
-- Memory-count scaling uses only matched add-one contrasts within the same
-  episode, checkpoint, SCEU, visible context, and policy. Early/late checkpoint
-  comparisons are not interpreted as memory scaling.
+- Memory-count scaling uses pre-registered +1, +5, and +20 neutral-object arms
+  within the same episode, checkpoint, SCEU, baseline evidence, and policy.
+  Early/late checkpoint comparisons are not interpreted as memory scaling, and
+  native live-store size remains an observational quantity.
 - Native object count and attributed logical state-unit count are both reported;
   objects-per-state and unattributed-object rates quantify backend granularity.
 
@@ -91,7 +93,8 @@ by seven conditions). Before the full run:
   ambiguous objects contribute no positive state coverage;
 - future-state, stale-state, constraint-loss, and local-over-global fixtures
   each produce their expected positive and negative checks;
-- no action supplies more than 60% of gold-valid opportunities;
+- no action supplies more than 50% of gold-valid opportunities and no opaque
+  option supplies more than 40%;
 - storage, causal-use, drift, and count-contrast metrics are finite where their
   denominators are non-zero.
 

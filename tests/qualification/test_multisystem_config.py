@@ -174,6 +174,13 @@ def test_schema_v2_repository_matrix_and_exact_pins() -> None:
         config.sampling.provider_seed,
         config.sampling.format_repair_attempts,
     ) == (0.0, 512, 2, 2, None, 1)
+    assert config.sampling.visible_memory_count_add_levels == (1, 5, 20)
+    assert config.sampling.visible_memory_count_opportunity_ids == (
+        "opp-premature-v2",
+        "opp-stale-v1",
+        "opp-local-valid",
+        "opp-global-local-conflict",
+    )
     assert config.source_lock_hash is not None
     assert len(config.source_lock_hash) == 64
     assert type(config.system_profiles["mem0"]).__name__ == "Mem0ControlledProfile"
@@ -284,6 +291,13 @@ def test_schema_v2_evaluation_records_defensively_tuple_scored_conditions() -> N
         {"intervention_repeats": 1},
         {"provider_seed": 7},
         {"format_repair_attempts": 0},
+        {"visible_memory_count_add_levels": (1, 4, 20)},
+        {
+            "visible_memory_count_opportunity_ids": (
+                "opp-premature-v2",
+                "opp-stale-v1",
+            )
+        },
     ),
 )
 def test_schema_v2_rejects_noncanonical_sampling(change: dict[str, object]) -> None:

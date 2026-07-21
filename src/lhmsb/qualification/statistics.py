@@ -47,6 +47,7 @@ def compute_episode_cluster_statistics(
         "mean_behavior_score": _mean_behavior_score,
         "behavior_correct_rate": _behavior_correct_rate,
         "eligible_drift_rate": _eligible_drift_rate,
+        "observed_drift_rate": _observed_drift_rate,
         "causal_memory_use_rate": _causal_memory_use_rate,
     }
     by_episode_cell: dict[
@@ -464,7 +465,39 @@ def _eligible_drift_rate(
     ]
     if not eligible:
         return None
-    return statistics.fmean(float(bool(row.drift_flags)) for row in eligible)
+    return statistics.fmean(
+        float(
+            bool(
+                set(row.drift_flags).intersection(
+                    {
+                        "constraint_loss",
+                        "plan_deviation",
+                        "stale_state",
+                        "local_over_global",
+                    }
+                    if row.drift_eligible_categories is None
+                    else set(row.drift_eligible_categories)
+                )
+            )
+        )
+        for row in eligible
+    )
+
+
+def _observed_drift_rate(
+    rows: Sequence[MultisystemMetricInput],
+) -> float | None:
+    if not rows:
+        return None
+    canonical = {
+        "constraint_loss",
+        "plan_deviation",
+        "stale_state",
+        "local_over_global",
+    }
+    return statistics.fmean(
+        float(bool(canonical.intersection(row.drift_flags))) for row in rows
+    )
 
 
 def _causal_memory_use_rate(

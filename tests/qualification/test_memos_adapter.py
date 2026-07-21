@@ -12,10 +12,16 @@ from lhmsb.adapters.memos_qualification import (
     MemOSTreeQualificationAdapter,
     _build_official_reader,
     _build_tree_config,
+    _graph_diff_events,
     _install_memos_bridges,
 )
 from lhmsb.qualification.memory_runtime import LifecycleCapabilities
-from lhmsb.qualification.neo4j import FakeNeo4jTransport
+from lhmsb.qualification.neo4j import (
+    FakeNeo4jTransport,
+    Neo4jEdge,
+    Neo4jGraphSnapshot,
+    Neo4jNode,
+)
 from lhmsb.qualification.schema import MemOSTreeProfile
 
 
@@ -96,6 +102,36 @@ def test_tree_adapter_writes_synchronously_and_normalizes_graph_inventory() -> N
     adapter.close()
 
 
+def test_upstream_embedding_parameter_echo_is_filtered(capsys) -> None:
+    adapter, backend, _graph = _adapter()
+    original_add = backend.add
+    original_search = backend.search
+
+    def noisy_add(payload: object, **kwargs: object) -> list[str]:
+        print("useful MemOS notice")
+        print("[search_by_embedding] query: MATCH, parameters: {'embedding': [1, 2]}")
+        return original_add(payload, **kwargs)
+
+    def noisy_search(
+        query: str,
+        *,
+        top_k: int = 20,
+        **kwargs: object,
+    ) -> list[dict[str, object]]:
+        print("[search_by_embedding] query: MATCH, parameters: {'embedding': [3, 4]}")
+        return original_search(query, top_k=top_k, **kwargs)
+
+    backend.add = noisy_add  # type: ignore[method-assign]
+    backend.search = noisy_search  # type: ignore[method-assign]
+    adapter.write_session([{"role": "user", "content": "offline"}], session_index=0)
+    adapter.search_candidates("offline", checkpoint_session=0)
+
+    captured = capsys.readouterr()
+    assert "useful MemOS notice" in captured.out
+    assert "search_by_embedding" not in captured.out
+    assert "embedding" not in captured.out
+
+
 def test_graph_expansion_and_archive_are_traceable() -> None:
     adapter, backend, graph = _adapter()
     adapter.write_session([{"role": "user", "content": "one"}], session_index=0)
@@ -123,6 +159,40 @@ def test_graph_expansion_and_archive_are_traceable() -> None:
     assert all(
         item.memory_id != "m0" for item in adapter.snapshot_inventory(checkpoint_session=1).items
     )
+
+
+def test_graph_lineage_edges_do_not_inflate_memory_object_write_count() -> None:
+    nodes = (Neo4jNode("source"), Neo4jNode("target"))
+    before = Neo4jGraphSnapshot(namespace="episode", nodes=nodes, edges=())
+    after = Neo4jGraphSnapshot(
+        namespace="episode",
+        nodes=nodes,
+        edges=(Neo4jEdge("merge", "source", "target", "MERGED_TO"),),
+    )
+
+    events, edge_events = _graph_diff_events(before, after, session_index=3)
+    assert events == []
+    assert edge_events == (
+        {
+            "edge_id": "merge",
+            "source_id": "source",
+            "target_id": "target",
+            "relationship": "MERGED_TO",
+            "event": "ADD",
+            "lineage": True,
+        },
+    )
+
+
+def test_missing_native_session_metadata_is_not_coerced_to_session_zero() -> None:
+    adapter, _backend, graph = _adapter()
+    graph.add_node(namespace="episode", node_id="native", properties={"memory": "fact"})
+    item = next(
+        item
+        for item in adapter.snapshot_inventory(checkpoint_session=3).items
+        if item.memory_id == "native"
+    )
+    assert "session_index" not in dict(item.metadata)
 
 
 def test_missing_wait_api_and_nonempty_namespace_are_terminal() -> None:
@@ -280,6 +350,8 @@ def test_controlled_bridges_replace_every_official_memos_llm_reference() -> None
 
 def test_memos_generate_keeps_official_plain_text_protocol() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
+        body = request.read().decode("utf-8")
+        assert "Render all natural-language memory content in English" in body
         return httpx.Response(
             200,
             json={

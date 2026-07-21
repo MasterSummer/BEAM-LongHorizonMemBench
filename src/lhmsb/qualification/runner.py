@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -775,19 +776,22 @@ def _alignment_snapshot(
             session,
         )
     previous = prior_attributions or {}
-    event_by_memory: dict[str, MemoryMutationEvent] = {}
+    events_by_memory: dict[str, list[MemoryMutationEvent]] = defaultdict(list)
     for event in lifecycle_events:
-        event_by_memory.setdefault(event.memory_id, event)
+        events_by_memory[event.memory_id].append(event)
     signature_by_state = {signature.state_id: signature for signature in signatures}
     for item in inventory.items:
         metadata = dict(item.metadata)
-        source_session = metadata.get("session_index")
-        eligible = (
-            events_by_session.get(source_session, ())
-            if isinstance(source_session, int)
-            else ()
+        metadata_session = metadata.get("session_index")
+        lifecycle_candidates = events_by_memory.get(item.memory_id, [])
+        lifecycle = next(
+            (
+                event
+                for event in reversed(lifecycle_candidates)
+                if event.new_content_hash == item.content_hash
+            ),
+            lifecycle_candidates[-1] if lifecycle_candidates else None,
         )
-        lifecycle = event_by_memory.get(item.memory_id)
         prior = previous.get(item.memory_id)
         mode: ProvenanceMode
         if lifecycle is not None:
@@ -806,9 +810,19 @@ def _alignment_snapshot(
         else:
             mode = "unavailable"
             source_session_value = (
-                source_session if isinstance(source_session, int) else None
+                metadata_session if isinstance(metadata_session, int) else None
             )
             lifecycle_ids = ()
+        source_session = (
+            metadata_session
+            if isinstance(metadata_session, int)
+            else source_session_value
+        )
+        eligible = (
+            events_by_session.get(source_session, ())
+            if isinstance(source_session, int)
+            else ()
+        )
         attribution = attribute_memory(
             item.memory_id,
             item.content,

@@ -44,18 +44,18 @@ one full 16-session episode from this same immutable release:
 SEEDS=$(seq 0 49)
 python -m lhmsb.datasets generate-mem0-stateful \
   --seeds ${SEEDS} --n-episodes 1 --n-sessions 16 \
-  --out /data/lhmsb/datasets/software_v4.stage
+  --out /data/lhmsb/datasets/software_v5.stage
 python -m lhmsb.datasets freeze-mem0-stateful \
-  --src /data/lhmsb/datasets/software_v4.stage \
-  --out /data/lhmsb/datasets/software_v4
+  --src /data/lhmsb/datasets/software_v5.stage \
+  --out /data/lhmsb/datasets/software_v5
 python -m lhmsb.datasets verify-mem0-stateful \
-  --frozen /data/lhmsb/datasets/software_v4
+  --frozen /data/lhmsb/datasets/software_v5
 python -m lhmsb.datasets regen-check-mem0-stateful \
-  --frozen /data/lhmsb/datasets/software_v4
+  --frozen /data/lhmsb/datasets/software_v5
 ```
 
 The manifest should report 50 episodes, 16 sessions, and release
-`software-vertical-mem0-v0.4.0`. Do not run the pilot from a dirty checkout.
+`software-vertical-mem0-v0.5.0`. Do not run the pilot from a dirty checkout.
 
 Every wrapper supports a side-effect-free dry run:
 
@@ -65,6 +65,19 @@ scripts/preflight_systems.sh --dry-run --data-root /tmp/lhmsb
 scripts/run_systems_smoke.sh --dry-run --data-root /tmp/lhmsb
 scripts/run_systems_qualification.sh --dry-run --data-root /tmp/lhmsb
 ```
+
+Run the five-scenario calibration before the confirmatory matrix:
+
+```bash
+scripts/run_systems_qualification.sh \
+  --data-root /home/root123/lhmsb-native-data \
+  --env-file /home/root123/lhmsb-native-data/operator.env \
+  --run-name systems-gpt56-calibration-v5 \
+  --episode-limit 5 --keep-going
+```
+
+Only proceed to the unbounded 50-episode command after the calibration report
+passes the measurement-readiness gates.
 
 Run the repository/runtime/service gate first. Services receive a unique job
 instance, bind to `127.0.0.1`, use per-run Qdrant and Neo4j state, and record
@@ -83,19 +96,19 @@ After inspection, submit the 16-session qualification:
 PREP_JOB=$(sbatch --parsable \
   --output="${LHMSB_DATA_ROOT}/logs/slurm-prepare-%j.out" \
   --error="${LHMSB_DATA_ROOT}/logs/slurm-prepare-%j.err" \
-  --export=ALL,LHMSB_SLURM_MODE=prepare,LHMSB_RUN_NAME=gpt-only-v4 \
+  --export=ALL,LHMSB_SLURM_MODE=prepare,LHMSB_RUN_NAME=gpt-only-v5 \
   deploy/slurm/systems_qualification.sbatch)
 sbatch --array=0-349%16 --dependency="afterok:${PREP_JOB}" \
   --output="${LHMSB_DATA_ROOT}/logs/slurm-eval-%A_%a.out" \
   --error="${LHMSB_DATA_ROOT}/logs/slurm-eval-%A_%a.err" \
-  --export=ALL,LHMSB_RUN_NAME=gpt-only-v4 \
+  --export=ALL,LHMSB_RUN_NAME=gpt-only-v5 \
   deploy/slurm/systems_evaluate_task.sbatch
 "${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
-  aggregate-systems --run-dir /data/lhmsb/runs/systems/gpt-only-v4 \
-  --out /data/lhmsb/runs/systems/gpt-only-v4/report
+  aggregate-systems --run-dir /data/lhmsb/runs/systems/gpt-only-v5 \
+  --out /data/lhmsb/runs/systems/gpt-only-v5/report
 "${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
-  validate-systems --report /data/lhmsb/runs/systems/gpt-only-v4/report \
-  --json /data/lhmsb/runs/systems/gpt-only-v4/validation.json
+  validate-systems --report /data/lhmsb/runs/systems/gpt-only-v5/report \
+  --json /data/lhmsb/runs/systems/gpt-only-v5/validation.json
 ```
 
 The preparation job requests two generic NVIDIA GPUs, assigns one to embedding
@@ -122,13 +135,16 @@ same run identity.
     tasks.jsonl
     prefixes/
     results/
-    report/{metrics.json,metrics_by_cell.json,scorecard.csv,statistics.json}
+    report/{metrics.json,metrics_by_cell.json,scorecard.csv,storage_scorecard.csv,
+            memory_count_scorecard.csv,statistics.json,measurement_gates.json}
     report/episodes/<episode-id>/{metrics.json,scorecard.csv,summary.json}
     validation.json
 ```
 
 The evaluator reconstructs `stored → candidate → retrieved → visible →
-behavior`. Memory-object count is the primary scale variable; tokens,
+behavior`. The causal scaling variable is the evaluator-controlled number of
+model-visible memory objects (+1/+5/+20 within the same SCEU); native live
+object count is reported separately as an observational diagnostic. Tokens,
 characters, bytes, calls, and latency remain auxiliary diagnostics. Native and
 common-rerank readouts are kept separate.
 

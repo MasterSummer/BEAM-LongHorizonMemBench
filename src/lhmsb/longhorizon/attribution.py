@@ -3,17 +3,53 @@
 from __future__ import annotations
 
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
 from lhmsb.longhorizon.replay import replay_plan
 from lhmsb.longhorizon.schema import EpisodePlan
 
-AttributionMethod = Literal["exact_signature", "unique_provenance", "ambiguous"]
+AttributionMethod = Literal[
+    "exact_signature",
+    "lexical_signature",
+    "unique_provenance",
+    "no_match",
+    "ambiguous",
+]
 ProvenanceMode = Literal["native/exact", "inferred", "unavailable"]
 FactPolarity = Literal["positive", "negative"]
 _POSITIVE_WRITE_EVENT_TYPES = frozenset(
     {"add", "replace", "priority_change", "scope_change", "reopen"}
+)
+_LEXICAL_MATCH_MIN = 0.72
+_LEXICAL_MATCH_MARGIN = 0.12
+_LEXICAL_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "has",
+        "in",
+        "is",
+        "it",
+        "must",
+        "of",
+        "on",
+        "only",
+        "or",
+        "the",
+        "this",
+        "to",
+        "was",
+        "with",
+    }
 )
 
 
@@ -125,31 +161,77 @@ def attribute_memory(
 ) -> MemoryAttribution:
     """Attribute one memory without an LLM or embedding threshold."""
     normalized = normalize_fact_text(text)
-    exact = tuple(
+    variant_exact = tuple(
         sorted(
             signature.state_id
             for signature in signatures
-            if _is_exact_match(normalized, signature)
+            if _matches_allowed_variant(normalized, signature)
         )
     )
-    if len(exact) == 1:
+    if len(variant_exact) == 1:
         return MemoryAttribution(
             memory_id=memory_id,
-            state_ids=exact,
+            state_ids=variant_exact,
             method="exact_signature",
             contributes_positive_coverage=True,
-            reason="memory text uniquely satisfies a complete fact signature",
+            reason="memory text uniquely contains a generated canonical fact surface",
             provenance_mode=provenance_mode,
             source_event_ids=source_event_ids,
             source_session=source_session,
         )
-    if len(exact) > 1:
+    if len(variant_exact) > 1:
         return MemoryAttribution(
             memory_id=memory_id,
-            state_ids=exact,
+            state_ids=variant_exact,
+            method="ambiguous",
+            contributes_positive_coverage=False,
+            reason="memory text contains multiple generated canonical fact surfaces",
+            provenance_mode=provenance_mode,
+            source_event_ids=source_event_ids,
+            source_session=source_session,
+        )
+
+    anchor_exact = tuple(
+        sorted(
+            signature.state_id
+            for signature in signatures
+            if _matches_anchor_groups(normalized, signature)
+        )
+    )
+    if len(anchor_exact) == 1:
+        return MemoryAttribution(
+            memory_id=memory_id,
+            state_ids=anchor_exact,
+            method="exact_signature",
+            contributes_positive_coverage=True,
+            reason="memory text uniquely satisfies every fact-signature anchor group",
+            provenance_mode=provenance_mode,
+            source_event_ids=source_event_ids,
+            source_session=source_session,
+        )
+    if len(anchor_exact) > 1:
+        return MemoryAttribution(
+            memory_id=memory_id,
+            state_ids=anchor_exact,
             method="ambiguous",
             contributes_positive_coverage=False,
             reason="memory text satisfies multiple complete fact signatures",
+            provenance_mode=provenance_mode,
+            source_event_ids=source_event_ids,
+            source_session=source_session,
+        )
+
+    lexical = _unique_lexical_match(normalized, signatures)
+    if lexical is not None:
+        return MemoryAttribution(
+            memory_id=memory_id,
+            state_ids=(lexical,),
+            method="lexical_signature",
+            contributes_positive_coverage=True,
+            reason=(
+                "memory text has one high-coverage lexical match against the generated "
+                "canonical fact surfaces"
+            ),
             provenance_mode=provenance_mode,
             source_event_ids=source_event_ids,
             source_session=source_session,
@@ -178,9 +260,20 @@ def attribute_memory(
             source_event_ids=source_event_ids,
             source_session=source_session,
         )
+    if not partial_matches and not _contains_cjk(text):
+        return MemoryAttribution(
+            memory_id=memory_id,
+            state_ids=(),
+            method="no_match",
+            contributes_positive_coverage=False,
+            reason="memory text contains no supported fact-signature evidence",
+            provenance_mode=provenance_mode,
+            source_event_ids=source_event_ids,
+            source_session=source_session,
+        )
     return MemoryAttribution(
         memory_id=memory_id,
-        state_ids=exact or partial_matches,
+        state_ids=partial_matches,
         method="ambiguous",
         contributes_positive_coverage=False,
         reason="zero, contradictory, or multiple state assignments remain possible",
@@ -204,6 +297,11 @@ def build_software_fact_signatures(plan: EpisodePlan) -> tuple[FactSignature, ..
     signatures: list[FactSignature] = []
     for state in plan.state_units:
         definition = catalog[state.state_id]
+        allowed_surface_variants = tuple(
+            dict.fromkeys(
+                (*_state_surface_variants(state.value), *definition.allowed_surface_variants)
+            )
+        )
         source_events = tuple(
             event
             for event in plan.events
@@ -215,7 +313,7 @@ def build_software_fact_signatures(plan: EpisodePlan) -> tuple[FactSignature, ..
             FactSignature(
                 state_id=state.state_id,
                 required_anchor_groups=definition.required_anchor_groups,
-                allowed_surface_variants=definition.allowed_surface_variants,
+                allowed_surface_variants=allowed_surface_variants,
                 negative_anchors=definition.negative_anchors,
                 polarity=definition.polarity,
                 version=state.version,
@@ -251,18 +349,88 @@ def _has_positive_anchor(text: str, signature: FactSignature) -> bool:
     )
 
 
-def _is_exact_match(text: str, signature: FactSignature) -> bool:
+def _matches_allowed_variant(text: str, signature: FactSignature) -> bool:
     if _has_negative_anchor(text, signature):
         return False
-    if any(
+    return any(
         _contains_phrase(text, variant)
         for variant in signature.allowed_surface_variants
-    ):
-        return True
+    )
+
+
+def _matches_anchor_groups(text: str, signature: FactSignature) -> bool:
+    if _has_negative_anchor(text, signature):
+        return False
     return all(
         any(_contains_phrase(text, anchor) for anchor in group)
         for group in signature.required_anchor_groups
     )
+
+
+def _state_surface_variants(value: object) -> tuple[str, ...]:
+    if isinstance(value, Mapping):
+        text = value.get("text")
+        if isinstance(text, str) and text.strip():
+            return (text,)
+        branch = value.get("branch")
+        status = value.get("status")
+        if isinstance(branch, str) and isinstance(status, str):
+            return (f"branch {branch} status {status}",)
+    if isinstance(value, str) and value.strip():
+        return (value,)
+    return ()
+
+
+def _lexical_tokens(text: str) -> frozenset[str]:
+    output: set[str] = set()
+    for raw in normalize_fact_text(text).split():
+        if raw in _LEXICAL_STOPWORDS:
+            continue
+        token = raw
+        if len(token) > 5 and token.endswith("ing"):
+            token = token[:-3]
+        elif len(token) > 4 and token.endswith("ied"):
+            token = f"{token[:-3]}y"
+        elif len(token) > 4 and token.endswith(("ed", "es")):
+            token = token[:-2]
+        elif len(token) > 3 and token.endswith("s"):
+            token = token[:-1]
+        if len(token) >= 3 or (len(token) == 2 and token.startswith("v")):
+            output.add(token)
+    return frozenset(output)
+
+
+def _contains_cjk(text: str) -> bool:
+    return sum("\u3400" <= character <= "\u9fff" for character in text) >= 2
+
+
+def _unique_lexical_match(
+    normalized_text: str,
+    signatures: tuple[FactSignature, ...],
+) -> str | None:
+    memory_tokens = _lexical_tokens(normalized_text)
+    if len(memory_tokens) < 3:
+        return None
+    scored: list[tuple[float, str]] = []
+    for signature in signatures:
+        if _has_negative_anchor(normalized_text, signature):
+            continue
+        scores: list[float] = []
+        for variant in signature.allowed_surface_variants:
+            fact_tokens = _lexical_tokens(variant)
+            if len(fact_tokens) < 3:
+                continue
+            scores.append(len(memory_tokens.intersection(fact_tokens)) / len(fact_tokens))
+        if scores:
+            scored.append((max(scores), signature.state_id))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    best_score, best_state = scored[0]
+    runner_up = scored[1][0] if len(scored) > 1 else 0.0
+    if best_score < _LEXICAL_MATCH_MIN or best_score - runner_up < _LEXICAL_MATCH_MARGIN:
+        return None
+    return best_state
 
 
 def _software_catalog() -> dict[str, _SignatureDefinition]:

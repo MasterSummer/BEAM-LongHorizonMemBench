@@ -25,6 +25,32 @@ from lhmsb.qualification.runner import (
     QualificationMatrixResult,
 )
 
+_CANONICAL_DRIFT_CATEGORIES = (
+    "constraint_loss",
+    "plan_deviation",
+    "stale_state",
+    "local_over_global",
+)
+
+
+def _is_memory_count_contrast(value: object) -> bool:
+    """Return whether a serialized contrast changes memory-object count.
+
+    ``add_one`` is retained for schema-v1 result compatibility.  Schema-v2
+    count-load probes use explicit ``add_<N>`` labels so reports can recover
+    the pre-registered object-count level without consulting call IDs.
+    """
+
+    label = str(value)
+    if label == "delete_one":
+        return True
+    if label == "add_one":
+        return True
+    if not label.startswith("add_"):
+        return False
+    suffix = label.removeprefix("add_")
+    return suffix.isdigit() and int(suffix) > 0
+
 
 @dataclass(frozen=True)
 class MetricValue:
@@ -371,6 +397,13 @@ def compute_multisystem_scorecard(
         aggregate_eligible = [
             row for row in rows if _any_drift_is_eligible(row)
         ]
+        observed_by_flag = {
+            flag: _ratio_value(
+                sum(flag in row.drift_flags for row in rows),
+                len(rows),
+            )
+            for flag in _CANONICAL_DRIFT_CATEGORIES
+        }
         output.append(
             {
                 "policy_profile_id": key[0],
@@ -432,6 +465,11 @@ def compute_multisystem_scorecard(
                 "constraint_loss_eligible_n": len(
                     eligible_by_flag["constraint_loss"]
                 ),
+                "targeted_constraint_loss_rate": _eligible_flag_rate(
+                    eligible_by_flag["constraint_loss"],
+                    "constraint_loss",
+                ),
+                "observed_constraint_loss_rate": observed_by_flag["constraint_loss"],
                 "current_plan_deviation_rate": _eligible_flag_rate(
                     eligible_by_flag["plan_deviation"],
                     "plan_deviation",
@@ -439,6 +477,11 @@ def compute_multisystem_scorecard(
                 "plan_deviation_eligible_n": len(
                     eligible_by_flag["plan_deviation"]
                 ),
+                "targeted_plan_deviation_rate": _eligible_flag_rate(
+                    eligible_by_flag["plan_deviation"],
+                    "plan_deviation",
+                ),
+                "observed_plan_deviation_rate": observed_by_flag["plan_deviation"],
                 "stale_state_action_rate": _eligible_flag_rate(
                     eligible_by_flag["stale_state"],
                     "stale_state",
@@ -446,6 +489,11 @@ def compute_multisystem_scorecard(
                 "stale_state_eligible_n": len(
                     eligible_by_flag["stale_state"]
                 ),
+                "targeted_stale_state_rate": _eligible_flag_rate(
+                    eligible_by_flag["stale_state"],
+                    "stale_state",
+                ),
+                "observed_stale_state_rate": observed_by_flag["stale_state"],
                 "local_over_global_rate": _eligible_flag_rate(
                     eligible_by_flag["local_over_global"],
                     "local_over_global",
@@ -453,11 +501,33 @@ def compute_multisystem_scorecard(
                 "local_over_global_eligible_n": len(
                     eligible_by_flag["local_over_global"]
                 ),
+                "targeted_local_over_global_rate": _eligible_flag_rate(
+                    eligible_by_flag["local_over_global"],
+                    "local_over_global",
+                ),
+                "observed_local_over_global_rate": observed_by_flag[
+                    "local_over_global"
+                ],
                 "aggregate_drift_rate": _ratio_value(
-                    sum(bool(row.drift_flags) for row in aggregate_eligible),
+                    sum(_has_targeted_drift(row) for row in aggregate_eligible),
                     len(aggregate_eligible),
                 ),
                 "aggregate_drift_eligible_n": len(aggregate_eligible),
+                "targeted_aggregate_drift_rate": _ratio_value(
+                    sum(_has_targeted_drift(row) for row in aggregate_eligible),
+                    len(aggregate_eligible),
+                ),
+                "observed_aggregate_drift_rate": _ratio_value(
+                    sum(_has_observed_drift(row) for row in rows),
+                    len(rows),
+                ),
+                "off_target_drift_rate": _ratio_value(
+                    sum(_has_off_target_drift(row) for row in rows),
+                    len(rows),
+                ),
+                "off_target_drift_n": sum(
+                    _has_off_target_drift(row) for row in rows
+                ),
                 "memory_count_contrast_rate": _ratio_value(
                     sum(row.count_contrast_action_flips for row in rows),
                     sum(row.count_contrast_count for row in rows),
@@ -502,6 +572,37 @@ def _any_drift_is_eligible(
 ) -> bool:
     eligible = row.drift_eligible_categories
     return eligible is None or bool(eligible)
+
+
+def _has_targeted_drift(
+    row: BehaviorMetricInput | MultisystemMetricInput,
+) -> bool:
+    """Whether an observed flag matches this probe's preregistered construct."""
+    eligible = row.drift_eligible_categories
+    targeted = (
+        set(_CANONICAL_DRIFT_CATEGORIES)
+        if eligible is None
+        else set(eligible)
+    )
+    return bool(targeted.intersection(row.drift_flags))
+
+
+def _has_observed_drift(
+    row: BehaviorMetricInput | MultisystemMetricInput,
+) -> bool:
+    """Whether any canonical drift occurred, independent of probe targeting."""
+    return bool(set(_CANONICAL_DRIFT_CATEGORIES).intersection(row.drift_flags))
+
+
+def _has_off_target_drift(
+    row: BehaviorMetricInput | MultisystemMetricInput,
+) -> bool:
+    """Whether drift occurred outside the probe's preregistered categories."""
+    eligible = row.drift_eligible_categories
+    if eligible is None:
+        return False
+    observed = set(_CANONICAL_DRIFT_CATEGORIES).intersection(row.drift_flags)
+    return bool(observed.difference(eligible))
 
 
 def _aggregate_observation_status(statuses: Sequence[str]) -> str:
@@ -686,8 +787,9 @@ def compute_qualification_metrics(
                 count_contrasts = tuple(
                     item
                     for item in row.interventions
-                    if getattr(item, "count_contrast", None)
-                    in {"delete_one", "add_one"}
+                    if _is_memory_count_contrast(
+                        getattr(item, "count_contrast", None)
+                    )
                 )
                 opportunity = opportunity_by_id[row.opportunity_id]
                 checkpoint_replay = replay_plan(
@@ -917,8 +1019,9 @@ def multisystem_observations_from_results(
                 count_contrasts = tuple(
                     item
                     for item in intervention_rows
-                    if str(getattr(item, "count_contrast", ""))
-                    == "add_one"
+                    if _is_memory_count_contrast(
+                        getattr(item, "count_contrast", "")
+                    )
                     or str(getattr(item, "intervention_kind", "")) == "count_contrast"
                 )
                 selected = str(getattr(row, "selected_action_id", ""))
@@ -1306,16 +1409,29 @@ def _artifact_attributions(
     output: dict[str, MemoryAttribution] = {}
     for item in inventory.items:
         metadata = dict(item.metadata)
-        source_session = metadata.get("session_index")
+        metadata_session = metadata.get("session_index")
+        events = events_by_memory.get(item.memory_id, [])
+        lifecycle = next(
+            (
+                event
+                for event in reversed(events)
+                if getattr(event, "new_content_hash", None) == item.content_hash
+            ),
+            events[-1] if events else None,
+        )
+        source_session = (
+            metadata_session
+            if isinstance(metadata_session, int)
+            else getattr(lifecycle, "session_index", None)
+        )
         eligible = (
             eligible_write_state_ids(spec.plan, source_session)
             if isinstance(source_session, int) and source_session < checkpoint_session
             else ()
         )
-        events = events_by_memory.get(item.memory_id, [])
         provenance_mode: ProvenanceMode = cast(
             ProvenanceMode,
-            _event_provenance(events[-1]) if events else "unavailable",
+            _event_provenance(lifecycle) if lifecycle is not None else "unavailable",
         )
         attribution = attribute_memory(
             item.memory_id,
@@ -1537,7 +1653,9 @@ def _state_metrics(
     )
     for method in (
         "exact_signature",
+        "lexical_signature",
         "unique_provenance",
+        "no_match",
         "ambiguous",
         "unavailable",
     ):
@@ -1658,7 +1776,13 @@ def _aligned_attribution_methods(
     count: int,
 ) -> tuple[str, ...]:
     """Return one explicit semantic-attribution label per memory object."""
-    allowed = {"exact_signature", "unique_provenance", "ambiguous"}
+    allowed = {
+        "exact_signature",
+        "lexical_signature",
+        "unique_provenance",
+        "no_match",
+        "ambiguous",
+    }
     output = tuple(
         method if method in allowed else "unavailable"
         for method in methods[:count]
@@ -1923,12 +2047,6 @@ def _behavior_metrics(
         sum(item.count_contrast_behavior_changes for item in observations),
         count_contrasts,
     )
-    flag_names = (
-        "constraint_loss",
-        "plan_deviation",
-        "stale_state",
-        "local_over_global",
-    )
     for flag, metric_name in (
         ("constraint_loss", "constraint_loss_rate"),
         ("plan_deviation", "current_plan_deviation_rate"),
@@ -1942,16 +2060,43 @@ def _behavior_metrics(
             sum(flag in item.drift_flags for item in eligible),
             len(eligible),
         )
+        targeted_name = {
+            "constraint_loss": "targeted_constraint_loss_rate",
+            "plan_deviation": "targeted_plan_deviation_rate",
+            "stale_state": "targeted_stale_state_rate",
+            "local_over_global": "targeted_local_over_global_rate",
+        }[flag]
+        observed_name = {
+            "constraint_loss": "observed_constraint_loss_rate",
+            "plan_deviation": "observed_plan_deviation_rate",
+            "stale_state": "observed_stale_state_rate",
+            "local_over_global": "observed_local_over_global_rate",
+        }[flag]
+        values[targeted_name] = values[metric_name]
+        values[observed_name] = safe_ratio(
+            sum(flag in item.drift_flags for item in observations),
+            len(observations),
+        )
         values[f"{metric_name}_eligible_n"] = safe_ratio(len(eligible), 1)
     aggregate_eligible = [
         item for item in observations if _any_drift_is_eligible(item)
     ]
     values["aggregate_drift_rate"] = safe_ratio(
-        sum(
-            any(flag in item.drift_flags for flag in flag_names)
-            for item in aggregate_eligible
-        ),
+        sum(_has_targeted_drift(item) for item in aggregate_eligible),
         len(aggregate_eligible),
+    )
+    values["targeted_aggregate_drift_rate"] = values["aggregate_drift_rate"]
+    values["observed_aggregate_drift_rate"] = safe_ratio(
+        sum(_has_observed_drift(item) for item in observations),
+        len(observations),
+    )
+    values["off_target_drift_rate"] = safe_ratio(
+        sum(_has_off_target_drift(item) for item in observations),
+        len(observations),
+    )
+    values["off_target_drift_n"] = safe_ratio(
+        sum(_has_off_target_drift(item) for item in observations),
+        1,
     )
     values["aggregate_drift_rate_eligible_n"] = safe_ratio(
         len(aggregate_eligible),
@@ -1991,7 +2136,7 @@ def _behavior_metrics(
         )
         values[f"aggregate_drift_rate{suffix}"] = safe_ratio(
             sum(
-                any(flag in item.drift_flags for flag in flag_names)
+                _has_targeted_drift(item)
                 for item in rows
                 if _any_drift_is_eligible(item)
             ),

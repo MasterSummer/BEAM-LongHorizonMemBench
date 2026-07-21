@@ -111,3 +111,40 @@ def test_statistics_cluster_sceu_rows_by_episode_and_pair_cells() -> None:
     assert scenario_comparison["mean_difference"] == pytest.approx(0.5)
     assert "Analysis unit: **episode**" in statistics_markdown(first)
     assert "Semantic-scenario sensitivity" in statistics_markdown(first)
+
+
+def test_statistics_separates_targeted_and_observed_drift() -> None:
+    rows = (
+        MultisystemMetricInput(
+            policy_profile_id="gpt",
+            condition="oracle_current_state",
+            readout="none",
+            result_id="e0-0",
+            behavior_score=0.0,
+            is_correct=False,
+            episode_id="e0",
+            drift_flags=("constraint_loss",),
+            drift_eligible_categories=("stale_state",),
+        ),
+        MultisystemMetricInput(
+            policy_profile_id="gpt",
+            condition="oracle_current_state",
+            readout="none",
+            result_id="e0-1",
+            behavior_score=1.0,
+            is_correct=True,
+            episode_id="e0",
+            drift_eligible_categories=("stale_state",),
+        ),
+    )
+    payload = compute_episode_cluster_statistics(
+        rows,
+        bootstrap_resamples=10,
+        permutation_resamples=10,
+    )
+    cells = {
+        row["metric"]: row
+        for row in payload["cells"]  # type: ignore[index]
+    }
+    assert cells["eligible_drift_rate"]["mean"] == 0.0
+    assert cells["observed_drift_rate"]["mean"] == 0.5

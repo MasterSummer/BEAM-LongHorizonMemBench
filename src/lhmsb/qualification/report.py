@@ -19,6 +19,7 @@ from lhmsb.qualification.metrics import (
     StateCheckpointMetricInput,
     UsageMetricInput,
     _artifact_attributions,
+    _is_memory_count_contrast,
     compute_multisystem_metrics,
     compute_multisystem_metrics_by_cell,
     compute_multisystem_scorecard,
@@ -46,6 +47,12 @@ from lhmsb.qualification.statistics import (
 )
 
 REPORT_SCHEMA_VERSION = 2
+_CANONICAL_DRIFT_CATEGORIES = (
+    "constraint_loss",
+    "plan_deviation",
+    "stale_state",
+    "local_over_global",
+)
 REQUIRED_REPORT_ARTIFACTS: tuple[str, ...] = (
     "run_manifest.json",
     "tasks.jsonl",
@@ -64,6 +71,10 @@ REQUIRED_REPORT_ARTIFACTS: tuple[str, ...] = (
     "summary.json",
     "scorecard.csv",
     "scorecard.md",
+    "storage_scorecard.csv",
+    "storage_scorecard.md",
+    "memory_count_scorecard.csv",
+    "memory_count_scorecard.md",
     "statistics.json",
     "statistics.md",
     "heuristic_baselines.json",
@@ -106,16 +117,58 @@ _SCORECARD_FIELDS = (
     "probed_memory_causal_use_rate",
     "constraint_loss_rate",
     "constraint_loss_eligible_n",
+    "targeted_constraint_loss_rate",
+    "observed_constraint_loss_rate",
     "current_plan_deviation_rate",
     "plan_deviation_eligible_n",
+    "targeted_plan_deviation_rate",
+    "observed_plan_deviation_rate",
     "stale_state_action_rate",
     "stale_state_eligible_n",
+    "targeted_stale_state_rate",
+    "observed_stale_state_rate",
     "local_over_global_rate",
     "local_over_global_eligible_n",
+    "targeted_local_over_global_rate",
+    "observed_local_over_global_rate",
     "aggregate_drift_rate",
     "aggregate_drift_eligible_n",
+    "targeted_aggregate_drift_rate",
+    "observed_aggregate_drift_rate",
+    "off_target_drift_rate",
+    "off_target_drift_n",
     "memory_count_contrast_rate",
     "memory_count_behavior_change_rate",
+)
+_STORAGE_SCORECARD_FIELDS = (
+    "policy_profile_id",
+    "condition",
+    "provenance_track",
+    "source_readout",
+    "write_coverage",
+    "write_selectivity",
+    "current_state_storage_precision",
+    "current_state_storage_recall",
+    "current_state_storage_f1",
+    "stale_state_retention_rate",
+    "update_delete_responsiveness",
+    "write_to_continuation_alignment",
+    "semantic_attribution_resolvability",
+    "storage_provenance_completeness",
+    "live_memory_count",
+    "native_objects_per_logical_state_unit",
+)
+_MEMORY_COUNT_SCORECARD_FIELDS = (
+    "policy_profile_id",
+    "condition",
+    "readout",
+    "opportunity_id",
+    "count_delta",
+    "n_contrasts",
+    "action_flip_rate",
+    "behavior_change_rate",
+    "mean_baseline_visible_memory_count",
+    "mean_intervention_visible_memory_count",
 )
 
 
@@ -188,10 +241,14 @@ def write_qualification_report(
             ),
         )
         scorecard_rows = list(compute_multisystem_scorecard(observations))
+        storage_scorecard_rows = _storage_scorecard_rows(metrics_by_cell)
     else:
         metrics = compute_qualification_metrics(matrix, specs)
         metrics_by_cell = ()
         scorecard_rows = _scorecard_rows(matrix)
+        storage_scorecard_rows = _storage_scorecard_rows(
+            _metrics_by_cell(matrix, specs)
+        )
         observations = ()
     episode_observations = (
         observations
@@ -220,6 +277,9 @@ def write_qualification_report(
         ),
     )
     summary_payload = _summary(matrix, rows)
+    memory_count_scorecard_rows = _memory_count_scorecard_rows(
+        rows["interventions.jsonl"]
+    )
     heuristic_payload = compute_heuristic_baselines(specs)
     measurement_payload = compute_measurement_gates(
         matrix,
@@ -238,6 +298,42 @@ def write_qualification_report(
     _atomic_write(
         output_directory / "scorecard.md",
         _scorecard_markdown(scorecard_rows).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "storage_scorecard.csv",
+        _table_csv(storage_scorecard_rows, _STORAGE_SCORECARD_FIELDS).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "storage_scorecard.md",
+        _table_markdown(
+            storage_scorecard_rows,
+            _STORAGE_SCORECARD_FIELDS,
+            title="Storage lifecycle scorecard",
+            note=(
+                "Exact and inferred lifecycle provenance are reported separately; "
+                "readout is recorded only as the deduplicated source cell."
+            ),
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "memory_count_scorecard.csv",
+        _table_csv(
+            memory_count_scorecard_rows,
+            _MEMORY_COUNT_SCORECARD_FIELDS,
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "memory_count_scorecard.md",
+        _table_markdown(
+            memory_count_scorecard_rows,
+            _MEMORY_COUNT_SCORECARD_FIELDS,
+            title="Matched visible-memory-count scorecard",
+            note=(
+                "Each row compares the same checkpoint and SCEU after adding a "
+                "pre-registered number of neutral, model-visible memory objects. "
+                "Native live-store size is observational and is reported separately."
+            ),
+        ).encode("utf-8"),
     )
     episode_groups = {
         episode_id: str(
@@ -476,8 +572,9 @@ def _limitations_markdown(
         "- Behaviorally used memory is a conservative lower bound from repeat-stable, "
         "state-targeted replacement interventions. Failure to identify a memory as used does "
         "not prove that it had no influence.",
-        "- Drift rates are conditional on preregistered eligible opportunities; they are not "
-        "unconditional estimates of all possible long-horizon drift.",
+        "- Targeted drift rates use preregistered category-specific opportunities. Observed "
+        "rates additionally report every canonical drift flag, and off-target drift is "
+        "reported separately rather than silently discarded.",
         "- Memory-count effects use matched within-opportunity contrasts and must not be "
         "interpreted as checkpoint-length scaling.",
         "- Controlled/common-readout and native-readout comparisons answer different questions "
@@ -1230,7 +1327,7 @@ def _summary(
         "storage_provenance": _storage_provenance_diagnostics(rows),
         "semantic_attribution": _semantic_attribution_diagnostics(rows),
         "n_memory_count_contrasts": sum(
-            row.get("count_contrast") in {"delete_one", "add_one"}
+            _is_memory_count_contrast(row.get("count_contrast"))
             or row.get("intervention_kind") == "count_contrast"
             for row in rows["interventions.jsonl"]
         ),
@@ -1337,7 +1434,9 @@ def _semantic_attribution_diagnostics(
                 contributes = value.get("contributes_positive_coverage") is True
                 if method not in {
                     "exact_signature",
+                    "lexical_signature",
                     "unique_provenance",
+                    "no_match",
                     "ambiguous",
                 }:
                     method = "unavailable"
@@ -1446,15 +1545,69 @@ def _scorecard_rows(
         count_contrasts = [
             intervention
             for intervention in interventions
-            if getattr(intervention, "count_contrast", None)
-            in {"delete_one", "add_one"}
+            if _is_memory_count_contrast(
+                getattr(intervention, "count_contrast", None)
+            )
             or getattr(intervention, "intervention_kind", None) == "count_contrast"
         ]
-        drift_flags = [
-            flag
+        eligible_by_flag = {
+            flag: [
+                row
+                for row in rows
+                if getattr(row, "drift_eligible_categories", None) is None
+                or flag in getattr(row, "drift_eligible_categories", ())
+            ]
+            for flag in _CANONICAL_DRIFT_CATEGORIES
+        }
+        aggregate_eligible = [
+            row
             for row in rows
-            for flag in row.normalized_drift_flags
+            if getattr(row, "drift_eligible_categories", None) is None
+            or bool(getattr(row, "drift_eligible_categories", ()))
         ]
+
+        def has_targeted_drift(row: SCEURunResult) -> bool:
+            eligible = getattr(row, "drift_eligible_categories", None)
+            targeted = (
+                set(_CANONICAL_DRIFT_CATEGORIES)
+                if eligible is None
+                else set(eligible)
+            )
+            return bool(targeted.intersection(row.normalized_drift_flags))
+
+        def has_observed_drift(row: SCEURunResult) -> bool:
+            return bool(
+                set(_CANONICAL_DRIFT_CATEGORIES).intersection(
+                    row.normalized_drift_flags
+                )
+            )
+
+        def has_off_target_drift(row: SCEURunResult) -> bool:
+            eligible = getattr(row, "drift_eligible_categories", None)
+            if eligible is None:
+                return False
+            observed = set(_CANONICAL_DRIFT_CATEGORIES).intersection(
+                row.normalized_drift_flags
+            )
+            return bool(observed.difference(eligible))
+
+        targeted_rates = {
+            flag: _ratio_value(
+                sum(
+                    flag in row.normalized_drift_flags
+                    for row in eligible_by_flag[flag]
+                ),
+                len(eligible_by_flag[flag]),
+            )
+            for flag in _CANONICAL_DRIFT_CATEGORIES
+        }
+        observed_rates = {
+            flag: _ratio_value(
+                sum(flag in row.normalized_drift_flags for row in rows),
+                len(rows),
+            )
+            for flag in _CANONICAL_DRIFT_CATEGORIES
+        }
         output.append(
             {
                 "policy_profile_id": key[0],
@@ -1528,29 +1681,51 @@ def _scorecard_rows(
                         == "sham_replacement"
                     ),
                 ),
-                "constraint_loss_rate": _flag_rate(
-                    drift_flags,
-                    "constraint_loss",
-                    len(rows),
+                "constraint_loss_rate": targeted_rates["constraint_loss"],
+                "constraint_loss_eligible_n": len(
+                    eligible_by_flag["constraint_loss"]
                 ),
-                "current_plan_deviation_rate": _flag_rate(
-                    drift_flags,
-                    "plan_deviation",
-                    len(rows),
+                "targeted_constraint_loss_rate": targeted_rates["constraint_loss"],
+                "observed_constraint_loss_rate": observed_rates["constraint_loss"],
+                "current_plan_deviation_rate": targeted_rates["plan_deviation"],
+                "plan_deviation_eligible_n": len(
+                    eligible_by_flag["plan_deviation"]
                 ),
-                "stale_state_action_rate": _flag_rate(
-                    drift_flags,
-                    "stale_state",
-                    len(rows),
+                "targeted_plan_deviation_rate": targeted_rates["plan_deviation"],
+                "observed_plan_deviation_rate": observed_rates["plan_deviation"],
+                "stale_state_action_rate": targeted_rates["stale_state"],
+                "stale_state_eligible_n": len(eligible_by_flag["stale_state"]),
+                "targeted_stale_state_rate": targeted_rates["stale_state"],
+                "observed_stale_state_rate": observed_rates["stale_state"],
+                "local_over_global_rate": targeted_rates["local_over_global"],
+                "local_over_global_eligible_n": len(
+                    eligible_by_flag["local_over_global"]
                 ),
-                "local_over_global_rate": _flag_rate(
-                    drift_flags,
-                    "local_over_global",
-                    len(rows),
-                ),
+                "targeted_local_over_global_rate": targeted_rates[
+                    "local_over_global"
+                ],
+                "observed_local_over_global_rate": observed_rates[
+                    "local_over_global"
+                ],
                 "aggregate_drift_rate": _ratio_value(
-                    sum(bool(row.normalized_drift_flags) for row in rows),
+                    sum(has_targeted_drift(row) for row in aggregate_eligible),
+                    len(aggregate_eligible),
+                ),
+                "aggregate_drift_eligible_n": len(aggregate_eligible),
+                "targeted_aggregate_drift_rate": _ratio_value(
+                    sum(has_targeted_drift(row) for row in aggregate_eligible),
+                    len(aggregate_eligible),
+                ),
+                "observed_aggregate_drift_rate": _ratio_value(
+                    sum(has_observed_drift(row) for row in rows),
                     len(rows),
+                ),
+                "off_target_drift_rate": _ratio_value(
+                    sum(has_off_target_drift(row) for row in rows),
+                    len(rows),
+                ),
+                "off_target_drift_n": sum(
+                    has_off_target_drift(row) for row in rows
                 ),
                 "memory_count_contrast_rate": _ratio_value(
                     sum(
@@ -1635,6 +1810,157 @@ def _metrics_by_cell(
     return groups
 
 
+def _storage_scorecard_rows(
+    groups: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Deduplicate readouts and expose lifecycle metrics by provenance track."""
+    preferred: dict[tuple[str, str], Mapping[str, object]] = {}
+    memory_conditions = {"flat_retrieval", "mem0", "amem", "memos"}
+    for group in groups:
+        condition = str(group.get("condition", ""))
+        if condition not in memory_conditions:
+            continue
+        key = (str(group.get("policy_profile_id", "")), condition)
+        existing = preferred.get(key)
+        if existing is None or (
+            str(group.get("readout", "")) == "common_rerank"
+            and str(existing.get("readout", "")) != "common_rerank"
+        ):
+            preferred[key] = group
+
+    metric_names = (
+        "write_coverage",
+        "write_selectivity",
+        "current_state_storage_precision",
+        "current_state_storage_recall",
+        "current_state_storage_f1",
+        "stale_state_retention_rate",
+        "update_delete_responsiveness",
+        "write_to_continuation_alignment",
+        "storage_provenance_completeness",
+        "live_memory_count",
+        "native_objects_per_logical_state_unit",
+    )
+    rows: list[dict[str, object]] = []
+    for (policy_profile_id, condition), group in sorted(preferred.items()):
+        raw_metrics = group.get("metrics")
+        metrics = raw_metrics if isinstance(raw_metrics, Mapping) else {}
+        for track, prefix in (
+            ("all", ""),
+            ("exact", "storage_exact_"),
+            ("inferred", "storage_inferred_"),
+        ):
+            row: dict[str, object] = {
+                "policy_profile_id": policy_profile_id,
+                "condition": condition,
+                "provenance_track": track,
+                "source_readout": str(group.get("readout", "")),
+            }
+            for name in metric_names:
+                row[name] = _metric_value(metrics, f"{prefix}{name}")
+            ambiguous = _metric_value(
+                metrics,
+                f"{prefix}semantic_attribution_ambiguous_rate",
+            )
+            unavailable = _metric_value(
+                metrics,
+                f"{prefix}semantic_attribution_unavailable_rate",
+            )
+            row["semantic_attribution_resolvability"] = (
+                None
+                if ambiguous is None and unavailable is None
+                else max(0.0, 1.0 - (ambiguous or 0.0) - (unavailable or 0.0))
+            )
+            rows.append(row)
+    return rows
+
+
+def _memory_count_scorecard_rows(
+    intervention_rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Aggregate only matched evaluator-controlled count-load contrasts."""
+
+    grouped: dict[
+        tuple[str, str, str, str, int],
+        list[tuple[int, int, bool, bool]],
+    ] = defaultdict(list)
+    for row in intervention_rows:
+        if str(row.get("intervention_kind", "")) != "count_add":
+            continue
+        if not _is_memory_count_contrast(row.get("count_contrast")):
+            continue
+        baseline = _as_int(row.get("baseline_memory_count", 0))
+        intervention = _as_int(row.get("intervention_memory_count", 0))
+        delta = intervention - baseline
+        if delta <= 0:
+            continue
+        raw_classification = row.get("classification")
+        classification = (
+            raw_classification
+            if isinstance(raw_classification, Mapping)
+            else {}
+        )
+        key = (
+            str(row.get("policy_profile_id", "")),
+            str(row.get("condition", "")),
+            str(row.get("readout", "")),
+            str(row.get("opportunity_id", "")),
+            delta,
+        )
+        grouped[key].append(
+            (
+                baseline,
+                intervention,
+                bool(classification.get("action_changed", False)),
+                bool(classification.get("action_changed", False))
+                or bool(classification.get("checker_changed", False)),
+            )
+        )
+
+    output: list[dict[str, object]] = []
+    for key in sorted(grouped):
+        policy, condition, readout, opportunity, delta = key
+        values = grouped[key]
+        n = len(values)
+        output.append(
+            {
+                "policy_profile_id": policy,
+                "condition": condition,
+                "readout": readout,
+                "opportunity_id": opportunity,
+                "count_delta": delta,
+                "n_contrasts": n,
+                "action_flip_rate": _ratio_value(
+                    sum(value[2] for value in values),
+                    n,
+                ),
+                "behavior_change_rate": _ratio_value(
+                    sum(value[3] for value in values),
+                    n,
+                ),
+                "mean_baseline_visible_memory_count": _ratio_value(
+                    sum(value[0] for value in values),
+                    n,
+                ),
+                "mean_intervention_visible_memory_count": _ratio_value(
+                    sum(value[1] for value in values),
+                    n,
+                ),
+            }
+        )
+    return output
+
+
+def _metric_value(metrics: Mapping[str, object], name: str) -> float | None:
+    raw = metrics.get(name)
+    if not isinstance(raw, Mapping):
+        return None
+    value = raw.get("value")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
 def _aggregate_status(statuses: Sequence[str] | Any) -> str:
     values = set(statuses)
     if not values:
@@ -1644,10 +1970,6 @@ def _aggregate_status(statuses: Sequence[str] | Any) -> str:
     if "failed" in values:
         return "failed"
     return "partial"
-
-
-def _flag_rate(flags: Sequence[str], name: str, denominator: int) -> float | None:
-    return _ratio_value(flags.count(name), denominator)
 
 
 def _live_memory_count_from_row(row: object) -> int | None:
@@ -1692,6 +2014,34 @@ def _scorecard_markdown(rows: Sequence[Mapping[str, object]]) -> str:
         for row in rows
     ]
     return "\n".join([header, divider, *body]) + "\n"
+
+
+def _table_csv(
+    rows: Sequence[Mapping[str, object]],
+    fields: Sequence[str],
+) -> str:
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=fields, lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({field: _display_value(row.get(field)) for field in fields})
+    return stream.getvalue()
+
+
+def _table_markdown(
+    rows: Sequence[Mapping[str, object]],
+    fields: Sequence[str],
+    *,
+    title: str,
+    note: str,
+) -> str:
+    header = "| " + " | ".join(fields) + " |"
+    divider = "| " + " | ".join("---" for _ in fields) + " |"
+    body = [
+        "| " + " | ".join(_display_value(row.get(field)) for field in fields) + " |"
+        for row in rows
+    ]
+    return "\n".join((f"# {title}", "", note, "", header, divider, *body, ""))
 
 
 def _display_value(value: object) -> str:

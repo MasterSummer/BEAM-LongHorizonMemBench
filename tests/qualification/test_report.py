@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.longhorizon.interventions import ContinuationOutcome
 from lhmsb.qualification.prefix import CommonRerankTrace
@@ -10,8 +12,10 @@ from lhmsb.qualification.report import (
     REQUIRED_REPORT_ARTIFACTS,
     _append_prefix_reranker_usage,
     _evaluation_trace_id,
+    _memory_count_scorecard_rows,
     _semantic_attribution_diagnostics,
     _storage_provenance_diagnostics,
+    _storage_scorecard_rows,
     write_qualification_report,
 )
 from lhmsb.qualification.runner import (
@@ -139,6 +143,16 @@ def test_report_emits_required_deterministic_hashed_artifacts(
     )
     assert "policy_profile_id,condition,readout" in scorecard
     assert "policy-a,workspace_only,none" in scorecard
+    storage_scorecard = (tmp_path / "first" / "storage_scorecard.csv").read_text(
+        encoding="utf-8"
+    )
+    assert "policy_profile_id,condition,provenance_track" in storage_scorecard
+    memory_count_scorecard = (
+        tmp_path / "first" / "memory_count_scorecard.csv"
+    ).read_text(encoding="utf-8")
+    assert "policy_profile_id,condition,readout,opportunity_id,count_delta" in (
+        memory_count_scorecard
+    )
     episode_index = json.loads(
         (tmp_path / "first" / "episodes" / "index.json").read_text(
             encoding="utf-8"
@@ -151,6 +165,91 @@ def test_report_emits_required_deterministic_hashed_artifacts(
     assert (episode_directory / "scorecard.csv").is_file()
     assert (episode_directory / "summary.json").is_file()
     assert "episodes/index.json" in manifest["artifact_hashes"]
+
+
+def test_storage_scorecard_separates_exact_and_inferred_provenance() -> None:
+    def metric(value: float) -> dict[str, float]:
+        return {"numerator": value, "denominator": 1.0, "value": value}
+
+    rows = _storage_scorecard_rows(
+        (
+            {
+                "policy_profile_id": "gpt",
+                "condition": "memos",
+                "readout": "native",
+                "metrics": {"write_coverage": metric(0.1)},
+            },
+            {
+                "policy_profile_id": "gpt",
+                "condition": "memos",
+                "readout": "common_rerank",
+                "metrics": {
+                    "write_coverage": metric(0.5),
+                    "storage_exact_write_coverage": metric(0.75),
+                    "storage_exact_semantic_attribution_ambiguous_rate": metric(0.1),
+                    "storage_exact_semantic_attribution_unavailable_rate": metric(0.0),
+                    "storage_inferred_write_coverage": metric(0.25),
+                    "storage_inferred_semantic_attribution_ambiguous_rate": metric(0.2),
+                    "storage_inferred_semantic_attribution_unavailable_rate": metric(0.1),
+                },
+            },
+        )
+    )
+
+    assert [row["provenance_track"] for row in rows] == [
+        "all",
+        "exact",
+        "inferred",
+    ]
+    assert {row["source_readout"] for row in rows} == {"common_rerank"}
+    assert rows[1]["write_coverage"] == 0.75
+    assert rows[1]["semantic_attribution_resolvability"] == 0.9
+    assert rows[2]["semantic_attribution_resolvability"] == pytest.approx(0.7)
+
+
+def test_memory_count_scorecard_keeps_matched_levels_separate() -> None:
+    rows = _memory_count_scorecard_rows(
+        (
+            {
+                "policy_profile_id": "gpt",
+                "condition": "flat_retrieval",
+                "readout": "common_rerank",
+                "opportunity_id": "opp-stale-v1",
+                "intervention_kind": "count_add",
+                "count_contrast": "add_1",
+                "baseline_memory_count": 5,
+                "intervention_memory_count": 6,
+                "classification": {
+                    "action_changed": False,
+                    "checker_changed": False,
+                },
+            },
+            {
+                "policy_profile_id": "gpt",
+                "condition": "flat_retrieval",
+                "readout": "common_rerank",
+                "opportunity_id": "opp-stale-v1",
+                "intervention_kind": "count_add",
+                "count_contrast": "add_20",
+                "baseline_memory_count": 5,
+                "intervention_memory_count": 25,
+                "classification": {
+                    "action_changed": True,
+                    "checker_changed": True,
+                },
+            },
+            {
+                "intervention_kind": "leave_one_out",
+                "count_contrast": "delete_one",
+                "baseline_memory_count": 5,
+                "intervention_memory_count": 4,
+            },
+        )
+    )
+
+    assert [row["count_delta"] for row in rows] == [1, 20]
+    assert rows[0]["action_flip_rate"] == 0.0
+    assert rows[1]["behavior_change_rate"] == 1.0
 
 
 def test_report_jsonl_files_are_valid_and_deterministically_sorted(

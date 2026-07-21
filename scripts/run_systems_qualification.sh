@@ -8,13 +8,14 @@ REPO_ROOT="$(systems_repo_root)"
 DATA_ROOT="${LHMSB_DATA_ROOT:-/data/lhmsb}"
 ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
 RUN_NAME="${LHMSB_RUN_NAME:-systems-qualification}"
-DATASET="${LHMSB_SYSTEM_DATASET:-${DATA_ROOT}/datasets/software_v4}"
+DATASET="${LHMSB_SYSTEM_DATASET:-${DATA_ROOT}/datasets/software_v5}"
 CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only_aaai.yaml"
 DRY_RUN=0
 FORCE=0
 KEEP_GOING=0
 ALLOW_DIRTY=0
 PREPARE_ONLY=0
+EPISODE_LIMIT=""
 
 usage() {
   cat <<'EOF'
@@ -28,6 +29,7 @@ Options:
   --dataset PATH    frozen schema-v2 dataset
   --config PATH     schema-v2 experiment config
   --run-name NAME   run name (default: systems-qualification)
+  --episode-limit N restrict the run to the first N frozen episodes
   --force           replace a conflicting run identity
   --allow-dirty    allow a working tree with runtime-only untracked files
   --keep-going      continue independent tasks after a failed cell
@@ -39,11 +41,20 @@ EOF
 
 while (($#)); do
   case "$1" in
-    --data-root) systems_require_value "$1" "${2:-}" || exit 2; DATA_ROOT="$2"; DATASET="${DATA_ROOT}/datasets/software_v4"; shift 2 ;;
+    --data-root) systems_require_value "$1" "${2:-}" || exit 2; DATA_ROOT="$2"; DATASET="${DATA_ROOT}/datasets/software_v5"; shift 2 ;;
     --env-file) systems_require_value "$1" "${2:-}" || exit 2; ENV_FILE="$2"; shift 2 ;;
     --dataset) systems_require_value "$1" "${2:-}" || exit 2; DATASET="$2"; shift 2 ;;
     --config) systems_require_value "$1" "${2:-}" || exit 2; CONFIG="$2"; shift 2 ;;
     --run-name) systems_require_value "$1" "${2:-}" || exit 2; RUN_NAME="$2"; shift 2 ;;
+    --episode-limit)
+      systems_require_value "$1" "${2:-}" || exit 2
+      [[ "$2" =~ ^[1-9][0-9]*$ ]] || {
+        printf '%s must be a positive integer\n' "$1" >&2
+        exit 2
+      }
+      EPISODE_LIMIT="$2"
+      shift 2
+      ;;
     --force) FORCE=1; shift ;;
     --allow-dirty) ALLOW_DIRTY=1; shift ;;
     --keep-going) KEEP_GOING=1; shift ;;
@@ -107,6 +118,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   PLAN=(plan-systems --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}")
   [[ "${FORCE}" == "1" ]] && PLAN+=(--force)
   [[ "${ALLOW_DIRTY}" == "1" ]] && PLAN+=(--allow-dirty)
+  [[ -n "${EPISODE_LIMIT}" ]] && PLAN+=(--episode-limit "${EPISODE_LIMIT}")
   systems_print_command "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification "${PLAN[@]}"
   systems_print_command "${DATA_ROOT}/venvs/{core,mem0,amem,memos}/bin/python" \
     -m lhmsb.qualification prepare-task --run-dir "${RUN_DIR}" \
@@ -145,6 +157,7 @@ systems_write_runtime_env "${DATA_ROOT}"
 PLAN=(plan-systems --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}")
 [[ "${FORCE}" == "1" ]] && PLAN+=(--force)
 [[ "${ALLOW_DIRTY}" == "1" ]] && PLAN+=(--allow-dirty)
+[[ -n "${EPISODE_LIMIT}" ]] && PLAN+=(--episode-limit "${EPISODE_LIMIT}")
 systems_run_cli "${DATA_ROOT}" core "${PLAN[@]}"
 prepare_all_prefixes
 systems_run_cli "${DATA_ROOT}" core finalize-evaluation-plan --run-dir "${RUN_DIR}"

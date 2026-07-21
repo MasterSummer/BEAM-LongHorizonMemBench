@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 
 BASELINE_STABILITY_MIN = 0.90
 SHAM_ACTION_FLIP_MAX = 0.05
 ORACLE_ACCURACY_MIN = 0.95
-MAX_ALWAYS_ACTION_ACCURACY = 0.60
+ORACLE_GROUP_ACCURACY_MIN = 0.90
+MAX_ALWAYS_ACTION_ACCURACY = 0.50
+MAX_ALWAYS_OPTION_ACCURACY = 0.40
 MIN_CONTROL_ACTION_DIVERGENCES_PER_EPISODE = 2
+SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN = 0.90
+FLAT_CAUSAL_PROBE_COVERAGE_MIN = 0.50
+_ONE_SIDED_95_Z = 1.6448536269514722
 _MEMORY_CONDITIONS = frozenset({"flat_retrieval", "mem0", "amem", "memos"})
 _DRIFT_CATEGORIES = (
     "constraint_loss",
@@ -118,6 +124,21 @@ def compute_measurement_gates(
         for condition in getattr(task, "condition_results", ())
     )
     condition_results = tuple(condition for _episode_id, condition in condition_records)
+    memory_cells: dict[str, list[object]] = defaultdict(list)
+    for task in tasks:
+        policy_profile_id = str(getattr(task, "policy_profile_id", "unknown"))
+        for condition in getattr(task, "condition_results", ()):
+            condition_name = str(getattr(condition, "condition", ""))
+            if condition_name not in _MEMORY_CONDITIONS:
+                continue
+            cell_id = "|".join(
+                (
+                    policy_profile_id,
+                    condition_name,
+                    str(getattr(condition, "readout", "none")),
+                )
+            )
+            memory_cells[cell_id].extend(getattr(condition, "sceu_results", ()))
     memory_rows = tuple(
         row
         for condition in condition_results
@@ -127,6 +148,12 @@ def compute_measurement_gates(
     oracle_rows = tuple(
         row
         for condition in condition_results
+        if str(getattr(condition, "condition", "")) == "oracle_current_state"
+        for row in getattr(condition, "sceu_results", ())
+    )
+    oracle_records = tuple(
+        (episode_id, row)
+        for episode_id, condition in condition_records
         if str(getattr(condition, "condition", "")) == "oracle_current_state"
         for row in getattr(condition, "sceu_results", ())
     )
@@ -165,16 +192,55 @@ def compute_measurement_gates(
         minimum=BASELINE_STABILITY_MIN,
         description="Repeated memory-condition baselines agree.",
     )
+    stability_by_cell = {
+        cell_id: _rate_detail(
+            sum(bool(getattr(row, "baseline_stable", False)) for row in rows),
+            len(rows),
+        )
+        for cell_id, rows in sorted(memory_cells.items())
+    }
+    _gate_boolean(
+        gates,
+        "memory_baseline_stability_by_cell",
+        bool(stability_by_cell)
+        and all(
+            float(detail["rate"]) >= BASELINE_STABILITY_MIN
+            for detail in stability_by_cell.values()
+        ),
+        applicable=bool(stability_by_cell),
+        description=(
+            "Every policy/backend/readout cell meets the repeated-baseline "
+            "stability threshold."
+        ),
+        detail=stability_by_cell,
+    )
+    sham_flips = sum(
+        bool(getattr(getattr(item, "classification", None), "action_changed", False))
+        for item in sham
+    )
     _gate_ratio(
         gates,
         "sham_action_flip_rate",
-        sum(
-            bool(getattr(getattr(item, "classification", None), "action_changed", False))
-            for item in sham
-        ),
+        sham_flips,
         len(sham),
         maximum=SHAM_ACTION_FLIP_MAX,
         description="State-irrelevant sham replacements rarely flip actions.",
+    )
+    _gate_scalar(
+        gates,
+        "sham_action_flip_upper_bound",
+        _wilson_upper_bound(sham_flips, len(sham)),
+        maximum=SHAM_ACTION_FLIP_MAX,
+        description=(
+            "The one-sided 95% Wilson upper bound for sham action flips is below "
+            "the preregistered false-positive ceiling."
+        ),
+        detail={
+            "numerator": sham_flips,
+            "denominator": len(sham),
+            "point_rate": None if not sham else sham_flips / len(sham),
+            "confidence": 0.95,
+        },
     )
     _gate_ratio(
         gates,
@@ -183,6 +249,48 @@ def compute_measurement_gates(
         len(oracle_rows),
         minimum=ORACLE_ACCURACY_MIN,
         description="Oracle current state confirms task solvability.",
+    )
+    oracle_by_opportunity = _grouped_accuracy(
+        (
+            str(getattr(row, "opportunity_id", "unknown")),
+            bool(getattr(row, "is_correct", False)),
+        )
+        for _episode_id, row in oracle_records
+    )
+    _gate_boolean(
+        gates,
+        "oracle_accuracy_by_opportunity",
+        bool(oracle_by_opportunity)
+        and all(
+            float(detail["rate"]) >= ORACLE_GROUP_ACCURACY_MIN
+            for detail in oracle_by_opportunity.values()
+        ),
+        applicable=bool(oracle_by_opportunity),
+        description="Every continuation opportunity remains solvable with oracle state.",
+        detail=oracle_by_opportunity,
+    )
+    scenario_by_episode = {
+        episode_id: str(dict(spec.plan.metadata).get("semantic_scenario", "unknown"))
+        for episode_id, spec in specs.items()
+    }
+    oracle_by_scenario = _grouped_accuracy(
+        (
+            scenario_by_episode.get(episode_id, "unknown"),
+            bool(getattr(row, "is_correct", False)),
+        )
+        for episode_id, row in oracle_records
+    )
+    _gate_boolean(
+        gates,
+        "oracle_accuracy_by_scenario",
+        bool(oracle_by_scenario)
+        and all(
+            float(detail["rate"]) >= ORACLE_GROUP_ACCURACY_MIN
+            for detail in oracle_by_scenario.values()
+        ),
+        applicable=bool(oracle_by_scenario),
+        description="Every semantic scenario remains solvable with oracle state.",
+        detail=oracle_by_scenario,
     )
     _gate_boolean(
         gates,
@@ -200,6 +308,37 @@ def compute_measurement_gates(
         and bool(semantic.get("n_memory_objects", 0)),
         description="Every final memory object has an explicit semantic-attribution method.",
     )
+    semantic_methods = (
+        semantic.get("method_counts", {})
+        if isinstance(semantic, Mapping)
+        else {}
+    )
+    semantic_total = (
+        int(semantic.get("n_memory_objects", 0))
+        if isinstance(semantic, Mapping)
+        else 0
+    )
+    ambiguous = (
+        int(semantic_methods.get("ambiguous", 0))
+        if isinstance(semantic_methods, Mapping)
+        else 0
+    )
+    unavailable = (
+        int(semantic_methods.get("unavailable", 0))
+        if isinstance(semantic_methods, Mapping)
+        else 0
+    )
+    _gate_ratio(
+        gates,
+        "semantic_attribution_resolvability",
+        max(0, semantic_total - ambiguous - unavailable),
+        semantic_total,
+        minimum=SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN,
+        description=(
+            "Semantic attribution resolves each object as a fact match or a supported "
+            "no-match without evaluator ambiguity."
+        ),
+    )
     best_accuracy = heuristic_baselines.get("best_always_action_accuracy")
     _gate_scalar(
         gates,
@@ -207,6 +346,14 @@ def compute_measurement_gates(
         best_accuracy,
         maximum=MAX_ALWAYS_ACTION_ACCURACY,
         description="No fixed action solves more than the preregistered share.",
+    )
+    best_option_accuracy = heuristic_baselines.get("best_always_option_accuracy")
+    _gate_scalar(
+        gates,
+        "option_dominance",
+        best_option_accuracy,
+        maximum=MAX_ALWAYS_OPTION_ACCURACY,
+        description="No fixed opaque option position solves the benchmark.",
     )
 
     eligible_counts = Counter(
@@ -242,16 +389,52 @@ def compute_measurement_gates(
         description="Workspace-only and oracle require distinct behavior within every episode.",
         detail=dict(sorted(divergence_by_episode.items())),
     )
-    causal_chains = sum(
-        bool(getattr(row, "behaviorally_used_memory_ids", ())) for row in memory_rows
+    flat_rows = tuple(
+        row
+        for condition in condition_results
+        if str(getattr(condition, "condition", "")) == "flat_retrieval"
+        for row in getattr(condition, "sceu_results", ())
+    )
+    flat_probed_rows = sum(
+        any(
+            str(getattr(item, "intervention_kind", "")) == "neutral_replacement"
+            for item in getattr(row, "interventions", ())
+        )
+        for row in flat_rows
+    )
+    _gate_ratio(
+        gates,
+        "flat_causal_probe_coverage",
+        flat_probed_rows,
+        len(flat_rows),
+        minimum=FLAT_CAUSAL_PROBE_COVERAGE_MIN,
+        description=(
+            "The controlled flat-retrieval condition exposes enough visible focal "
+            "memories for matched causal probes."
+        ),
+    )
+    causal_chains_by_cell = {
+        cell_id: sum(
+            bool(getattr(row, "behaviorally_used_memory_ids", ())) for row in rows
+        )
+        for cell_id, rows in sorted(memory_cells.items())
+    }
+    flat_causal_chains = sum(
+        bool(getattr(row, "behaviorally_used_memory_ids", ())) for row in flat_rows
     )
     _gate_boolean(
         gates,
         "stored_retrieved_visible_behavior_chain",
-        causal_chains > 0,
-        applicable=bool(memory_rows),
-        description="At least one stable neutral-replacement probe establishes the full chain.",
-        detail={"qualifying_sceu": causal_chains},
+        flat_causal_chains > 0,
+        applicable=bool(flat_rows),
+        description=(
+            "The controlled flat-retrieval positive control establishes at least one "
+            "stable stored-to-behavior chain."
+        ),
+        detail={
+            "flat_qualifying_sceu": flat_causal_chains,
+            "qualifying_sceu_by_cell": causal_chains_by_cell,
+        },
     )
 
     ready = all(item["status"] in {"pass", "not_applicable"} for item in gates)
@@ -264,10 +447,16 @@ def compute_measurement_gates(
             "baseline_stability_min": BASELINE_STABILITY_MIN,
             "sham_action_flip_max": SHAM_ACTION_FLIP_MAX,
             "oracle_accuracy_min": ORACLE_ACCURACY_MIN,
+            "oracle_group_accuracy_min": ORACLE_GROUP_ACCURACY_MIN,
             "max_always_action_accuracy": MAX_ALWAYS_ACTION_ACCURACY,
+            "max_always_option_accuracy": MAX_ALWAYS_OPTION_ACCURACY,
             "min_control_action_divergences_per_episode": (
                 MIN_CONTROL_ACTION_DIVERGENCES_PER_EPISODE
             ),
+            "semantic_attribution_resolvability_min": (
+                SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN
+            ),
+            "flat_causal_probe_coverage_min": FLAT_CAUSAL_PROBE_COVERAGE_MIN,
         },
         "note": (
             "Artifact validation and measurement readiness are separate. A complete "
@@ -341,6 +530,42 @@ def _control_action_divergence(
             if workspace is not None and oracle is not None and workspace != oracle:
                 by_episode[episode_id] += 1
     return dict(by_episode)
+
+
+def _grouped_accuracy(
+    values: Iterable[tuple[str, bool]],
+) -> dict[str, dict[str, int | float]]:
+    correct: Counter[str] = Counter()
+    total: Counter[str] = Counter()
+    for group, is_correct in values:
+        total[group] += 1
+        correct[group] += bool(is_correct)
+    return {
+        group: _rate_detail(correct[group], total[group])
+        for group in sorted(total)
+    }
+
+
+def _rate_detail(numerator: int, denominator: int) -> dict[str, int | float]:
+    return {
+        "numerator": numerator,
+        "denominator": denominator,
+        "rate": 0.0 if denominator == 0 else numerator / denominator,
+    }
+
+
+def _wilson_upper_bound(successes: int, total: int) -> float | None:
+    """Return the one-sided 95% Wilson upper confidence bound."""
+    if total <= 0:
+        return None
+    proportion = successes / total
+    z2 = _ONE_SIDED_95_Z * _ONE_SIDED_95_Z
+    denominator = 1.0 + z2 / total
+    center = proportion + z2 / (2.0 * total)
+    radius = _ONE_SIDED_95_Z * math.sqrt(
+        proportion * (1.0 - proportion) / total + z2 / (4.0 * total * total)
+    )
+    return min(1.0, (center + radius) / denominator)
 
 
 def _gate_ratio(
@@ -444,9 +669,13 @@ def _format_rate(value: object) -> str:
 
 __all__ = [
     "BASELINE_STABILITY_MIN",
+    "FLAT_CAUSAL_PROBE_COVERAGE_MIN",
     "MAX_ALWAYS_ACTION_ACCURACY",
+    "MAX_ALWAYS_OPTION_ACCURACY",
     "MIN_CONTROL_ACTION_DIVERGENCES_PER_EPISODE",
     "ORACLE_ACCURACY_MIN",
+    "ORACLE_GROUP_ACCURACY_MIN",
+    "SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN",
     "SHAM_ACTION_FLIP_MAX",
     "compute_heuristic_baselines",
     "compute_measurement_gates",
