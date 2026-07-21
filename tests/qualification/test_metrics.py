@@ -110,6 +110,39 @@ def test_memory_counts_are_checkpoint_means_with_explicit_totals() -> None:
     assert metrics["live_memory_count_total"].value == 10
 
 
+def test_storage_metrics_separate_lifecycle_and_semantic_attribution() -> None:
+    metrics = compute_metric_collection(
+        state_checkpoints=(
+            StateCheckpointMetricInput(
+                eligible_write_state_ids=("A", "B"),
+                # The ambiguous object deliberately carries no scored state
+                # assignment even if its raw text had partial anchor matches.
+                new_memory_state_ids=(("A",), ()),
+                current_state_ids=("A", "B"),
+                future_needed_state_ids=("A", "B"),
+                retired_state_ids=(),
+                live_memory_state_ids=(("A",), ()),
+                live_content_hashes=("ha", "hb"),
+                n_write=2,
+                n_live=2,
+                new_memory_provenance=("native/exact", "native/exact"),
+                live_memory_provenance=("native/exact", "native/exact"),
+                new_memory_attribution_methods=("exact_signature", "ambiguous"),
+                live_memory_attribution_methods=("exact_signature", "ambiguous"),
+            ),
+        ),
+    )
+
+    assert metrics["current_state_storage_recall"].value == 0.5
+    assert metrics["storage_native_event_current_state_storage_recall"].value == 0.5
+    # Backward-compatible names remain aliases, but no longer imply semantic
+    # exactness in the protocol/report language.
+    assert metrics["storage_exact_current_state_storage_recall"].value == 0.5
+    assert metrics["semantic_attribution_exact_signature_rate"].value == 0.5
+    assert metrics["semantic_attribution_ambiguous_rate"].value == 0.5
+    assert metrics["semantic_attribution_unique_provenance_rate"].value == 0.0
+
+
 def test_retrieval_visibility_and_stale_formulas_are_hand_computed() -> None:
     metrics = compute_metric_collection(
         retrievals=(

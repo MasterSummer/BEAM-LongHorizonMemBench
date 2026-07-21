@@ -27,6 +27,12 @@ from lhmsb.qualification.metrics import (
     multisystem_state_checkpoints_from_artifacts,
 )
 from lhmsb.qualification.prefix import CommonRerankTrace, MemoryPrefixArtifact
+from lhmsb.qualification.readiness import (
+    compute_heuristic_baselines,
+    compute_measurement_gates,
+    heuristic_baselines_markdown,
+    measurement_gates_markdown,
+)
 from lhmsb.qualification.runner import (
     PolicyEvaluation,
     QualificationMatrixResult,
@@ -60,6 +66,11 @@ REQUIRED_REPORT_ARTIFACTS: tuple[str, ...] = (
     "scorecard.md",
     "statistics.json",
     "statistics.md",
+    "heuristic_baselines.json",
+    "heuristic_baselines.md",
+    "measurement_gates.json",
+    "measurement_gates.md",
+    "limitations.md",
     "validation.json",
 )
 _JSONL_ARTIFACTS = (
@@ -208,9 +219,17 @@ def write_qualification_report(
             }
         ),
     )
+    summary_payload = _summary(matrix, rows)
+    heuristic_payload = compute_heuristic_baselines(specs)
+    measurement_payload = compute_measurement_gates(
+        matrix,
+        specs,
+        summary=summary_payload,
+        heuristic_baselines=heuristic_payload,
+    )
     _atomic_write(
         output_directory / "summary.json",
-        _json_bytes(_summary(matrix, rows)),
+        _json_bytes(summary_payload),
     )
     _atomic_write(
         output_directory / "scorecard.csv",
@@ -220,7 +239,17 @@ def write_qualification_report(
         output_directory / "scorecard.md",
         _scorecard_markdown(scorecard_rows).encode("utf-8"),
     )
-    statistics_payload = compute_episode_cluster_statistics(observations)
+    episode_groups = {
+        episode_id: str(
+            dict(spec.plan.metadata).get("semantic_scenario", "unknown")
+        )
+        for episode_id, spec in specs.items()
+    }
+    statistics_payload = compute_episode_cluster_statistics(
+        observations,
+        episode_groups=episode_groups,
+        episode_group_name="semantic_scenario",
+    )
     _atomic_write(
         output_directory / "statistics.json",
         _json_bytes(statistics_payload),
@@ -228,6 +257,31 @@ def write_qualification_report(
     _atomic_write(
         output_directory / "statistics.md",
         statistics_markdown(statistics_payload).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "heuristic_baselines.json",
+        _json_bytes(heuristic_payload),
+    )
+    _atomic_write(
+        output_directory / "heuristic_baselines.md",
+        heuristic_baselines_markdown(heuristic_payload).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "measurement_gates.json",
+        _json_bytes(measurement_payload),
+    )
+    _atomic_write(
+        output_directory / "measurement_gates.md",
+        measurement_gates_markdown(measurement_payload).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "limitations.md",
+        _limitations_markdown(
+            matrix,
+            specs,
+            measurement_gates=measurement_payload,
+            heuristic_baselines=heuristic_payload,
+        ).encode("utf-8"),
     )
     episode_artifacts = _write_episode_reports(
         output_directory,
@@ -354,6 +408,112 @@ def _write_episode_reports(
     return tuple(sorted(artifacts))
 
 
+def _limitations_markdown(
+    matrix: QualificationMatrixResult,
+    specs: Mapping[str, SoftwareMem0VerticalSpec],
+    *,
+    measurement_gates: Mapping[str, object],
+    heuristic_baselines: Mapping[str, object],
+) -> str:
+    """Render deterministic scope limits alongside every experiment report."""
+    scenarios = sorted(
+        {
+            str(dict(spec.plan.metadata).get("semantic_scenario", "unknown"))
+            for spec in specs.values()
+        }
+    )
+    schedules = sorted(
+        {
+            str(dict(spec.plan.metadata).get("phase_signature", "unknown"))
+            for spec in specs.values()
+        }
+    )
+    profiles = sorted(
+        {
+            str(getattr(task, "policy_profile_id", "unknown"))
+            for task in matrix.task_results
+        }
+    )
+    conditions = sorted(
+        {
+            str(getattr(condition, "condition", "unknown"))
+            for task in matrix.task_results
+            for condition in getattr(task, "condition_results", ())
+        }
+    )
+    raw_gates = measurement_gates.get("gates", ())
+    gates = (
+        tuple(item for item in raw_gates if isinstance(item, Mapping))
+        if isinstance(raw_gates, Sequence) and not isinstance(raw_gates, str | bytes)
+        else ()
+    )
+    unresolved = tuple(
+        item for item in gates if str(item.get("status")) != "pass"
+    )
+    ready = measurement_gates.get("measurement_ready") is True
+    best_action = heuristic_baselines.get("best_always_action")
+    best_accuracy = heuristic_baselines.get("best_always_action_accuracy")
+    lines = [
+        "# Scope and limitations",
+        "",
+        f"Measurement readiness: **{str(ready).lower()}**.",
+        "",
+        "## Scope",
+        "",
+        f"- Episodes: {len(specs)} generated software-project trajectories.",
+        f"- Semantic scenarios: {len(scenarios)} ({', '.join(scenarios) or 'none'}).",
+        f"- Phase schedules: {len(schedules)} ({', '.join(schedules) or 'none'}).",
+        f"- Policy profiles: {', '.join(profiles) or 'none'}.",
+        f"- Conditions: {', '.join(conditions) or 'none'}.",
+        "- Generated trajectory/schedule variants are not independent semantic task templates; "
+        "episode-level inference is accompanied by semantic-scenario sensitivity analysis.",
+        "",
+        "## Interpretation constraints",
+        "",
+        "- Lifecycle provenance (native event versus inventory-inferred change) and semantic "
+        "state attribution are separate axes. Ambiguous semantic attribution earns no positive "
+        "storage coverage.",
+        "- Behaviorally used memory is a conservative lower bound from repeat-stable, "
+        "state-targeted replacement interventions. Failure to identify a memory as used does "
+        "not prove that it had no influence.",
+        "- Drift rates are conditional on preregistered eligible opportunities; they are not "
+        "unconditional estimates of all possible long-horizon drift.",
+        "- Memory-count effects use matched within-opportunity contrasts and must not be "
+        "interpreted as checkpoint-length scaling.",
+        "- Controlled/common-readout and native-readout comparisons answer different questions "
+        "and should not be pooled into one ranking.",
+        f"- The strongest policy-free fixed-action baseline is {best_action!s} at "
+        f"{_format_optional_rate(best_accuracy)} accuracy.",
+        "",
+        "## Unresolved measurement gates",
+        "",
+    ]
+    if not unresolved:
+        lines.append("- None. All preregistered gates passed.")
+    else:
+        for item in unresolved:
+            lines.append(
+                f"- `{item.get('gate_id', 'unknown')}`: "
+                f"{item.get('status', 'unknown')} — "
+                f"{item.get('description', 'No description.') }"
+            )
+    lines.extend(
+        (
+            "",
+            "Artifact validation and scientific measurement readiness remain separate: a "
+            "hash-valid run can still fail one or more gates above.",
+            "",
+        )
+    )
+    return "\n".join(lines)
+
+
+def _format_optional_rate(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return "unavailable"
+    return f"{float(value):.3f}"
+
+
 def _episode_directory_name(episode_id: str) -> str:
     slug = "".join(
         character if character.isalnum() or character in {"-", "_"} else "-"
@@ -415,6 +575,10 @@ def _flatten_rows(
                                     "source_event_ids": list(item.source_event_ids),
                                     "source_session": item.source_session,
                                     "method": item.method,
+                                    "contributes_positive_coverage": (
+                                        item.contributes_positive_coverage
+                                    ),
+                                    "reason": item.reason,
                                 }
                                 for item in _artifact_attributions(
                                     spec,
@@ -1064,6 +1228,7 @@ def _summary(
         "n_prefix_manifests": len(rows["prefix_manifests.jsonl"]),
         "n_graph_diagnostics": len(rows["graph_diagnostics.jsonl"]),
         "storage_provenance": _storage_provenance_diagnostics(rows),
+        "semantic_attribution": _semantic_attribution_diagnostics(rows),
         "n_memory_count_contrasts": sum(
             row.get("count_contrast") in {"delete_one", "add_one"}
             or row.get("intervention_kind") == "count_contrast"
@@ -1132,6 +1297,74 @@ def _storage_provenance_diagnostics(
             if counts["unavailable"] == 0 and not incomplete_tasks
             else "incomplete"
         ),
+    }
+
+
+def _semantic_attribution_diagnostics(
+    rows: Mapping[str, Sequence[dict[str, object]]],
+) -> dict[str, object]:
+    """Summarize final inventories on a separate semantic-attribution axis."""
+    latest_by_task: dict[str, dict[str, object]] = {}
+    for row in rows["memory_inventory.jsonl"]:
+        task_id = str(row.get("task_id", ""))
+        checkpoint = _as_int(row.get("checkpoint_session", -1))
+        previous = latest_by_task.get(task_id)
+        if previous is None or checkpoint > _as_int(
+            previous.get("checkpoint_session", -1)
+        ):
+            latest_by_task[task_id] = row
+
+    method_counts: Counter[str] = Counter()
+    lifecycle_counts: Counter[str] = Counter()
+    cross_counts: Counter[str] = Counter()
+    incomplete_objects: list[str] = []
+    positive = 0
+    total = 0
+    for task_id, row in sorted(latest_by_task.items()):
+        raw = row.get("evaluator_attribution_by_memory")
+        if not isinstance(raw, Mapping):
+            continue
+        for memory_id, value in sorted(raw.items(), key=lambda item: str(item[0])):
+            total += 1
+            if not isinstance(value, Mapping):
+                method = "unavailable"
+                lifecycle = "unavailable"
+                contributes = False
+                incomplete_objects.append(f"{task_id}:{memory_id}")
+            else:
+                method = str(value.get("method", "unavailable"))
+                lifecycle = str(value.get("provenance_mode", "unavailable"))
+                contributes = value.get("contributes_positive_coverage") is True
+                if method not in {
+                    "exact_signature",
+                    "unique_provenance",
+                    "ambiguous",
+                }:
+                    method = "unavailable"
+                if lifecycle not in {"native/exact", "inferred", "unavailable"}:
+                    lifecycle = "unavailable"
+                if (
+                    "method" not in value
+                    or "provenance_mode" not in value
+                    or not isinstance(
+                        value.get("contributes_positive_coverage"), bool
+                    )
+                ):
+                    incomplete_objects.append(f"{task_id}:{memory_id}")
+            method_counts[method] += 1
+            lifecycle_counts[lifecycle] += 1
+            cross_counts[f"{lifecycle}|{method}"] += 1
+            positive += contributes
+    return {
+        "scope": "latest_inventory_per_task",
+        "n_tasks": len(latest_by_task),
+        "n_memory_objects": total,
+        "method_counts": dict(sorted(method_counts.items())),
+        "lifecycle_provenance_counts": dict(sorted(lifecycle_counts.items())),
+        "lifecycle_by_semantic_method": dict(sorted(cross_counts.items())),
+        "positive_coverage_rate": None if total == 0 else positive / total,
+        "incomplete_objects": incomplete_objects,
+        "status": "complete" if not incomplete_objects else "incomplete",
     }
 
 

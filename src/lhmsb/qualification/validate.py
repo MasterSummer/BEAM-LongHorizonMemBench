@@ -238,6 +238,7 @@ def validate_qualification_artifacts(
         task_id = str(row.get("task_id", ""))
         if task_id not in task_ids:
             errors.append(f"inventory references unknown task ID: {task_id}")
+    _validate_semantic_attributions(jsonl["memory_inventory.jsonl"], errors)
     for row in jsonl["retrieval_trace.jsonl"]:
         task_id = str(row.get("task_id", ""))
         if task_id not in task_ids:
@@ -333,6 +334,20 @@ def validate_qualification_artifacts(
         errors,
     )
     _read_json(report_directory / "summary.json", errors, required=False)
+    _read_json(
+        report_directory / "heuristic_baselines.json",
+        errors,
+        required=False,
+    )
+    measurement_gates = _read_json(
+        report_directory / "measurement_gates.json",
+        errors,
+        required=False,
+    )
+    if measurement_gates and not isinstance(
+        measurement_gates.get("measurement_ready"), bool
+    ):
+        errors.append("measurement_gates.json lacks boolean measurement_ready")
     validation_payload = _read_json(
         report_directory / "validation.json", errors, required=False
     )
@@ -441,6 +456,42 @@ def _validate_metrics_by_cell(
             "metrics_by_cell coverage mismatch: "
             f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
         )
+
+
+def _validate_semantic_attributions(
+    inventory_rows: Sequence[Mapping[str, object]],
+    errors: list[str],
+) -> None:
+    """Keep lifecycle provenance distinct from evaluator state attribution."""
+    allowed_methods = {"exact_signature", "unique_provenance", "ambiguous"}
+    allowed_lifecycle = {"native/exact", "inferred", "unavailable"}
+    for row in inventory_rows:
+        raw = row.get("evaluator_attribution_by_memory")
+        if raw is None:
+            continue
+        if not isinstance(raw, Mapping):
+            errors.append("inventory evaluator attribution must be an object")
+            continue
+        task_id = str(row.get("task_id", ""))
+        checkpoint = row.get("checkpoint_session", "")
+        for memory_id, value in raw.items():
+            label = f"{task_id}:{checkpoint}:{memory_id}"
+            if not isinstance(value, Mapping):
+                errors.append(f"semantic attribution must be an object for {label}")
+                continue
+            method = value.get("method")
+            lifecycle = value.get("provenance_mode")
+            contributes = value.get("contributes_positive_coverage")
+            if method not in allowed_methods:
+                errors.append(f"unknown semantic attribution method for {label}")
+            if lifecycle not in allowed_lifecycle:
+                errors.append(f"unknown lifecycle provenance mode for {label}")
+            if not isinstance(contributes, bool):
+                errors.append(f"semantic attribution coverage flag is missing for {label}")
+            if method == "ambiguous" and contributes is True:
+                errors.append(
+                    f"ambiguous semantic attribution contributes positive coverage for {label}"
+                )
 
 
 def _unique_ids(

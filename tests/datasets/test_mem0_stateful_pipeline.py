@@ -115,6 +115,27 @@ def test_fifty_episode_release_passes_all_audits_and_uses_v04(tmp_path: Path) ->
     assert len({item.surface_hash for item in generated}) == 50
     assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V4
     assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V4
+    audit = json.loads(
+        (frozen / "evaluator" / "dataset_audit.json").read_text(encoding="utf-8")
+    )
+    assert sorted(audit["semantic_scenario_counts"].values()) == [10] * 5
+    assert sorted(audit["phase_schedule_counts"].values()) == [5] * 10
+    assert len(audit["scenario_schedule_cell_counts"]) == 50
+    assert set(audit["scenario_schedule_cell_counts"].values()) == {1}
+    assert audit["recoverability_variant_counts"] == {
+        "absent": 16,
+        "derivable": 17,
+        "explicit": 17,
+    }
+    assert all(audit["checks"].values())
+    assert (
+        audit["policy_free_baselines"]["best_always_action_accuracy"]
+        == 0.6
+    )
+    assert (
+        audit["policy_free_baselines"]["best_always_option_accuracy"]
+        <= 0.5
+    )
     assert verify_mem0_stateful(frozen).ok
     assert regen_check_mem0_stateful(frozen).ok
 

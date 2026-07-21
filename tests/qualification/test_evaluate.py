@@ -403,14 +403,20 @@ def test_drift_eligibility_and_invariant_state_pairs_are_explicit(tmp_path) -> N
         _Checker(),
     )
     by_opportunity = {row.opportunity_id: row for row in evaluated.sceu_results}
-    assert "plan_deviation" in (
-        by_opportunity["opp-premature-v2"].drift_eligible_categories or ()
+    assert by_opportunity["opp-premature-v2"].drift_eligible_categories == (
+        "plan_deviation",
     )
-    assert "stale_state" in (
-        by_opportunity["opp-stale-v1"].drift_eligible_categories or ()
+    assert by_opportunity["opp-stale-v1"].drift_eligible_categories == (
+        "plan_deviation",
+        "stale_state",
     )
-    assert {"constraint_loss", "local_over_global"}.issubset(
-        by_opportunity["opp-local-only"].drift_eligible_categories or ()
+    assert by_opportunity["opp-local-only"].drift_eligible_categories == (
+        "constraint_loss",
+        "local_over_global",
+    )
+    assert by_opportunity["opp-local-valid"].drift_eligible_categories == (
+        "plan_deviation",
+        "stale_state",
     )
     assert (
         by_opportunity["opp-local-valid"].current_state_signature

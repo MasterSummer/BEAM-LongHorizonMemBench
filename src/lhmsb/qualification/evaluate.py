@@ -1440,14 +1440,21 @@ def _drift_eligible_categories(
     spec: SoftwareMem0VerticalSpec,
     sceu: SCEU,
 ) -> tuple[str, ...]:
-    """Return drift types that at least one invalid available action can express."""
+    """Return preregistered drift constructs targeted by this opportunity.
+
+    An always-present distractor can technically violate several invariants at
+    almost every checkpoint.  Counting every expressible violation would dilute
+    category denominators and turn, for example, a branch-update probe into a
+    scope-conflict probe.  We therefore intersect the flags expressible by an
+    invalid available action with the opportunity's intended construct.
+    """
     opportunity = next(
         item
         for item in spec.plan.opportunities
         if item.opportunity_id == sceu.opportunity_id
     )
     valid = set(opportunity.valid_action_ids)
-    flags: set[str] = set()
+    expressible: set[str] = set()
     for action in opportunity.action_catalog:
         if action.action_id in valid:
             continue
@@ -1457,7 +1464,7 @@ def _drift_eligible_categories(
             violated_state_ids=action.violates_state_ids,
             drift_flags=(),
         )
-        flags.update(
+        expressible.update(
             _normalized_drift(
                 spec,
                 action,
@@ -1465,7 +1472,29 @@ def _drift_eligible_categories(
                 sceu.checkpoint_session,
             )
         )
-    return tuple(sorted(flags))
+    intended: set[str]
+    if opportunity.challenge_type == "matched-branch":
+        current = replay_plan(spec.plan, sceu.checkpoint_session).current
+        intended = (
+            {"stale_state", "plan_deviation"}
+            if "P2" in current
+            else {"plan_deviation"}
+        )
+    elif opportunity.challenge_type == "premature-v2":
+        intended = {"plan_deviation"}
+    elif opportunity.challenge_type in {
+        "stale-after-revoke",
+        "valid-update",
+        "valid-local-accelerator",
+    }:
+        intended = {"stale_state", "plan_deviation"}
+    elif opportunity.challenge_type in {"scope-conflict", "global-local-conflict"}:
+        intended = {"constraint_loss", "local_over_global"}
+    elif opportunity.challenge_type == "fresh-reminder":
+        intended = {"constraint_loss", "stale_state", "plan_deviation"}
+    else:
+        intended = expressible
+    return tuple(sorted(expressible.intersection(intended)))
 
 
 def _current_state_signature(

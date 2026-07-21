@@ -80,6 +80,11 @@ class StateCheckpointMetricInput:
     # exact and inferred tracks without guessing from a final inventory.
     new_memory_provenance: tuple[str, ...] = ()
     live_memory_provenance: tuple[str, ...] = ()
+    # Lifecycle provenance and semantic attribution are orthogonal.  A native
+    # add/update event can still contain text that maps ambiguously to latent
+    # state, so retain both object-aligned dimensions.
+    new_memory_attribution_methods: tuple[str, ...] = ()
+    live_memory_attribution_methods: tuple[str, ...] = ()
     provenance_complete: bool = True
 
 
@@ -260,13 +265,17 @@ def compute_metric_collection(
     _state_metrics(values, state_checkpoints)
     # Provenance is a first-class denominator.  A backend with only inferred
     # inventory diffs must not be silently reported as exact storage quality.
-    for mode, prefix in (
-        ("native/exact", "storage_exact_"),
-        ("inferred", "storage_inferred_"),
+    for mode, prefixes in (
+        ("native/exact", ("storage_native_event_", "storage_exact_")),
+        (
+            "inferred",
+            ("storage_inventory_inferred_", "storage_inferred_"),
+        ),
     ):
         projected = _filter_state_observations(state_checkpoints, mode)
         if projected:
-            _state_metrics(values, projected, prefix=prefix)
+            for prefix in prefixes:
+                _state_metrics(values, projected, prefix=prefix)
     _retrieval_metrics(values, retrievals)
     _behavior_metrics(values, behaviors)
     _usage_metrics(values, usages)
@@ -559,6 +568,9 @@ def compute_qualification_metrics(
                 )
                 for item in alignment.attributions
             }
+            attribution_method_map = {
+                item.memory_id: item.method for item in alignment.attributions
+            }
             replay = replay_plan(spec.plan, write.session_index)
             eligible = eligible_write_state_ids(
                 spec.plan,
@@ -616,6 +628,14 @@ def compute_qualification_metrics(
                     new_memory_provenance=new_provenance,
                     live_memory_provenance=tuple(
                         _attribution_mode(alignment.attributions, item.memory_id)
+                        for item in write.inventory.items
+                    ),
+                    new_memory_attribution_methods=tuple(
+                        attribution_method_map.get(memory_id, "ambiguous")
+                        for memory_id in sorted(new_memory_ids)
+                    ),
+                    live_memory_attribution_methods=tuple(
+                        attribution_method_map.get(item.memory_id, "ambiguous")
                         for item in write.inventory.items
                     ),
                     provenance_complete=not (write_delta > 0 and not write.events),
@@ -1108,6 +1128,12 @@ def multisystem_state_checkpoints_from_artifacts(
                 checkpoint.checkpoint_session,
                 artifact=artifact,
             )
+            attributed_state_ids = {
+                memory_id: (
+                    item.state_ids if item.contributes_positive_coverage else ()
+                )
+                for memory_id, item in attribution.items()
+            }
             # Prefix checkpoint ``n_sessions`` is the post-final-write
             # snapshot.  Latent replay indexes sessions themselves and thus
             # ends at ``n_sessions - 1``.
@@ -1142,26 +1168,14 @@ def multisystem_state_checkpoints_from_artifacts(
                 StateCheckpointMetricInput(
                     eligible_write_state_ids=eligible if new_ids else (),
                     new_memory_state_ids=tuple(
-                        attribution.get(memory_id, MemoryAttribution(
-                            memory_id=memory_id,
-                            state_ids=(),
-                            method="ambiguous",
-                            contributes_positive_coverage=False,
-                            reason="missing evaluator attribution",
-                        )).state_ids
+                        attributed_state_ids.get(memory_id, ())
                         for memory_id in new_ids
                     ),
                     current_state_ids=tuple(sorted(replay.current)),
                     future_needed_state_ids=tuple(sorted(future)),
                     retired_state_ids=tuple(sorted(replay.invalidated)),
                     live_memory_state_ids=tuple(
-                        attribution.get(item.memory_id, MemoryAttribution(
-                            memory_id=item.memory_id,
-                            state_ids=(),
-                            method="ambiguous",
-                            contributes_positive_coverage=False,
-                            reason="missing evaluator attribution",
-                        )).state_ids
+                        attributed_state_ids.get(item.memory_id, ())
                         for item in inventory.items
                     ),
                     live_content_hashes=tuple(item.content_hash for item in inventory.items),
@@ -1191,6 +1205,26 @@ def multisystem_state_checkpoints_from_artifacts(
                             contributes_positive_coverage=False,
                             reason="missing evaluator attribution",
                         )).provenance_mode
+                        for item in inventory.items
+                    ),
+                    new_memory_attribution_methods=tuple(
+                        attribution.get(memory_id, MemoryAttribution(
+                            memory_id=memory_id,
+                            state_ids=(),
+                            method="ambiguous",
+                            contributes_positive_coverage=False,
+                            reason="missing evaluator attribution",
+                        )).method
+                        for memory_id in new_ids
+                    ),
+                    live_memory_attribution_methods=tuple(
+                        attribution.get(item.memory_id, MemoryAttribution(
+                            memory_id=item.memory_id,
+                            state_ids=(),
+                            method="ambiguous",
+                            contributes_positive_coverage=False,
+                            reason="missing evaluator attribution",
+                        )).method
                         for item in inventory.items
                     ),
                     provenance_complete=not (write_delta > 0 and not events),
@@ -1390,10 +1424,18 @@ def _state_metrics(
     final_live_count = 0
     final_logical_state_units = 0
     final_attributed_objects = 0
+    final_attribution_methods: Counter[str] = Counter()
+    write_attribution_methods: Counter[str] = Counter()
     final_checkpoints = 0
     for item in observations:
         eligible = set(item.eligible_write_state_ids)
         new_objects = [set(states) for states in item.new_memory_state_ids]
+        write_attribution_methods.update(
+            _aligned_attribution_methods(
+                item.new_memory_attribution_methods,
+                len(new_objects),
+            )
+        )
         new_represented = set().union(*new_objects) if new_objects else set()
         write_covered += len(eligible & new_represented)
         write_eligible += len(eligible)
@@ -1433,6 +1475,12 @@ def _state_metrics(
             final_live_count += item.n_live
             final_logical_state_units += len(represented)
             final_attributed_objects += sum(bool(states) for states in live)
+            final_attribution_methods.update(
+                _aligned_attribution_methods(
+                    item.live_memory_attribution_methods,
+                    len(live),
+                )
+            )
 
     values[metric("write_coverage")] = safe_ratio(write_covered, write_eligible)
     values[metric("write_selectivity")] = safe_ratio(selective_objects, written_objects)
@@ -1487,6 +1535,20 @@ def _state_metrics(
         final_attributed_objects,
         final_live_count,
     )
+    for method in (
+        "exact_signature",
+        "unique_provenance",
+        "ambiguous",
+        "unavailable",
+    ):
+        values[metric(f"semantic_attribution_{method}_rate")] = safe_ratio(
+            final_attribution_methods[method],
+            final_live_count,
+        )
+        values[metric(f"write_semantic_attribution_{method}_rate")] = safe_ratio(
+            write_attribution_methods[method],
+            sum(write_attribution_methods.values()),
+        )
     values[metric("live_memory_count_total")] = (
         safe_ratio(final_live_count, 1)
         if final_checkpoints
@@ -1533,6 +1595,30 @@ def _filter_state_observations(
         )
         if not new_pairs and not live_pairs:
             continue
+        new_methods = tuple(
+            method
+            for method, provenance in zip(
+                _aligned_attribution_methods(
+                    item.new_memory_attribution_methods,
+                    len(item.new_memory_state_ids),
+                ),
+                item.new_memory_provenance,
+                strict=False,
+            )
+            if provenance == mode
+        )
+        live_methods = tuple(
+            method
+            for method, provenance in zip(
+                _aligned_attribution_methods(
+                    item.live_memory_attribution_methods,
+                    len(item.live_memory_state_ids),
+                ),
+                item.live_memory_provenance,
+                strict=False,
+            )
+            if provenance == mode
+        )
         projected.append(
             StateCheckpointMetricInput(
                 eligible_write_state_ids=(
@@ -1559,10 +1645,27 @@ def _filter_state_observations(
                 mutation_counts=item.mutation_counts,
                 new_memory_provenance=(mode,) * len(new_pairs),
                 live_memory_provenance=(mode,) * len(live_pairs),
+                new_memory_attribution_methods=new_methods,
+                live_memory_attribution_methods=live_methods,
                 provenance_complete=item.provenance_complete,
             )
         )
     return tuple(projected)
+
+
+def _aligned_attribution_methods(
+    methods: Sequence[str],
+    count: int,
+) -> tuple[str, ...]:
+    """Return one explicit semantic-attribution label per memory object."""
+    allowed = {"exact_signature", "unique_provenance", "ambiguous"}
+    output = tuple(
+        method if method in allowed else "unavailable"
+        for method in methods[:count]
+    )
+    if len(output) < count:
+        output += ("unavailable",) * (count - len(output))
+    return output
 
 
 def _event_provenance(event: object) -> str:

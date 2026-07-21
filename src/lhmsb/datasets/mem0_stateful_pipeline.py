@@ -9,6 +9,7 @@ import json
 import shutil
 import subprocess
 import tarfile
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from lhmsb.families.software.mem0_vertical import (
 from lhmsb.longhorizon.attribution import build_software_fact_signatures
 from lhmsb.longhorizon.public_surface import SurfaceLeakPolicy, validate_public_payload
 from lhmsb.longhorizon.replay import plan_hash
+from lhmsb.qualification.readiness import compute_heuristic_baselines
 
 MEM0_STATEFUL_SCHEMA_VERSION = 2
 MEM0_STATEFUL_GENERATOR_VERSION = "software-project-mem0-vertical-0.2"
@@ -359,6 +361,7 @@ def _write_stage(out: Path, generated: Sequence[Mem0StatefulGenerated]) -> None:
     _write_jsonl(evaluator_root / "sceu.jsonl", all_sceu)
     _write_jsonl(evaluator_root / "continuation_mappings.jsonl", mappings)
     _write_json(evaluator_root / "dependencies.json", dependencies)
+    _write_json(evaluator_root / "dataset_audit.json", _dataset_audit(generated))
     release_id, generator_version = _release_for_generation(
         n_episodes=len(generated),
         n_sessions=(generated[0].spec.plan.n_sessions if generated else 0),
@@ -400,6 +403,77 @@ def _evaluator_record(spec: SoftwareMem0VerticalSpec) -> dict[str, object]:
         "evaluator_continuations": [
             continuation.to_dict() for continuation in spec.evaluator_continuations
         ],
+    }
+
+
+def _dataset_audit(
+    generated: Sequence[Mem0StatefulGenerated],
+) -> dict[str, object]:
+    specs = {
+        item.spec.plan.episode_id: item.spec
+        for item in generated
+    }
+    heuristic = compute_heuristic_baselines(specs)
+    scenarios: Counter[str] = Counter()
+    schedules: Counter[str] = Counter()
+    cells: Counter[str] = Counter()
+    recoverability: Counter[str] = Counter()
+    challenges: Counter[str] = Counter()
+    for item in generated:
+        metadata = item.spec.plan.metadata_dict
+        scenario = str(metadata.get("semantic_scenario", "unknown"))
+        schedule = str(metadata.get("phase_signature", "unknown"))
+        variant = str(metadata.get("recoverability_variant", "unknown"))
+        scenarios[scenario] += 1
+        schedules[schedule] += 1
+        cells[f"{scenario}|{schedule}"] += 1
+        recoverability[variant] += 1
+        challenges.update(
+            opportunity.challenge_type
+            for opportunity in item.spec.plan.opportunities
+        )
+    best_action_accuracy = heuristic.get("best_always_action_accuracy")
+    action_dominance_ok = (
+        not isinstance(best_action_accuracy, bool)
+        and isinstance(best_action_accuracy, int | float)
+        and float(best_action_accuracy) <= 0.60
+    )
+    best_option_accuracy = heuristic.get("best_always_option_accuracy")
+    option_dominance_ok = (
+        not isinstance(best_option_accuracy, bool)
+        and isinstance(best_option_accuracy, int | float)
+        and float(best_option_accuracy) <= 0.50
+    )
+    return {
+        "schema_version": 1,
+        "n_episodes": len(generated),
+        "semantic_scenario_counts": dict(sorted(scenarios.items())),
+        "phase_schedule_counts": dict(sorted(schedules.items())),
+        "scenario_schedule_cell_counts": dict(sorted(cells.items())),
+        "recoverability_variant_counts": dict(sorted(recoverability.items())),
+        "challenge_type_counts": dict(sorted(challenges.items())),
+        "policy_free_baselines": heuristic,
+        "checks": {
+            "unique_episode_hashes": len(
+                {item.plan_hash for item in generated}
+            ) == len(generated),
+            "unique_surface_hashes": len(
+                {item.surface_hash for item in generated}
+            ) == len(generated),
+            "max_always_action_accuracy_le_0_60": action_dominance_ok,
+            "max_always_option_accuracy_le_0_50": option_dominance_ok,
+            "all_action_ids_have_at_least_two_gold_uses_per_episode": all(
+                min(
+                    Counter(
+                        action_id
+                        for opportunity in item.spec.plan.opportunities
+                        for action_id in opportunity.valid_action_ids
+                    ).values()
+                )
+                >= 2
+                for item in generated
+            ),
+        },
     }
 
 

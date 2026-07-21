@@ -7,9 +7,12 @@ response to full-run outcomes. Any later deviation is recorded as exploratory.
 ## Experimental unit and dataset
 
 - Dataset release: `software-vertical-mem0-v0.4.0`.
-- 50 independent episodes, 16 sessions and 15 handoffs per episode.
-- The episode is the independent sampling and inferential unit. SCEUs within an
-  episode are repeated measurements, not independent samples.
+- 50 generated episodes, 16 sessions and 15 handoffs per episode.
+- The episode is the primary repeated-trajectory unit. SCEUs within an episode
+  are repeated measurements, not independent samples. Because episodes cross
+  five semantic scenarios with ten schedules, scenario-clustered and
+  leave-one-scenario-out sensitivity analyses accompany episode-level results;
+  the 50 episodes are not described as 50 independent semantic templates.
 - Five preregistered software scenarios and ten event schedules are crossed
   across semantic seeds. Explicit, derivable, and absent workspace variants are
   balanced across trajectory seeds.
@@ -31,8 +34,12 @@ readouts are reported separately.
 3. Eligible-denominator long-horizon behavioral drift, split into
    `constraint_loss`, `plan_deviation`, `stale_state`, and
    `local_over_global`.
-4. Exact storage provenance metrics. Inferred inventory-diff provenance is a
-   labeled sensitivity analysis and is never pooled silently with exact events.
+4. Storage quality on two independent axes: lifecycle-event provenance
+   (`native event`, `inventory-diff inferred`, or `unavailable`) and semantic
+   state attribution (`exact_signature`, `unique_provenance`, `ambiguous`, or
+   `unavailable`). Inferred lifecycle events are a labeled sensitivity analysis;
+   a native event is never described as semantically exact merely because its
+   add/update/delete operation was observed exactly.
 5. The four-stage retrieval chain: backend-retrieved, selected, model-visible,
    and behaviorally used state/memory objects.
 
@@ -80,6 +87,8 @@ by seven conditions). Before the full run:
 - repository tests pass on Linux;
 - a one-episode server smoke validates all artifacts;
 - every write has exact or explicitly inferred provenance;
+- every final memory object has an explicit semantic-attribution method, and
+  ambiguous objects contribute no positive state coverage;
 - future-state, stale-state, constraint-loss, and local-over-global fixtures
   each produce their expected positive and negative checks;
 - no action supplies more than 60% of gold-valid opportunities;

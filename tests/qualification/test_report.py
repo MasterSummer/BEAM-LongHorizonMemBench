@@ -10,6 +10,7 @@ from lhmsb.qualification.report import (
     REQUIRED_REPORT_ARTIFACTS,
     _append_prefix_reranker_usage,
     _evaluation_trace_id,
+    _semantic_attribution_diagnostics,
     _storage_provenance_diagnostics,
     write_qualification_report,
 )
@@ -20,6 +21,7 @@ from lhmsb.qualification.runner import (
     SCEURunResult,
 )
 from lhmsb.qualification.tei import RerankResult
+from lhmsb.qualification.validate import _validate_semantic_attributions
 
 
 def _matrix() -> tuple[QualificationMatrixResult, dict[str, object]]:
@@ -106,6 +108,11 @@ def test_report_emits_required_deterministic_hashed_artifacts(
     assert manifest["run_identity"] == "run-identity"
     assert manifest["code_commit"] == "abc123"
     assert manifest["artifact_hashes"] == dict(first.artifact_hashes)
+    limitations = (tmp_path / "first" / "limitations.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Generated trajectory/schedule variants are not independent" in limitations
+    assert "Artifact validation and scientific measurement readiness" in limitations
     metrics = json.loads(
         (tmp_path / "first" / "metrics.json").read_text(encoding="utf-8")
     )
@@ -221,6 +228,84 @@ def test_storage_provenance_uses_checkpoint_write_deltas() -> None:
             "write_delta": 1,
             "event_count": 0,
         }
+    ]
+
+
+def test_semantic_attribution_is_reported_independently_from_event_provenance() -> None:
+    rows = {
+        "memory_inventory.jsonl": [
+            {
+                "task_id": "task-memory",
+                "checkpoint_session": 1,
+                "evaluator_attribution_by_memory": {
+                    "old": {
+                        "method": "ambiguous",
+                        "provenance_mode": "native/exact",
+                        "contributes_positive_coverage": False,
+                    }
+                },
+            },
+            {
+                "task_id": "task-memory",
+                "checkpoint_session": 2,
+                "evaluator_attribution_by_memory": {
+                    "exact": {
+                        "method": "exact_signature",
+                        "provenance_mode": "native/exact",
+                        "contributes_positive_coverage": True,
+                    },
+                    "ambiguous": {
+                        "method": "ambiguous",
+                        "provenance_mode": "native/exact",
+                        "contributes_positive_coverage": False,
+                    },
+                },
+            },
+        ]
+    }
+
+    diagnostics = _semantic_attribution_diagnostics(rows)
+
+    assert diagnostics["scope"] == "latest_inventory_per_task"
+    assert diagnostics["n_memory_objects"] == 2
+    assert diagnostics["method_counts"] == {
+        "ambiguous": 1,
+        "exact_signature": 1,
+    }
+    assert diagnostics["lifecycle_provenance_counts"] == {"native/exact": 2}
+    assert diagnostics["positive_coverage_rate"] == 0.5
+    assert diagnostics["status"] == "complete"
+
+    rows["memory_inventory.jsonl"][-1]["evaluator_attribution_by_memory"][
+        "exact"
+    ].pop("contributes_positive_coverage")
+    incomplete = _semantic_attribution_diagnostics(rows)
+    assert incomplete["status"] == "incomplete"
+    assert incomplete["incomplete_objects"] == ["task-memory:exact"]
+
+
+def test_ambiguous_semantic_attribution_cannot_score_positive_coverage() -> None:
+    errors: list[str] = []
+    _validate_semantic_attributions(
+        (
+            {
+                "task_id": "task-memory",
+                "checkpoint_session": 2,
+                "evaluator_attribution_by_memory": {
+                    "memory-1": {
+                        "method": "ambiguous",
+                        "provenance_mode": "native/exact",
+                        "contributes_positive_coverage": True,
+                    }
+                },
+            },
+        ),
+        errors,
+    )
+
+    assert errors == [
+        "ambiguous semantic attribution contributes positive coverage for "
+        "task-memory:2:memory-1"
     ]
 
 

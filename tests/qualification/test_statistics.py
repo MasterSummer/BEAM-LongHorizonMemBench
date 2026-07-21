@@ -54,12 +54,24 @@ def test_statistics_cluster_sceu_rows_by_episode_and_pair_cells() -> None:
             )
     first = compute_episode_cluster_statistics(
         rows,
+        episode_groups={
+            "e0": "scenario-a",
+            "e1": "scenario-a",
+            "e2": "scenario-b",
+            "e3": "scenario-b",
+        },
         seed=7,
         bootstrap_resamples=200,
         permutation_resamples=200,
     )
     second = compute_episode_cluster_statistics(
         rows,
+        episode_groups={
+            "e0": "scenario-a",
+            "e1": "scenario-a",
+            "e2": "scenario-b",
+            "e3": "scenario-b",
+        },
         seed=7,
         bootstrap_resamples=200,
         permutation_resamples=200,
@@ -81,4 +93,21 @@ def test_statistics_cluster_sceu_rows_by_episode_and_pair_cells() -> None:
     assert comparison["mean_difference"] == pytest.approx(0.5)
     assert comparison["analysis_unit"] == "paired_episode"
     assert "holm_adjusted_p_value" in comparison
+    assert first["n_unique_episode_groups"] == 2
+    scenario_cell = next(
+        row
+        for row in first["scenario_cells"]  # type: ignore[index]
+        if row["metric"] == "mean_behavior_score"  # type: ignore[index]
+        and row["condition"] == "mem0"  # type: ignore[index]
+    )
+    assert scenario_cell["n_groups"] == 2
+    assert scenario_cell["analysis_unit"] == "semantic_scenario_cluster"
+    scenario_comparison = next(
+        row
+        for row in first["scenario_paired_comparisons"]  # type: ignore[index]
+        if row["metric"] == "mean_behavior_score"  # type: ignore[index]
+    )
+    assert scenario_comparison["n_pairs"] == 2
+    assert scenario_comparison["mean_difference"] == pytest.approx(0.5)
     assert "Analysis unit: **episode**" in statistics_markdown(first)
+    assert "Semantic-scenario sensitivity" in statistics_markdown(first)
