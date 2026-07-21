@@ -519,20 +519,46 @@ class Neo4jBoltTransport:
         if self.exclusive_database:
             rows = self._run(
                 "MATCH (n) "
-                "RETURN coalesce(n.id, elementId(n)) AS node_id, "
-                "labels(n) AS labels, properties(n) AS properties "
-                "ORDER BY node_id"
+                "WITH collect({node_id: coalesce(n.id, elementId(n)), "
+                "labels: labels(n), properties: properties(n)}) AS nodes "
+                "OPTIONAL MATCH (a)-[r]->(b) "
+                "RETURN nodes, collect(CASE WHEN r IS NULL THEN null ELSE "
+                "{edge_id: coalesce(r.id, elementId(r)), "
+                "source_id: coalesce(a.id, elementId(a)), "
+                "target_id: coalesce(b.id, elementId(b)), "
+                "relationship: type(r), properties: properties(r)} END) AS edges"
             )
         else:
             rows = self._run(
                 "MATCH (n) WHERE n.lhmsb_namespace = $namespace "
-                "RETURN coalesce(n.id, elementId(n)) AS node_id, "
-                "labels(n) AS labels, properties(n) AS properties "
-                "ORDER BY node_id",
+                "WITH collect({node_id: coalesce(n.id, elementId(n)), "
+                "labels: labels(n), properties: properties(n)}) AS nodes "
+                "OPTIONAL MATCH (a)-[r]->(b) "
+                "WHERE a.lhmsb_namespace = $namespace "
+                "AND b.lhmsb_namespace = $namespace "
+                "RETURN nodes, collect(CASE WHEN r IS NULL THEN null ELSE "
+                "{edge_id: coalesce(r.id, elementId(r)), "
+                "source_id: coalesce(a.id, elementId(a)), "
+                "target_id: coalesce(b.id, elementId(b)), "
+                "relationship: type(r), properties: properties(r)} END) AS edges",
                 namespace=namespace,
             )
+        if len(rows) != 1:
+            raise Neo4jError(
+                "invalid_graph_result",
+                "Neo4j atomic snapshot query must return exactly one row",
+            )
+        raw_nodes = rows[0].get("nodes", ())
+        raw_edges = rows[0].get("edges", ())
+        if not isinstance(raw_nodes, Sequence) or isinstance(raw_nodes, str | bytes):
+            raise Neo4jError("invalid_graph_field", "Neo4j nodes must be an array")
+        if not isinstance(raw_edges, Sequence) or isinstance(raw_edges, str | bytes):
+            raise Neo4jError("invalid_graph_field", "Neo4j edges must be an array")
         nodes_list: list[Neo4jNode] = []
-        for row in rows:
+        for raw_row in raw_nodes:
+            if not isinstance(raw_row, Mapping):
+                raise Neo4jError("invalid_graph_field", "Neo4j node must be a mapping")
+            row = cast(Mapping[str, object], raw_row)
             raw_labels = row.get("labels", ())
             if not isinstance(raw_labels, Sequence) or isinstance(raw_labels, str | bytes):
                 raise Neo4jError("invalid_graph_field", "Neo4j labels must be an array")
@@ -546,27 +572,7 @@ class Neo4jBoltTransport:
                     ),
                 )
             )
-        nodes = tuple(nodes_list)
-        if self.exclusive_database:
-            edge_rows = self._run(
-                "MATCH (a)-[r]->(b) "
-                "RETURN coalesce(r.id, elementId(r)) AS edge_id, "
-                "coalesce(a.id, elementId(a)) AS source_id, "
-                "coalesce(b.id, elementId(b)) AS target_id, "
-                "type(r) AS relationship, properties(r) AS properties "
-                "ORDER BY edge_id"
-            )
-        else:
-            edge_rows = self._run(
-                "MATCH (a)-[r]->(b) WHERE a.lhmsb_namespace = $namespace "
-                "AND b.lhmsb_namespace = $namespace "
-                "RETURN coalesce(r.id, elementId(r)) AS edge_id, "
-                "coalesce(a.id, elementId(a)) AS source_id, "
-                "coalesce(b.id, elementId(b)) AS target_id, "
-                "type(r) AS relationship, properties(r) AS properties "
-                "ORDER BY edge_id",
-                namespace=namespace,
-            )
+        nodes = tuple(sorted(nodes_list, key=lambda item: item.node_id))
         edges = tuple(
             Neo4jEdge(
                 _nonempty(row.get("edge_id"), "edge_id"),
@@ -578,9 +584,18 @@ class Neo4jBoltTransport:
                     "edge properties",
                 ),
             )
-            for row in edge_rows
+            for raw_row in raw_edges
+            if isinstance(raw_row, Mapping)
+            for row in (cast(Mapping[str, object], raw_row),)
         )
-        return Neo4jGraphSnapshot(namespace, nodes, edges, observed_at=time.time())
+        if len(edges) != len(raw_edges):
+            raise Neo4jError("invalid_graph_field", "Neo4j edge must be a mapping")
+        return Neo4jGraphSnapshot(
+            namespace,
+            nodes,
+            tuple(sorted(edges, key=lambda item: item.edge_id)),
+            observed_at=time.time(),
+        )
 
     def storage_bytes(self, *, namespace: str) -> int | None:
         del namespace

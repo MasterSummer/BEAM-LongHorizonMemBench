@@ -96,27 +96,31 @@ def test_bolt_exclusive_database_snapshots_official_memos_graph_without_namespac
             [{"node_count": 0}],
             [
                 {
-                    "node_id": "memory-a",
-                    "labels": ["Memory"],
-                    "properties": {
-                        "id": "memory-a",
-                        "memory": "offline only",
-                        "created_at": _TemporalValue(),
-                    },
-                },
-                {
-                    "node_id": "memory-b",
-                    "labels": ["Memory"],
-                    "properties": {"id": "memory-b", "memory": "safe v2"},
-                },
-            ],
-            [
-                {
-                    "edge_id": "edge-1",
-                    "source_id": "memory-a",
-                    "target_id": "memory-b",
-                    "relationship": "RELATE_TO",
-                    "properties": {},
+                    "nodes": [
+                        {
+                            "node_id": "memory-a",
+                            "labels": ["Memory"],
+                            "properties": {
+                                "id": "memory-a",
+                                "memory": "offline only",
+                                "created_at": _TemporalValue(),
+                            },
+                        },
+                        {
+                            "node_id": "memory-b",
+                            "labels": ["Memory"],
+                            "properties": {"id": "memory-b", "memory": "safe v2"},
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "edge_id": "edge-1",
+                            "source_id": "memory-a",
+                            "target_id": "memory-b",
+                            "relationship": "RELATE_TO",
+                            "properties": {},
+                        }
+                    ],
                 }
             ],
         ]
@@ -137,3 +141,5 @@ def test_bolt_exclusive_database_snapshots_official_memos_graph_without_namespac
     assert snapshot.edges[0].source_id == "memory-a"
     assert all("lhmsb_namespace" not in query for query, _params in driver.calls)
     assert all(not params for _query, params in driver.calls)
+    assert len(driver.calls) == 2
+    assert "collect(" in driver.calls[1][0]
