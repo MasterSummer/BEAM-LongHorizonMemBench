@@ -219,6 +219,34 @@ uv pip compile --generate-hashes --python-version 3.11 \
   --output-file "${DATA_ROOT}/locks/memos-requirements.txt"
 download_hash_locked_wheels memos
 
+LOCK_ROOT="${DATA_ROOT}/locks" python3 - \
+  "${DATA_ROOT}/manifests/python-locks.json" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import sys
+
+lock_root = pathlib.Path(os.environ["LOCK_ROOT"])
+environments = {}
+for name in ("core", "mem0", "amem", "memos"):
+    path = lock_root / f"{name}-requirements.txt"
+    environments[name] = {
+        "filename": path.name,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+payload = {
+    "schema_version": 1,
+    "python_version": "3.11",
+    "environments": environments,
+}
+path = pathlib.Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+temporary = path.with_suffix(".json.tmp")
+temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+temporary.replace(path)
+PY
+
 for environment in core mem0 amem memos; do
   python="${DATA_ROOT}/venvs/${environment}/bin/python"
   [[ -x "${python}" ]] || python3 -m venv "${DATA_ROOT}/venvs/${environment}"

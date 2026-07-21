@@ -88,6 +88,30 @@ def test_slurm_dry_run_does_not_require_slurm_or_gpu(tmp_path: Path) -> None:
     assert not (tmp_path / "data").exists()
 
 
+def test_slurm_prepare_forwards_episode_limit(tmp_path: Path) -> None:
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "LHMSB_SLURM_DRY_RUN": "1",
+            "LHMSB_SLURM_MODE": "prepare",
+            "LHMSB_EPISODE_LIMIT": "5",
+            "LHMSB_DATA_ROOT": str(tmp_path / "data"),
+            "LHMSB_ENV_FILE": str(tmp_path / "missing.env"),
+            "LHMSB_RUN_NAME": "calibration",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(SLURM)],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "--episode-limit 5" in result.stdout
+
+
 def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
     smoke = (ROOT / "scripts" / "run_systems_smoke.sh").read_text(encoding="utf-8")
     qualification = (ROOT / "scripts" / "run_systems_qualification.sh").read_text(encoding="utf-8")
@@ -181,6 +205,7 @@ def test_bootstrap_uses_native_venv_and_pinned_sources() -> None:
         "native-runtime.json",
         "native-runtime.lock.yaml",
         "system-sources.json",
+        "python-locks.json",
         "source_manifest",
     ):
         assert marker in text
@@ -309,5 +334,7 @@ def test_bootstrap_locks_official_memos_tree_and_reader_extras() -> None:
     assert 'local staged="${destination}.next"' in bootstrap
     assert "--no-index" in bootstrap
     assert '--find-links "${DATA_ROOT}/wheelhouse/${environment}"' in bootstrap
+    assert "python-locks.json" in bootstrap
+    assert "Python lock manifest mismatch" in verifier
     for module in ("chonkie", "langchain_text_splitters", "markitdown"):
         assert f'"{module}"' in verifier

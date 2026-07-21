@@ -137,6 +137,36 @@ done
   printf 'missing model bundle manifest\n' >&2
   exit 1
 }
+[[ -s "${DATA_ROOT}/manifests/python-locks.json" ]] || {
+  printf 'missing Python lock manifest\n' >&2
+  exit 1
+}
+LOCK_ROOT="${DATA_ROOT}/locks" python3 - \
+  "${DATA_ROOT}/manifests/python-locks.json" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+records = manifest.get("environments")
+expected_names = {"core", "mem0", "amem", "memos"}
+if (
+    manifest.get("schema_version") != 1
+    or manifest.get("python_version") != "3.11"
+    or not isinstance(records, dict)
+    or set(records) != expected_names
+):
+    raise SystemExit("invalid Python lock manifest")
+lock_root = pathlib.Path(os.environ["LOCK_ROOT"])
+for name in sorted(expected_names):
+    path = lock_root / f"{name}-requirements.txt"
+    record = records[name]
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if record.get("filename") != path.name or record.get("sha256") != actual:
+        raise SystemExit(f"Python lock manifest mismatch: {name}")
+PY
 QDRANT_BIN="${LHMSB_QDRANT_BIN}" NEO4J_HOME="${LHMSB_NEO4J_HOME}" \
 JAVA_HOME="${LHMSB_JAVA_HOME}" TEI_BIN="${LHMSB_TEI_BIN}" \
   python3 - "${DATA_ROOT}/manifests/native-runtime.json" <<'PY'

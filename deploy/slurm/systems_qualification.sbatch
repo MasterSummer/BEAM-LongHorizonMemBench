@@ -25,6 +25,15 @@ ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
 MODE="${LHMSB_SLURM_MODE:-qualification}"
 RUN_NAME="${LHMSB_RUN_NAME:-systems-${SLURM_JOB_ID:-manual}}"
 DRY_RUN="${LHMSB_SLURM_DRY_RUN:-0}"
+EPISODE_LIMIT="${LHMSB_EPISODE_LIMIT:-}"
+RUN_ARGS=()
+if [[ -n "${EPISODE_LIMIT}" ]]; then
+  [[ "${EPISODE_LIMIT}" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'LHMSB_EPISODE_LIMIT must be a positive integer\n' >&2
+    exit 2
+  }
+  RUN_ARGS+=(--episode-limit "${EPISODE_LIMIT}")
+fi
 
 case "${MODE}" in
   smoke|prepare|qualification) ;;
@@ -55,7 +64,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   elif [[ "${MODE}" == "prepare" ]]; then
     systems_print_command "${SCRIPT_DIR}/run_systems_qualification.sh" --dry-run \
       --data-root "${DATA_ROOT}" --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" \
-      --prepare-only
+      --prepare-only "${RUN_ARGS[@]}"
   else
     systems_print_command "${SCRIPT_DIR}/run_systems_qualification.sh" --dry-run \
       --data-root "${DATA_ROOT}" --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" \
@@ -76,7 +85,8 @@ if [[ "${MODE}" == "smoke" ]]; then
     --env-file "${ENV_FILE}" --run-name "${RUN_NAME}"
 elif [[ "${MODE}" == "prepare" ]]; then
   "${SCRIPT_DIR}/run_systems_qualification.sh" --data-root "${DATA_ROOT}" \
-    --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" --prepare-only
+    --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" --prepare-only \
+    "${RUN_ARGS[@]}"
 else
   "${SCRIPT_DIR}/run_systems_qualification.sh" --data-root "${DATA_ROOT}" \
     --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" --keep-going

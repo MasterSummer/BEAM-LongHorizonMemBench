@@ -82,6 +82,7 @@ def test_native_cli_forces_selected_checkout_ahead_of_editable_install() -> None
     assert "Qdrant client/server versions exceed" in verify
     assert "native runtime hash mismatch" in verify
     assert "model bundle hash mismatch" in verify
+    assert "Python lock manifest mismatch" in verify
     assert "source_manifest verify" in verify
     assert '".cache" not in path.relative_to(root).parts' in verify
 

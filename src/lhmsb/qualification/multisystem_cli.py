@@ -265,14 +265,24 @@ def _source_tree_manifest_hash(environment: Mapping[str, str]) -> str:
     )
 
 
+def _python_lock_manifest_hash(environment: Mapping[str, str]) -> str:
+    return _manifest_hash(
+        environment,
+        path_keys=("LHMSB_PYTHON_LOCK_MANIFEST_PATH",),
+        hash_keys=("LHMSB_PYTHON_LOCK_MANIFEST_HASH",),
+        unavailable_label="python-lock-manifest-unavailable",
+    )
+
+
 def _assert_planned_preparation_manifests(
     manifest: Mapping[str, object],
     environment: Mapping[str, str],
-) -> tuple[str, str, str]:
-    """Require every preparation worker to use the three planned manifests."""
+) -> tuple[str, str, str, str]:
+    """Require every preparation worker to use the four planned manifests."""
     runtime_hash = _runtime_manifest_hash(environment)
     source_tree_hash = _source_tree_manifest_hash(environment)
     model_bundle_hash = _model_files_hash(environment)
+    python_lock_hash = _python_lock_manifest_hash(environment)
     comparisons = (
         (
             "runtime manifest",
@@ -289,13 +299,18 @@ def _assert_planned_preparation_manifests(
             manifest.get("model_bundle_hash", manifest.get("model_files_hash")),
             model_bundle_hash,
         ),
+        (
+            "Python lock manifest",
+            manifest.get("python_lock_manifest_hash"),
+            python_lock_hash,
+        ),
     )
     for label, expected, actual in comparisons:
         if expected is not None and expected != actual:
             raise MultisystemCliError(
                 f"{label} identity differs from the immutable run plan"
             )
-    return runtime_hash, source_tree_hash, model_bundle_hash
+    return runtime_hash, source_tree_hash, model_bundle_hash, python_lock_hash
 
 
 def _config(path: Path) -> SystemsQualificationConfig:
@@ -447,6 +462,7 @@ def plan_systems_run(
     runtime_manifest_hash = _runtime_manifest_hash(env)
     source_tree_manifest_hash = _source_tree_manifest_hash(env)
     model_bundle_hash = _model_files_hash(env)
+    python_lock_manifest_hash = _python_lock_manifest_hash(env)
     manifest_path = run_directory / "run_manifest.json"
     dataset_manifest = dataset.resolve() / "MANIFEST.json"
     if not dataset_manifest.is_file():
@@ -461,6 +477,7 @@ def plan_systems_run(
         "runtime_manifest_hash": runtime_manifest_hash,
         "source_tree_manifest_hash": source_tree_manifest_hash,
         "model_bundle_hash": model_bundle_hash,
+        "python_lock_manifest_hash": python_lock_manifest_hash,
         # Prefix artifacts use the historical ``model_files_hash`` name.
         "model_files_hash": model_bundle_hash,
         # A smoke subset and the full run share the same frozen dataset hash,
@@ -649,7 +666,7 @@ def _prepare_live_task(
         run_identity=_text(manifest.get("run_identity"), "run_identity"),
     )
     env = dict(os.environ if environment is None else environment)
-    _runtime_manifest, _source_tree_manifest, model_bundle_hash = (
+    _runtime_manifest, _source_tree_manifest, model_bundle_hash, _python_locks = (
         _assert_planned_preparation_manifests(manifest, env)
     )
     profile = config.system_profiles[task.backend]

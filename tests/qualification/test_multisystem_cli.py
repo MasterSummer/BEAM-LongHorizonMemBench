@@ -90,6 +90,7 @@ def test_plan_binds_runtime_source_and_model_bundle_manifests(tmp_path: Path) ->
     runtime = "a" * 64
     models = "b" * 64
     sources = "c" * 64
+    python_locks = "d" * 64
     from lhmsb.qualification.multisystem_cli import plan_systems_run
 
     payload = plan_systems_run(
@@ -102,11 +103,13 @@ def test_plan_binds_runtime_source_and_model_bundle_manifests(tmp_path: Path) ->
             "LHMSB_RUNTIME_MANIFEST_HASH": runtime,
             "LHMSB_MODEL_BUNDLE_HASH": models,
             "LHMSB_SOURCE_TREE_MANIFEST_HASH": sources,
+            "LHMSB_PYTHON_LOCK_MANIFEST_HASH": python_locks,
         },
     )
     assert payload["runtime_manifest_hash"] == runtime
     assert payload["source_tree_manifest_hash"] == sources
     assert payload["model_bundle_hash"] == models
+    assert payload["python_lock_manifest_hash"] == python_locks
     assert payload["model_files_hash"] == models
     manifest = json.loads((run / "run_manifest.json").read_text())
     assert manifest["run_identity"] == payload["run_identity"]
@@ -230,16 +233,18 @@ def test_preparation_worker_rejects_changed_source_tree_manifest() -> None:
         "runtime_manifest_hash": "a" * 64,
         "source_tree_manifest_hash": "b" * 64,
         "model_bundle_hash": "c" * 64,
+        "python_lock_manifest_hash": "d" * 64,
     }
     environment = {
         "LHMSB_RUNTIME_MANIFEST_HASH": "a" * 64,
         "LHMSB_SOURCE_TREE_MANIFEST_HASH": "b" * 64,
         "LHMSB_MODEL_BUNDLE_HASH": "c" * 64,
+        "LHMSB_PYTHON_LOCK_MANIFEST_HASH": "d" * 64,
     }
     assert multisystem_cli._assert_planned_preparation_manifests(
         manifest,
         environment,
-    ) == ("a" * 64, "b" * 64, "c" * 64)
+    ) == ("a" * 64, "b" * 64, "c" * 64, "d" * 64)
 
     environment["LHMSB_SOURCE_TREE_MANIFEST_HASH"] = "d" * 64
     with pytest.raises(
