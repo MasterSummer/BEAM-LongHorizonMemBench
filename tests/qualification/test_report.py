@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from lhmsb.qualification.report import (
     _semantic_attribution_diagnostics,
     _storage_provenance_diagnostics,
     _storage_scorecard_rows,
+    _summary,
     write_qualification_report,
 )
 from lhmsb.qualification.runner import (
@@ -117,6 +119,12 @@ def test_report_emits_required_deterministic_hashed_artifacts(
     )
     assert "Generated trajectory/schedule variants are not independent" in limitations
     assert "Artifact validation and scientific measurement readiness" in limitations
+    summary = json.loads(
+        (tmp_path / "first" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["n_evaluated_episodes"] == 1
+    assert summary["n_frozen_dataset_episodes"] == 1
+    assert summary["evaluated_episode_ids"] == [next(iter(specs))]
     metrics = json.loads(
         (tmp_path / "first" / "metrics.json").read_text(encoding="utf-8")
     )
@@ -165,6 +173,52 @@ def test_report_emits_required_deterministic_hashed_artifacts(
     assert (episode_directory / "scorecard.csv").is_file()
     assert (episode_directory / "summary.json").is_file()
     assert "episodes/index.json" in manifest["artifact_hashes"]
+
+
+def test_report_separates_evaluated_subset_from_frozen_dataset_scope(
+    tmp_path: Path,
+) -> None:
+    matrix, specs = _matrix()
+    extra = SoftwareMem0VerticalFamily.generate(43, n_sessions=4)
+    frozen_specs = {**specs, extra.plan.episode_id: extra}
+
+    write_qualification_report(
+        matrix,
+        frozen_specs,  # type: ignore[arg-type]
+        tmp_path / "report",
+    )
+
+    limitations = (tmp_path / "report" / "limitations.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Evaluated episodes: 1 of 2 frozen" in limitations
+    assert "Policy-free fixed-action and opaque-option baselines use the full frozen" in (
+        limitations
+    )
+    summary = json.loads(
+        (tmp_path / "report" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["n_evaluated_episodes"] == 1
+    assert summary["n_frozen_dataset_episodes"] == 2
+
+
+def test_summary_count_load_does_not_mix_in_leave_one_out_deletions() -> None:
+    matrix, specs = _matrix()
+    rows: defaultdict[str, tuple[dict[str, object], ...]] = defaultdict(tuple)
+    rows["interventions.jsonl"] = (
+        {
+            "intervention_kind": "leave_one_out",
+            "count_contrast": "delete_one",
+        },
+        {
+            "intervention_kind": "count_add",
+            "count_contrast": "add_5",
+        },
+    )
+
+    summary = _summary(matrix, rows, specs=specs)  # type: ignore[arg-type]
+
+    assert summary["n_memory_count_contrasts"] == 1
 
 
 def test_storage_scorecard_separates_exact_and_inferred_provenance() -> None:

@@ -52,6 +52,23 @@ def _is_memory_count_contrast(value: object) -> bool:
     return suffix.isdigit() and int(suffix) > 0
 
 
+def _is_memory_count_load_contrast(value: object) -> bool:
+    """Return whether a contrast adds evaluator-controlled neutral objects.
+
+    Targeted ``delete_one`` probes change the visible object count, but they
+    also remove a specific potentially causal memory. They therefore belong
+    to leave-one-out causal-use metrics, not to the RQ5 count-load estimate.
+    """
+
+    label = str(value)
+    if label == "add_one":
+        return True
+    if not label.startswith("add_"):
+        return False
+    suffix = label.removeprefix("add_")
+    return suffix.isdigit() and int(suffix) > 0
+
+
 @dataclass(frozen=True)
 class MetricValue:
     numerator: float
@@ -1019,10 +1036,11 @@ def multisystem_observations_from_results(
                 count_contrasts = tuple(
                     item
                     for item in intervention_rows
-                    if _is_memory_count_contrast(
+                    if _is_memory_count_load_contrast(
                         getattr(item, "count_contrast", "")
                     )
-                    or str(getattr(item, "intervention_kind", "")) == "count_contrast"
+                    and str(getattr(item, "intervention_kind", ""))
+                    in {"count_add", "count_contrast"}
                 )
                 selected = str(getattr(row, "selected_action_id", ""))
                 flips = sum(

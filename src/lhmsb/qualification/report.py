@@ -20,6 +20,7 @@ from lhmsb.qualification.metrics import (
     UsageMetricInput,
     _artifact_attributions,
     _is_memory_count_contrast,
+    _is_memory_count_load_contrast,
     compute_multisystem_metrics,
     compute_multisystem_metrics_by_cell,
     compute_multisystem_scorecard,
@@ -276,7 +277,7 @@ def write_qualification_report(
             }
         ),
     )
-    summary_payload = _summary(matrix, rows)
+    summary_payload = _summary(matrix, rows, specs=specs)
     memory_count_scorecard_rows = _memory_count_scorecard_rows(
         rows["interventions.jsonl"]
     )
@@ -512,16 +513,34 @@ def _limitations_markdown(
     heuristic_baselines: Mapping[str, object],
 ) -> str:
     """Render deterministic scope limits alongside every experiment report."""
-    scenarios = sorted(
+    frozen_scenarios = sorted(
         {
             str(dict(spec.plan.metadata).get("semantic_scenario", "unknown"))
             for spec in specs.values()
         }
     )
-    schedules = sorted(
+    frozen_schedules = sorted(
         {
             str(dict(spec.plan.metadata).get("phase_signature", "unknown"))
             for spec in specs.values()
+        }
+    )
+    evaluated_episode_ids = {
+        str(getattr(task, "episode_id", "")) for task in matrix.task_results
+    }
+    evaluated_specs = tuple(
+        spec for episode_id, spec in specs.items() if episode_id in evaluated_episode_ids
+    )
+    evaluated_scenarios = sorted(
+        {
+            str(dict(spec.plan.metadata).get("semantic_scenario", "unknown"))
+            for spec in evaluated_specs
+        }
+    )
+    evaluated_schedules = sorted(
+        {
+            str(dict(spec.plan.metadata).get("phase_signature", "unknown"))
+            for spec in evaluated_specs
         }
     )
     profiles = sorted(
@@ -556,11 +575,20 @@ def _limitations_markdown(
         "",
         "## Scope",
         "",
-        f"- Episodes: {len(specs)} generated software-project trajectories.",
-        f"- Semantic scenarios: {len(scenarios)} ({', '.join(scenarios) or 'none'}).",
-        f"- Phase schedules: {len(schedules)} ({', '.join(schedules) or 'none'}).",
+        f"- Evaluated episodes: {len(evaluated_specs)} of {len(specs)} frozen "
+        "software-project trajectories.",
+        f"- Evaluated semantic scenarios: {len(evaluated_scenarios)} "
+        f"({', '.join(evaluated_scenarios) or 'none'}).",
+        f"- Frozen-dataset semantic scenarios: {len(frozen_scenarios)} "
+        f"({', '.join(frozen_scenarios) or 'none'}).",
+        f"- Evaluated phase schedules: {len(evaluated_schedules)} "
+        f"({', '.join(evaluated_schedules) or 'none'}).",
+        f"- Frozen-dataset phase schedules: {len(frozen_schedules)} "
+        f"({', '.join(frozen_schedules) or 'none'}).",
         f"- Policy profiles: {', '.join(profiles) or 'none'}.",
         f"- Conditions: {', '.join(conditions) or 'none'}.",
+        "- Policy-free fixed-action and opaque-option baselines use the full frozen "
+        "dataset, not only the evaluated subset.",
         "- Generated trajectory/schedule variants are not independent semantic task templates; "
         "episode-level inference is accompanied by semantic-scenario sensitivity analysis.",
         "",
@@ -1290,6 +1318,8 @@ def _prefix_artifact_for_task(
 def _summary(
     matrix: QualificationMatrixResult,
     rows: Mapping[str, Sequence[dict[str, object]]],
+    *,
+    specs: Mapping[str, SoftwareMem0VerticalSpec],
 ) -> dict[str, object]:
     statuses: dict[str, int] = defaultdict(int)
     condition_statuses: dict[str, int] = defaultdict(int)
@@ -1297,10 +1327,16 @@ def _summary(
         statuses[task.status] += 1
         for condition in task.condition_results:
             condition_statuses[condition.status] += 1
+    evaluated_episode_ids = sorted(
+        {str(getattr(task, "episode_id", "")) for task in matrix.task_results}
+    )
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "run_identity": matrix.run_identity,
         "n_tasks": len(matrix.task_results),
+        "n_evaluated_episodes": len(evaluated_episode_ids),
+        "n_frozen_dataset_episodes": len(specs),
+        "evaluated_episode_ids": evaluated_episode_ids,
         "task_status_counts": dict(sorted(statuses.items())),
         "condition_status_counts": dict(sorted(condition_statuses.items())),
         "n_sceu_results": len(rows["sceu_results.jsonl"]),
@@ -1327,8 +1363,8 @@ def _summary(
         "storage_provenance": _storage_provenance_diagnostics(rows),
         "semantic_attribution": _semantic_attribution_diagnostics(rows),
         "n_memory_count_contrasts": sum(
-            _is_memory_count_contrast(row.get("count_contrast"))
-            or row.get("intervention_kind") == "count_contrast"
+            _is_memory_count_load_contrast(row.get("count_contrast"))
+            and row.get("intervention_kind") in {"count_add", "count_contrast"}
             for row in rows["interventions.jsonl"]
         ),
     }
@@ -1888,7 +1924,7 @@ def _memory_count_scorecard_rows(
     for row in intervention_rows:
         if str(row.get("intervention_kind", "")) != "count_add":
             continue
-        if not _is_memory_count_contrast(row.get("count_contrast")):
+        if not _is_memory_count_load_contrast(row.get("count_contrast")):
             continue
         baseline = _as_int(row.get("baseline_memory_count", 0))
         intervention = _as_int(row.get("intervention_memory_count", 0))

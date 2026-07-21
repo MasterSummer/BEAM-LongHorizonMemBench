@@ -10,10 +10,18 @@ from lhmsb.qualification.metrics import (
     StateCheckpointMetricInput,
     UsageMetricInput,
     _checkpoint_rerank_latency,
+    _is_memory_count_load_contrast,
     _is_state_conflict_opportunity,
     compute_metric_collection,
     safe_ratio,
 )
+
+
+def test_count_load_contrasts_exclude_targeted_memory_deletion() -> None:
+    assert _is_memory_count_load_contrast("add_one")
+    assert _is_memory_count_load_contrast("add_5")
+    assert not _is_memory_count_load_contrast("delete_one")
+    assert not _is_memory_count_load_contrast("replace_one")
 
 
 def test_safe_ratio_keeps_undefined_denominators_nullable() -> None:
