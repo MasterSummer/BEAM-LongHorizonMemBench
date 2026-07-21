@@ -80,6 +80,8 @@ def test_native_cli_forces_selected_checkout_ahead_of_editable_install() -> None
     assert 'PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"' in verify
     assert "Qdrant server does not match native runtime lock" in verify
     assert "Qdrant client/server versions exceed" in verify
+    assert "native runtime hash mismatch" in verify
+    assert "model bundle hash mismatch" in verify
 
 
 def test_native_services_are_loopback_only() -> None:

@@ -71,6 +71,98 @@ done
   printf 'missing model bundle manifest\n' >&2
   exit 1
 }
+QDRANT_BIN="${LHMSB_QDRANT_BIN}" NEO4J_HOME="${LHMSB_NEO4J_HOME}" \
+JAVA_HOME="${LHMSB_JAVA_HOME}" TEI_BIN="${LHMSB_TEI_BIN}" \
+  python3 - "${DATA_ROOT}/manifests/native-runtime.json" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
+
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = manifest.get("executables")
+if manifest.get("schema_version") != 1 or not isinstance(expected, dict):
+    raise SystemExit("invalid native runtime manifest")
+paths = {
+    "qdrant": Path(os.environ["QDRANT_BIN"]),
+    "neo4j": Path(os.environ["NEO4J_HOME"]) / "bin/neo4j",
+    "java": Path(os.environ["JAVA_HOME"]) / "bin/java",
+    "text-embeddings-router": Path(os.environ["TEI_BIN"]),
+}
+if set(expected) != set(paths):
+    raise SystemExit("native runtime manifest executable set does not match runtime")
+for name, path in paths.items():
+    actual = digest(path)
+    if actual != expected[name]:
+        raise SystemExit(
+            f"native runtime hash mismatch for {name}: "
+            f"expected={expected[name]} actual={actual}"
+        )
+PY
+EMBEDDING_MODEL_DIR="${LHMSB_EMBEDDING_MODEL_DIR}" \
+RERANKER_MODEL_DIR="${LHMSB_RERANKER_MODEL_DIR}" \
+  python3 - "${DATA_ROOT}/manifests/model-bundle.json" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
+
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+models = manifest.get("models")
+if manifest.get("schema_version") != 1 or not isinstance(models, dict):
+    raise SystemExit("invalid model bundle manifest")
+roots = {
+    "embedding": Path(os.environ["EMBEDDING_MODEL_DIR"]),
+    "reranker": Path(os.environ["RERANKER_MODEL_DIR"]),
+}
+if set(models) != set(roots):
+    raise SystemExit("model bundle manifest set does not match runtime")
+for name, root in roots.items():
+    record = models[name]
+    if not isinstance(record, dict) or not isinstance(record.get("files"), list):
+        raise SystemExit(f"invalid model bundle record: {name}")
+    expected = {
+        str(item["path"]): (int(item["size"]), str(item["sha256"]))
+        for item in record["files"]
+        if isinstance(item, dict)
+    }
+    actual_paths = {
+        path.relative_to(root).as_posix(): path
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    if set(actual_paths) != set(expected):
+        missing = sorted(set(expected) - set(actual_paths))
+        extra = sorted(set(actual_paths) - set(expected))
+        raise SystemExit(
+            f"model bundle file-set mismatch for {name}: "
+            f"missing={missing[:5]} extra={extra[:5]}"
+        )
+    for relative, path in actual_paths.items():
+        expected_size, expected_hash = expected[relative]
+        if path.stat().st_size != expected_size or digest(path) != expected_hash:
+            raise SystemExit(f"model bundle hash mismatch: {name}/{relative}")
+PY
 qdrant_server_version="$("${LHMSB_QDRANT_BIN}" --version | awk '{print $2}')"
 qdrant_locked_version="$(
   awk '
