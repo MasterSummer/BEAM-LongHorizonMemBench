@@ -30,8 +30,10 @@ from lhmsb.qualification.metrics import (
 )
 from lhmsb.qualification.prefix import CommonRerankTrace, MemoryPrefixArtifact
 from lhmsb.qualification.readiness import (
+    compute_drift_action_calibration,
     compute_heuristic_baselines,
     compute_measurement_gates,
+    drift_action_calibration_markdown,
     heuristic_baselines_markdown,
     measurement_gates_markdown,
 )
@@ -80,6 +82,8 @@ REQUIRED_REPORT_ARTIFACTS: tuple[str, ...] = (
     "statistics.md",
     "heuristic_baselines.json",
     "heuristic_baselines.md",
+    "drift_calibration.json",
+    "drift_calibration.md",
     "measurement_gates.json",
     "measurement_gates.md",
     "limitations.md",
@@ -210,9 +214,7 @@ def write_qualification_report(
             _jsonl_bytes(rows[name]),
         )
 
-    evaluation_matrix = any(
-        not hasattr(task, "writes") for task in matrix.task_results
-    )
+    evaluation_matrix = any(not hasattr(task, "writes") for task in matrix.task_results)
     if evaluation_matrix:
         observations = multisystem_observations_from_results(
             matrix,
@@ -247,9 +249,7 @@ def write_qualification_report(
         metrics = compute_qualification_metrics(matrix, specs)
         metrics_by_cell = ()
         scorecard_rows = _scorecard_rows(matrix)
-        storage_scorecard_rows = _storage_scorecard_rows(
-            _metrics_by_cell(matrix, specs)
-        )
+        storage_scorecard_rows = _storage_scorecard_rows(_metrics_by_cell(matrix, specs))
         observations = ()
     episode_observations = (
         observations
@@ -270,23 +270,21 @@ def write_qualification_report(
             {
                 "schema_version": REPORT_SCHEMA_VERSION,
                 "groups": (
-                    list(metrics_by_cell)
-                    if evaluation_matrix
-                    else _metrics_by_cell(matrix, specs)
+                    list(metrics_by_cell) if evaluation_matrix else _metrics_by_cell(matrix, specs)
                 ),
             }
         ),
     )
     summary_payload = _summary(matrix, rows, specs=specs)
-    memory_count_scorecard_rows = _memory_count_scorecard_rows(
-        rows["interventions.jsonl"]
-    )
+    memory_count_scorecard_rows = _memory_count_scorecard_rows(rows["interventions.jsonl"])
     heuristic_payload = compute_heuristic_baselines(specs)
+    drift_calibration_payload = compute_drift_action_calibration(specs)
     measurement_payload = compute_measurement_gates(
         matrix,
         specs,
         summary=summary_payload,
         heuristic_baselines=heuristic_payload,
+        drift_calibration=drift_calibration_payload,
     )
     _atomic_write(
         output_directory / "summary.json",
@@ -337,9 +335,7 @@ def write_qualification_report(
         ).encode("utf-8"),
     )
     episode_groups = {
-        episode_id: str(
-            dict(spec.plan.metadata).get("semantic_scenario", "unknown")
-        )
+        episode_id: str(dict(spec.plan.metadata).get("semantic_scenario", "unknown"))
         for episode_id, spec in specs.items()
     }
     statistics_payload = compute_episode_cluster_statistics(
@@ -362,6 +358,14 @@ def write_qualification_report(
     _atomic_write(
         output_directory / "heuristic_baselines.md",
         heuristic_baselines_markdown(heuristic_payload).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "drift_calibration.json",
+        _json_bytes(drift_calibration_payload),
+    )
+    _atomic_write(
+        output_directory / "drift_calibration.md",
+        drift_action_calibration_markdown(drift_calibration_payload).encode("utf-8"),
     )
     _atomic_write(
         output_directory / "measurement_gates.json",
@@ -396,12 +400,12 @@ def write_qualification_report(
         ),
     )
 
-    artifact_names = tuple(
-        name for name in REQUIRED_REPORT_ARTIFACTS if name != "run_manifest.json"
-    ) + episode_artifacts
+    artifact_names = (
+        tuple(name for name in REQUIRED_REPORT_ARTIFACTS if name != "run_manifest.json")
+        + episode_artifacts
+    )
     artifact_hashes = tuple(
-        (name, _sha256_file(output_directory / name))
-        for name in sorted(artifact_names)
+        (name, _sha256_file(output_directory / name)) for name in sorted(artifact_names)
     )
     metadata = dict(run_metadata or {})
     for reserved in (
@@ -455,8 +459,7 @@ def _write_episode_reports(
             "analysis_scope": "single_episode_descriptive",
             "n_sceu": len(episode_rows),
             "n_tasks": sum(
-                str(getattr(task, "episode_id", "")) == episode_id
-                for task in matrix.task_results
+                str(getattr(task, "episode_id", "")) == episode_id for task in matrix.task_results
             ),
             "status": _aggregate_status(statuses),
             "conditions": sorted({row.condition for row in episode_rows}),
@@ -520,14 +523,9 @@ def _limitations_markdown(
         }
     )
     frozen_schedules = sorted(
-        {
-            str(dict(spec.plan.metadata).get("phase_signature", "unknown"))
-            for spec in specs.values()
-        }
+        {str(dict(spec.plan.metadata).get("phase_signature", "unknown")) for spec in specs.values()}
     )
-    evaluated_episode_ids = {
-        str(getattr(task, "episode_id", "")) for task in matrix.task_results
-    }
+    evaluated_episode_ids = {str(getattr(task, "episode_id", "")) for task in matrix.task_results}
     evaluated_specs = tuple(
         spec for episode_id, spec in specs.items() if episode_id in evaluated_episode_ids
     )
@@ -544,10 +542,7 @@ def _limitations_markdown(
         }
     )
     profiles = sorted(
-        {
-            str(getattr(task, "policy_profile_id", "unknown"))
-            for task in matrix.task_results
-        }
+        {str(getattr(task, "policy_profile_id", "unknown")) for task in matrix.task_results}
     )
     conditions = sorted(
         {
@@ -562,9 +557,7 @@ def _limitations_markdown(
         if isinstance(raw_gates, Sequence) and not isinstance(raw_gates, str | bytes)
         else ()
     )
-    unresolved = tuple(
-        item for item in gates if str(item.get("status")) != "pass"
-    )
+    unresolved = tuple(item for item in gates if str(item.get("status")) != "pass")
     ready = measurement_gates.get("measurement_ready") is True
     best_action = heuristic_baselines.get("best_always_action")
     best_accuracy = heuristic_baselines.get("best_always_action_accuracy")
@@ -620,7 +613,7 @@ def _limitations_markdown(
             lines.append(
                 f"- `{item.get('gate_id', 'unknown')}`: "
                 f"{item.get('status', 'unknown')} — "
-                f"{item.get('description', 'No description.') }"
+                f"{item.get('description', 'No description.')}"
             )
     lines.extend(
         (
@@ -654,9 +647,7 @@ def _flatten_rows(
     prefix_artifacts: Mapping[str, object] | None = None,
     specs: Mapping[str, SoftwareMem0VerticalSpec] | None = None,
 ) -> dict[str, list[dict[str, object]]]:
-    rows: dict[str, list[dict[str, object]]] = {
-        name: [] for name in _JSONL_ARTIFACTS
-    }
+    rows: dict[str, list[dict[str, object]]] = {name: [] for name in _JSONL_ARTIFACTS}
     seen_calls: set[str] = set()
     for task in matrix.task_results:
         task_context = _task_context(task)
@@ -673,8 +664,8 @@ def _flatten_rows(
                     "dataset_release": artifact.dataset_release,
                     "surface_hash": artifact.surface_hash,
                     "source_commit": artifact.source_commit,
-                    }
-                )
+                }
+            )
             # Schema-v2 evaluation results carry their immutable memory prefix
             # outside the task result (rather than through legacy ``writes``).
             # Export one inventory snapshot per checkpoint so the report keeps
@@ -765,15 +756,10 @@ def _flatten_rows(
             {
                 **task_context,
                 "status": task.status,
-                "result_ids": [
-                    condition.result_id
-                    for condition in task.condition_results
-                ],
+                "result_ids": [condition.result_id for condition in task.condition_results],
             }
         )
-        rows["task_results.jsonl"].append(
-            _jsonable(asdict(task))
-        )
+        rows["task_results.jsonl"].append(_jsonable(asdict(task)))
         for write in getattr(task, "writes", ()):
             write_context = {
                 **task_context,
@@ -915,25 +901,19 @@ def _flatten_rows(
                                     row.retrieved_memory_ids,
                                 )
                             ),
-                            "model_visible_memory_ids": list(
-                                row.model_visible_memory_ids
-                            ),
+                            "model_visible_memory_ids": list(row.model_visible_memory_ids),
                             "behaviorally_used_memory_ids": list(
                                 getattr(row, "behaviorally_used_memory_ids", ())
                             ),
                             "native_retrieved_memory_ids": list(
-                                row.retrieved_memory_ids
-                                if condition.readout == "native"
-                                else ()
+                                row.retrieved_memory_ids if condition.readout == "native" else ()
                             ),
                             "common_reranked_memory_ids": list(
                                 row.retrieved_memory_ids
                                 if condition.readout == "common_rerank"
                                 else ()
                             ),
-                            "candidate_shortfall": bool(
-                                getattr(row, "candidate_shortfall", False)
-                            ),
+                            "candidate_shortfall": bool(getattr(row, "candidate_shortfall", False)),
                             "search_latency_seconds": 0.0,
                             "rerank_result": None,
                             "internal_usage": [],
@@ -942,8 +922,7 @@ def _flatten_rows(
     rows["policy_calls.jsonl"] = [
         dict(row)
         for row in rows["api_usage.jsonl"]
-        if isinstance(row.get("policy_request_hash"), str)
-        and bool(row["policy_request_hash"])
+        if isinstance(row.get("policy_request_hash"), str) and bool(row["policy_request_hash"])
     ]
     return rows
 
@@ -1131,9 +1110,7 @@ def _state_checkpoints_by_cell(
         policy_id = str(getattr(task, "policy_profile_id", ""))
         task_condition = str(getattr(task, "condition", ""))
         for condition_result in getattr(task, "condition_results", ()):
-            condition = str(
-                getattr(condition_result, "condition", task_condition)
-            )
+            condition = str(getattr(condition_result, "condition", task_condition))
             readout = str(getattr(condition_result, "readout", "none"))
             grouped.setdefault((policy_id, condition, readout), []).extend(checkpoints)
     return {key: tuple(value) for key, value in grouped.items()}
@@ -1143,11 +1120,7 @@ def _metric_usage(row: Mapping[str, object]) -> UsageMetricInput:
     is_policy = isinstance(row.get("policy_request_hash"), str) and bool(
         row.get("policy_request_hash")
     )
-    component = (
-        "policy"
-        if is_policy
-        else _canonical_usage_component(row.get("call_kind", ""))
-    )
+    component = "policy" if is_policy else _canonical_usage_component(row.get("call_kind", ""))
     return UsageMetricInput(
         input_tokens=_optional_int(row.get("input_tokens")),
         output_tokens=_optional_int(row.get("output_tokens")),
@@ -1301,7 +1274,12 @@ def _prefix_artifact_for_task(
     condition = str(getattr(task, "condition", ""))
     episode_id = str(getattr(task, "episode_id", ""))
     backend = "mem0" if condition in {"mem0_controlled", "mem0_native"} else condition
-    for key in (f"{episode_id}--{backend}", backend, f"{episode_id}--{condition}", condition):
+    for key in (
+        f"{episode_id}--{backend}",
+        backend,
+        f"{episode_id}--{condition}",
+        condition,
+    ):
         raw = artifacts.get(key)
         if raw is None:
             continue
@@ -1347,16 +1325,13 @@ def _summary(
         "n_api_calls": len(rows["api_usage.jsonl"]),
         "n_policy_calls": len(rows["policy_calls.jsonl"]),
         "n_memory_internal_calls": sum(
-            row.get("call_kind") == "memory_internal_llm"
-            for row in rows["api_usage.jsonl"]
+            row.get("call_kind") == "memory_internal_llm" for row in rows["api_usage.jsonl"]
         ),
         "n_embedding_calls": sum(
-            row.get("call_kind") == "embedding"
-            for row in rows["api_usage.jsonl"]
+            row.get("call_kind") == "embedding" for row in rows["api_usage.jsonl"]
         ),
         "n_reranker_calls": sum(
-            row.get("call_kind") == "reranker"
-            for row in rows["api_usage.jsonl"]
+            row.get("call_kind") == "reranker" for row in rows["api_usage.jsonl"]
         ),
         "n_prefix_manifests": len(rows["prefix_manifests.jsonl"]),
         "n_graph_diagnostics": len(rows["graph_diagnostics.jsonl"]),
@@ -1415,9 +1390,7 @@ def _storage_provenance_diagnostics(
                     "event_count": event_count,
                 }
             )
-    incomplete_tasks = sorted(
-        {str(item["task_id"]) for item in incomplete_checkpoints}
-    )
+    incomplete_tasks = sorted({str(item["task_id"]) for item in incomplete_checkpoints})
     return {
         "native_exact_event_count": counts["native/exact"],
         "inferred_event_count": counts["inferred"],
@@ -1426,9 +1399,7 @@ def _storage_provenance_diagnostics(
         "incomplete_write_tasks": incomplete_tasks,
         "incomplete_write_checkpoints": incomplete_checkpoints,
         "status": (
-            "complete"
-            if counts["unavailable"] == 0 and not incomplete_tasks
-            else "incomplete"
+            "complete" if counts["unavailable"] == 0 and not incomplete_tasks else "incomplete"
         ),
     }
 
@@ -1442,9 +1413,7 @@ def _semantic_attribution_diagnostics(
         task_id = str(row.get("task_id", ""))
         checkpoint = _as_int(row.get("checkpoint_session", -1))
         previous = latest_by_task.get(task_id)
-        if previous is None or checkpoint > _as_int(
-            previous.get("checkpoint_session", -1)
-        ):
+        if previous is None or checkpoint > _as_int(previous.get("checkpoint_session", -1)):
             latest_by_task[task_id] = row
 
     method_counts: Counter[str] = Counter()
@@ -1482,9 +1451,7 @@ def _semantic_attribution_diagnostics(
                 if (
                     "method" not in value
                     or "provenance_mode" not in value
-                    or not isinstance(
-                        value.get("contributes_positive_coverage"), bool
-                    )
+                    or not isinstance(value.get("contributes_positive_coverage"), bool)
                 ):
                     incomplete_objects.append(f"{task_id}:{memory_id}")
             method_counts[method] += 1
@@ -1565,26 +1532,17 @@ def _scorecard_rows(
     for key in sorted(grouped):
         observations = grouped[key]
         rows = [item.row for item in observations]
-        interventions = [
-            intervention
-            for row in rows
-            for intervention in row.interventions
-        ]
+        interventions = [intervention for row in rows for intervention in row.interventions]
         causal = [
             intervention.classification.label
             for intervention in interventions
             if intervention.intervention_kind == "leave_one_out"
         ]
-        intervention_labels = [
-            intervention.classification.label
-            for intervention in interventions
-        ]
+        intervention_labels = [intervention.classification.label for intervention in interventions]
         count_contrasts = [
             intervention
             for intervention in interventions
-            if _is_memory_count_contrast(
-                getattr(intervention, "count_contrast", None)
-            )
+            if _is_memory_count_contrast(getattr(intervention, "count_contrast", None))
             or getattr(intervention, "intervention_kind", None) == "count_contrast"
         ]
         eligible_by_flag = {
@@ -1605,35 +1563,22 @@ def _scorecard_rows(
 
         def has_targeted_drift(row: SCEURunResult) -> bool:
             eligible = getattr(row, "drift_eligible_categories", None)
-            targeted = (
-                set(_CANONICAL_DRIFT_CATEGORIES)
-                if eligible is None
-                else set(eligible)
-            )
+            targeted = set(_CANONICAL_DRIFT_CATEGORIES) if eligible is None else set(eligible)
             return bool(targeted.intersection(row.normalized_drift_flags))
 
         def has_observed_drift(row: SCEURunResult) -> bool:
-            return bool(
-                set(_CANONICAL_DRIFT_CATEGORIES).intersection(
-                    row.normalized_drift_flags
-                )
-            )
+            return bool(set(_CANONICAL_DRIFT_CATEGORIES).intersection(row.normalized_drift_flags))
 
         def has_off_target_drift(row: SCEURunResult) -> bool:
             eligible = getattr(row, "drift_eligible_categories", None)
             if eligible is None:
                 return False
-            observed = set(_CANONICAL_DRIFT_CATEGORIES).intersection(
-                row.normalized_drift_flags
-            )
+            observed = set(_CANONICAL_DRIFT_CATEGORIES).intersection(row.normalized_drift_flags)
             return bool(observed.difference(eligible))
 
         targeted_rates = {
             flag: _ratio_value(
-                sum(
-                    flag in row.normalized_drift_flags
-                    for row in eligible_by_flag[flag]
-                ),
+                sum(flag in row.normalized_drift_flags for row in eligible_by_flag[flag]),
                 len(eligible_by_flag[flag]),
             )
             for flag in _CANONICAL_DRIFT_CATEGORIES
@@ -1650,9 +1595,7 @@ def _scorecard_rows(
                 "policy_profile_id": key[0],
                 "condition": key[1],
                 "readout": key[2],
-                "status": _aggregate_status(
-                    item.status for item in observations
-                ),
+                "status": _aggregate_status(item.status for item in observations),
                 "n_sceu": len(rows),
                 "mean_behavior_score": _ratio_value(
                     sum(row.behavior.behavior_score for row in rows),
@@ -1676,11 +1619,7 @@ def _scorecard_rows(
                         for row in rows
                         if _live_memory_count_from_row(row) is not None
                     ),
-                    sum(
-                        1
-                        for row in rows
-                        if _live_memory_count_from_row(row) is not None
-                    ),
+                    sum(1 for row in rows if _live_memory_count_from_row(row) is not None),
                 ),
                 "causal_memory_use_rate": _ratio_value(
                     sum(label in {"beneficial", "harmful"} for label in causal),
@@ -1696,8 +1635,7 @@ def _scorecard_rows(
                 ),
                 "unstable_intervention_rate": _ratio_value(
                     sum(
-                        label
-                        in {"unstable_baseline", "intervention_unstable"}
+                        label in {"unstable_baseline", "intervention_unstable"}
                         for label in intervention_labels
                     ),
                     len(intervention_labels),
@@ -1707,27 +1645,21 @@ def _scorecard_rows(
                         bool(getattr(item.classification, "action_changed", False))
                         for row in rows
                         for item in row.interventions
-                        if getattr(item, "intervention_kind", "")
-                        == "sham_replacement"
+                        if getattr(item, "intervention_kind", "") == "sham_replacement"
                     ),
                     sum(
                         1
                         for row in rows
                         for item in row.interventions
-                        if getattr(item, "intervention_kind", "")
-                        == "sham_replacement"
+                        if getattr(item, "intervention_kind", "") == "sham_replacement"
                     ),
                 ),
                 "constraint_loss_rate": targeted_rates["constraint_loss"],
-                "constraint_loss_eligible_n": len(
-                    eligible_by_flag["constraint_loss"]
-                ),
+                "constraint_loss_eligible_n": len(eligible_by_flag["constraint_loss"]),
                 "targeted_constraint_loss_rate": targeted_rates["constraint_loss"],
                 "observed_constraint_loss_rate": observed_rates["constraint_loss"],
                 "current_plan_deviation_rate": targeted_rates["plan_deviation"],
-                "plan_deviation_eligible_n": len(
-                    eligible_by_flag["plan_deviation"]
-                ),
+                "plan_deviation_eligible_n": len(eligible_by_flag["plan_deviation"]),
                 "targeted_plan_deviation_rate": targeted_rates["plan_deviation"],
                 "observed_plan_deviation_rate": observed_rates["plan_deviation"],
                 "stale_state_action_rate": targeted_rates["stale_state"],
@@ -1735,15 +1667,9 @@ def _scorecard_rows(
                 "targeted_stale_state_rate": targeted_rates["stale_state"],
                 "observed_stale_state_rate": observed_rates["stale_state"],
                 "local_over_global_rate": targeted_rates["local_over_global"],
-                "local_over_global_eligible_n": len(
-                    eligible_by_flag["local_over_global"]
-                ),
-                "targeted_local_over_global_rate": targeted_rates[
-                    "local_over_global"
-                ],
-                "observed_local_over_global_rate": observed_rates[
-                    "local_over_global"
-                ],
+                "local_over_global_eligible_n": len(eligible_by_flag["local_over_global"]),
+                "targeted_local_over_global_rate": targeted_rates["local_over_global"],
+                "observed_local_over_global_rate": observed_rates["local_over_global"],
                 "aggregate_drift_rate": _ratio_value(
                     sum(has_targeted_drift(row) for row in aggregate_eligible),
                     len(aggregate_eligible),
@@ -1761,9 +1687,7 @@ def _scorecard_rows(
                     sum(has_off_target_drift(row) for row in rows),
                     len(rows),
                 ),
-                "off_target_drift_n": sum(
-                    has_off_target_drift(row) for row in rows
-                ),
+                "off_target_drift_n": sum(has_off_target_drift(row) for row in rows),
                 "memory_count_contrast_rate": _ratio_value(
                     sum(
                         bool(getattr(item.classification, "action_changed", False))
@@ -1803,25 +1727,18 @@ def _metrics_by_cell(
     for policy_profile_id, condition_name, readout in keys:
         selected_tasks: list[QualificationTaskResult] = []
         for task in matrix.task_results:
-            if (
-                task.policy_profile_id != policy_profile_id
-                or task.condition != condition_name
-            ):
+            if task.policy_profile_id != policy_profile_id or task.condition != condition_name:
                 continue
             selected_conditions = tuple(
                 condition
                 for condition in task.condition_results
-                if condition.condition == condition_name
-                and condition.readout == readout
+                if condition.condition == condition_name and condition.readout == readout
             )
             if not selected_conditions:
                 continue
             traces = task.retrieval_traces
             if readout != "common_rerank":
-                traces = tuple(
-                    replace(trace, rerank_result=None)
-                    for trace in traces
-                )
+                traces = tuple(replace(trace, rerank_result=None) for trace in traces)
             selected_tasks.append(
                 replace(
                     task,
@@ -1932,11 +1849,7 @@ def _memory_count_scorecard_rows(
         if delta <= 0:
             continue
         raw_classification = row.get("classification")
-        classification = (
-            raw_classification
-            if isinstance(raw_classification, Mapping)
-            else {}
-        )
+        classification = raw_classification if isinstance(raw_classification, Mapping) else {}
         key = (
             str(row.get("policy_profile_id", "")),
             str(row.get("condition", "")),
@@ -2032,12 +1945,7 @@ def _scorecard_csv(rows: Sequence[Mapping[str, object]]) -> str:
     )
     writer.writeheader()
     for row in rows:
-        writer.writerow(
-            {
-                field: _display_value(row.get(field))
-                for field in _SCORECARD_FIELDS
-            }
-        )
+        writer.writerow({field: _display_value(row.get(field)) for field in _SCORECARD_FIELDS})
     return stream.getvalue()
 
 
@@ -2045,9 +1953,7 @@ def _scorecard_markdown(rows: Sequence[Mapping[str, object]]) -> str:
     header = "| " + " | ".join(_SCORECARD_FIELDS) + " |"
     divider = "| " + " | ".join("---" for _ in _SCORECARD_FIELDS) + " |"
     body = [
-        "| "
-        + " | ".join(_display_value(row.get(field)) for field in _SCORECARD_FIELDS)
-        + " |"
+        "| " + " | ".join(_display_value(row.get(field)) for field in _SCORECARD_FIELDS) + " |"
         for row in rows
     ]
     return "\n".join([header, divider, *body]) + "\n"
@@ -2075,8 +1981,7 @@ def _table_markdown(
     header = "| " + " | ".join(fields) + " |"
     divider = "| " + " | ".join("---" for _ in fields) + " |"
     body = [
-        "| " + " | ".join(_display_value(row.get(field)) for field in fields) + " |"
-        for row in rows
+        "| " + " | ".join(_display_value(row.get(field)) for field in fields) + " |" for row in rows
     ]
     return "\n".join((f"# {title}", "", note, "", header, divider, *body, ""))
 
@@ -2128,10 +2033,7 @@ def _jsonable(value: object) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
         return _jsonable(asdict(value))
     if isinstance(value, Mapping):
-        return {
-            str(key): _jsonable(child)
-            for key, child in value.items()
-        }
+        return {str(key): _jsonable(child) for key, child in value.items()}
     if isinstance(value, (tuple, list)):
         return [_jsonable(child) for child in value]
     if isinstance(value, (set, frozenset)):

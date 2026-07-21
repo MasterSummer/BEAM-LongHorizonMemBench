@@ -78,6 +78,7 @@ for identity in \
   # Importing MemOS without this setting creates ``$PWD/.memos`` and dirties
   # the immutable experiment checkout. The variable is harmless for A-MEM.
   MEMOS_BASE_PATH="${DATA_ROOT}/memos" \
+  LITELLM_LOCAL_MODEL_COST_MAP=True \
   LHMSB_DATA_ROOT="${DATA_ROOT}" \
   LHMSB_SOURCE_TREE_MANIFEST_PATH="${DATA_ROOT}/manifests/system-sources.json" \
   PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
@@ -87,6 +88,40 @@ for identity in \
     --manifest "${DATA_ROOT}/manifests/system-sources.json" \
     --source "${source_name}" --module "${module_name}"
 done
+
+# Importing A-MEM must use LiteLLM's package-bundled cost catalog.  This check
+# detects upstream/env regressions before any episode writer calls are made.
+LITELLM_LOCAL_MODEL_COST_MAP=True \
+  "$(systems_venv_python "${DATA_ROOT}" amem)" - <<'PY'
+import litellm  # noqa: F401
+from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info
+
+source = get_model_cost_map_source_info()
+assert source["source"] == "local", source
+assert source["is_env_forced"] is True, source
+assert source["url"] is None, source
+PY
+
+# The controlled MemOS Tree track instantiates both official tree-memory and
+# mem-reader components.  Their upstream extras are part of the generated,
+# hash-locked environment rather than manually installed server state.
+MEMOS_BASE_PATH="${DATA_ROOT}/memos" \
+TRANSFORMERS_NO_ADVISORY_WARNINGS=1 \
+  "$(systems_venv_python "${DATA_ROOT}" memos)" - <<'PY'
+import importlib
+import importlib.metadata
+
+for module in (
+    "chonkie",
+    "langchain_text_splitters",
+    "markitdown",
+    "neo4j",
+    "schedule",
+):
+    importlib.import_module(module)
+version = importlib.metadata.version("langchain-text-splitters")
+assert version.startswith("1."), version
+PY
 
 for required in "${LHMSB_QDRANT_BIN}" "${LHMSB_NEO4J_HOME}/bin/neo4j" \
   "${LHMSB_NEO4J_HOME}/bin/cypher-shell" "${LHMSB_JAVA_HOME}/bin/java" \

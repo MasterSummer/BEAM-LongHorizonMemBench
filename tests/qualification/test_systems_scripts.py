@@ -90,9 +90,7 @@ def test_slurm_dry_run_does_not_require_slurm_or_gpu(tmp_path: Path) -> None:
 
 def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
     smoke = (ROOT / "scripts" / "run_systems_smoke.sh").read_text(encoding="utf-8")
-    qualification = (ROOT / "scripts" / "run_systems_qualification.sh").read_text(
-        encoding="utf-8"
-    )
+    qualification = (ROOT / "scripts" / "run_systems_qualification.sh").read_text(encoding="utf-8")
     for text in (smoke, qualification):
         for marker in (
             "plan-systems",
@@ -120,12 +118,10 @@ def test_preflight_and_bootstrap_default_to_the_confirmatory_release() -> None:
 
 
 def test_qualification_prepares_every_episode_backend_prefix() -> None:
-    qualification = (ROOT / "scripts" / "run_systems_qualification.sh").read_text(
-        encoding="utf-8"
-    )
+    qualification = (ROOT / "scripts" / "run_systems_qualification.sh").read_text(encoding="utf-8")
     assert 'task_file="${RUN_DIR}/prepare_tasks.jsonl"' in qualification
     assert 'task_count="$(wc -l < "${task_file}")"' in qualification
-    assert 'while IFS=$\'\\t\' read -r task_index backend' in qualification
+    assert "while IFS=$'\\t' read -r task_index backend" in qualification
     assert 'flat_retrieval) environment="core"' in qualification
     assert '"${prepared}" -eq "${task_count}"' in qualification
     assert 'for pair in "core 0"' not in qualification
@@ -176,9 +172,7 @@ def test_qualification_rejects_invalid_episode_limit(tmp_path: Path) -> None:
 
 
 def test_bootstrap_uses_native_venv_and_pinned_sources() -> None:
-    text = (ROOT / "scripts" / "bootstrap_systems_server.sh").read_text(
-        encoding="utf-8"
-    )
+    text = (ROOT / "scripts" / "bootstrap_systems_server.sh").read_text(encoding="utf-8")
     for marker in (
         "python3 -m venv",
         "uv pip compile",
@@ -196,8 +190,8 @@ def test_bootstrap_uses_native_venv_and_pinned_sources() -> None:
 
 def test_common_helper_does_not_emit_secret_values() -> None:
     text = COMMON.read_text(encoding="utf-8")
-    assert 'printf \'%s\' "${OPENCODE_ZEN_API_KEY' not in text
-    assert 'printf \'%s\' "${DEEPSEEK_API_KEY' not in text
+    assert "printf '%s' \"${OPENCODE_ZEN_API_KEY" not in text
+    assert "printf '%s' \"${DEEPSEEK_API_KEY" not in text
     assert "systems_require_live_secrets" in text
 
 
@@ -209,7 +203,7 @@ def test_gpu_configuration_accepts_two_visible_rtx_devices_by_default(
     fake_smi = fake_bin / "nvidia-smi"
     fake_smi.write_text(
         "#!/usr/bin/env bash\n"
-        "if [[ \"$*\" == *\"index,name,uuid\"* ]]; then\n"
+        'if [[ "$*" == *"index,name,uuid"* ]]; then\n'
         "  printf '%s\\n' '0, NVIDIA GeForce RTX 4090, GPU-a' '1, NVIDIA GeForce RTX 4090, GPU-b'\n"
         "fi\n",
         encoding="utf-8",
@@ -293,3 +287,21 @@ def test_runtime_verifier_is_native() -> None:
     assert 'MEMOS_BASE_PATH="${DATA_ROOT}/memos"' in text
     assert "venvs" in text
     assert "docker" not in text.lower()
+
+
+def test_native_runtime_forces_litellm_package_local_cost_catalog() -> None:
+    common = COMMON.read_text(encoding="utf-8")
+    verifier = (ROOT / "scripts" / "verify_system_runtime.sh").read_text(encoding="utf-8")
+
+    assert "export LITELLM_LOCAL_MODEL_COST_MAP=True" in common
+    assert "get_model_cost_map_source_info" in verifier
+    assert 'source["is_env_forced"] is True' in verifier
+
+
+def test_bootstrap_locks_official_memos_tree_and_reader_extras() -> None:
+    bootstrap = (ROOT / "scripts" / "bootstrap_systems_server.sh").read_text(encoding="utf-8")
+    verifier = (ROOT / "scripts" / "verify_system_runtime.sh").read_text(encoding="utf-8")
+
+    assert "--extra tree-mem --extra mem-reader" in bootstrap
+    for module in ("chonkie", "langchain_text_splitters", "markitdown"):
+        assert f'"{module}"' in verifier

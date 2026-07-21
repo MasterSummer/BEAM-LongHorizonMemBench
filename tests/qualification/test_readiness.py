@@ -6,6 +6,7 @@ import pytest
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.qualification.readiness import (
+    compute_drift_action_calibration,
     compute_heuristic_baselines,
     compute_measurement_gates,
 )
@@ -34,6 +35,32 @@ def test_policy_free_baselines_expose_action_and_option_shortcuts() -> None:
     assert payload["best_always_action_accuracy"] == 0.5
     assert payload["uniform_random_expected_accuracy"] == pytest.approx(1 / 3)
     assert max(payload["always_option_accuracy"].values()) < 0.5  # type: ignore[union-attr]
+
+
+def test_policy_free_drift_calibration_has_positive_and_negative_controls() -> None:
+    specs = {
+        generated.plan.episode_id: generated
+        for index in range(5)
+        for generated in (
+            SoftwareMem0VerticalFamily.generate(
+                42 + index,
+                n_sessions=16,
+                trajectory_seed=index,
+            ),
+        )
+    }
+
+    payload = compute_drift_action_calibration(specs)
+
+    assert payload["all_categories_calibrated"] is True
+    assert payload["all_represented_scenarios_calibrated"] is True
+    assert len(payload["semantic_scenarios"]) == 5  # type: ignore[arg-type]
+    for detail in payload["categories"].values():  # type: ignore[union-attr]
+        assert detail["positive_assignments"] > 0
+        assert detail["negative_assignments"] > 0
+        assert detail["invalid_positive_assignments"] > 0
+        assert detail["valid_positive_assignments"] == 0
+        assert detail["calibrated"] is True
 
 
 def test_measurement_gates_separate_artifact_completion_from_readiness() -> None:
@@ -93,9 +120,7 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
     )
     workspace_rows = tuple(
         SimpleNamespace(
-            selected_action_id=(
-                "workspace-action" if index < 2 else "oracle-action"
-            ),
+            selected_action_id=("workspace-action" if index < 2 else "oracle-action"),
             opportunity_id=opportunity_id,
         )
         for index, opportunity_id in enumerate(opportunities)
@@ -141,7 +166,7 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
     )
 
     assert payload["measurement_ready"] is True
-    assert payload["gate_counts"] == {"pass": 17}
+    assert payload["gate_counts"] == {"pass": 18}
 
     # A managed system may demonstrate causal use even when raw flat retrieval
     # contains relevant text that the policy does not behaviorally use. That is
@@ -205,9 +230,7 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
         summary=summary,
         heuristic_baselines=compute_heuristic_baselines(specs),
     )
-    underpowered_gates = {
-        item["gate_id"]: item for item in underpowered["gates"]
-    }
+    underpowered_gates = {item["gate_id"]: item for item in underpowered["gates"]}
     assert underpowered_gates["sham_action_flip_rate"]["status"] == "pass"
     assert underpowered_gates["sham_action_flip_upper_bound"]["status"] == "fail"
     for row in memory_rows:

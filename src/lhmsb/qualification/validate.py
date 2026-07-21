@@ -36,9 +36,7 @@ def validate_qualification_artifacts(
     """Validate every artifact without trusting manifest-declared hashes."""
     errors: list[str] = []
     missing = [
-        name
-        for name in REQUIRED_REPORT_ARTIFACTS
-        if not (report_directory / name).is_file()
+        name for name in REQUIRED_REPORT_ARTIFACTS if not (report_directory / name).is_file()
     ]
     errors.extend(f"missing required artifact: {name}" for name in missing)
     manifest = _read_json(
@@ -49,8 +47,7 @@ def validate_qualification_artifacts(
     run_identity = _optional_text(manifest.get("run_identity"))
     if expected_run_identity is not None and run_identity != expected_run_identity:
         errors.append(
-            "run identity mismatch: "
-            f"expected {expected_run_identity}, got {run_identity}"
+            f"run identity mismatch: expected {expected_run_identity}, got {run_identity}"
         )
     hashes = manifest.get("artifact_hashes")
     if not isinstance(hashes, Mapping):
@@ -100,15 +97,11 @@ def validate_qualification_artifacts(
         errors,
     )
     result_task_ids = {
-        str(row.get("task_id", ""))
-        for row in jsonl["task_results.jsonl"]
-        if row.get("task_id")
+        str(row.get("task_id", "")) for row in jsonl["task_results.jsonl"] if row.get("task_id")
     }
     unknown_result_tasks = sorted(result_task_ids - task_ids)
     if unknown_result_tasks:
-        errors.append(
-            f"task_results contain unknown task IDs: {unknown_result_tasks}"
-        )
+        errors.append(f"task_results contain unknown task IDs: {unknown_result_tasks}")
 
     traces = {
         str(row.get("trace_id")): row
@@ -160,43 +153,25 @@ def validate_qualification_artifacts(
             errors,
         )
         if not set(backend_retrieved).issubset(candidates):
-            errors.append(
-                f"backend-retrieved memories are not a subset of candidates for {key}"
-            )
+            errors.append(f"backend-retrieved memories are not a subset of candidates for {key}")
         if not set(selected).issubset(backend_retrieved):
-            errors.append(
-                f"selected memories are not a subset of backend retrieval for {key}"
-            )
+            errors.append(f"selected memories are not a subset of backend retrieval for {key}")
         if not set(visible).issubset(selected):
-            errors.append(
-                f"model-visible memories are not a subset of selection for {key}"
-            )
+            errors.append(f"model-visible memories are not a subset of selection for {key}")
         if not set(behaviorally_used).issubset(visible):
-            errors.append(
-                f"behaviorally-used memories are not model-visible for {key}"
-            )
+            errors.append(f"behaviorally-used memories are not model-visible for {key}")
         if not set(retrieved).issubset(candidates):
-            errors.append(
-                f"retrieved memories are not a subset of candidates for {key}"
-            )
+            errors.append(f"retrieved memories are not a subset of candidates for {key}")
         if not set(visible).issubset(retrieved):
-            errors.append(
-                f"model-visible memories are not a subset of retrieved for {key}"
-            )
+            errors.append(f"model-visible memories are not a subset of retrieved for {key}")
         if visible != retrieved[: len(visible)]:
-            errors.append(
-                f"model-visible ordering is not a prefix of retrieved for {key}"
-            )
+            errors.append(f"model-visible ordering is not a prefix of retrieved for {key}")
         if readout == "native" and retrieved != candidates[: len(retrieved)]:
-            errors.append(
-                f"native retrieved ordering is not a candidate prefix for {key}"
-            )
+            errors.append(f"native retrieved ordering is not a candidate prefix for {key}")
         if condition in {"workspace_only", "oracle_current_state"} and any(
             (candidates, retrieved, visible)
         ):
-            errors.append(
-                f"non-memory condition exposes memory IDs for {key}"
-            )
+            errors.append(f"non-memory condition exposes memory IDs for {key}")
         trace_id = row.get("retrieval_trace_id")
         try:
             is_memory_condition = condition_definition(condition).prefix_backend is not None
@@ -206,24 +181,14 @@ def validate_qualification_artifacts(
         if is_memory_condition:
             memory_tasks_with_sceu.add(task_id)
             if not isinstance(trace_id, str) or trace_id not in traces:
-                errors.append(
-                    f"Mem0 SCEU lacks a known retrieval trace for {key}"
-                )
+                errors.append(f"Mem0 SCEU lacks a known retrieval trace for {key}")
             else:
                 _validate_trace_match(row, traces[trace_id], key, errors)
         elif trace_id is not None:
-            errors.append(
-                f"non-memory SCEU unexpectedly references retrieval trace for {key}"
-            )
+            errors.append(f"non-memory SCEU unexpectedly references retrieval trace for {key}")
 
-    inventory_tasks = {
-        str(row.get("task_id", ""))
-        for row in jsonl["memory_inventory.jsonl"]
-    }
-    trace_tasks = {
-        str(row.get("task_id", ""))
-        for row in jsonl["retrieval_trace.jsonl"]
-    }
+    inventory_tasks = {str(row.get("task_id", "")) for row in jsonl["memory_inventory.jsonl"]}
+    trace_tasks = {str(row.get("task_id", "")) for row in jsonl["retrieval_trace.jsonl"]}
     for task_id in sorted(memory_tasks_with_sceu):
         if task_id not in inventory_tasks:
             errors.append(f"memory task lacks inventory snapshots: {task_id}")
@@ -259,13 +224,9 @@ def validate_qualification_artifacts(
         ):
             errors.append(f"intervention evaluations must be an array for {key}")
         elif len(evaluations) != 2:
-            errors.append(
-                f"intervention must contain exactly two repeated evaluations for {key}"
-            )
+            errors.append(f"intervention must contain exactly two repeated evaluations for {key}")
         classification = row.get("classification")
-        if not isinstance(classification, Mapping) or not classification.get(
-            "label"
-        ):
+        if not isinstance(classification, Mapping) or not classification.get("label"):
             errors.append(f"intervention classification is incomplete for {key}")
 
     _unique_ids(
@@ -284,9 +245,7 @@ def validate_qualification_artifacts(
         allow_empty=False,
     )
     usage_by_id = {
-        str(row.get("call_id")): row
-        for row in jsonl["api_usage.jsonl"]
-        if row.get("call_id")
+        str(row.get("call_id")): row for row in jsonl["api_usage.jsonl"] if row.get("call_id")
     }
     schema_version = manifest.get("schema_version")
     strict_policy_routes = bool(
@@ -339,18 +298,26 @@ def validate_qualification_artifacts(
         errors,
         required=False,
     )
+    drift_calibration = _read_json(
+        report_directory / "drift_calibration.json",
+        errors,
+        required=False,
+    )
+    if drift_calibration:
+        for field in (
+            "all_categories_calibrated",
+            "all_represented_scenarios_calibrated",
+        ):
+            if not isinstance(drift_calibration.get(field), bool):
+                errors.append(f"drift_calibration.json lacks boolean {field}")
     measurement_gates = _read_json(
         report_directory / "measurement_gates.json",
         errors,
         required=False,
     )
-    if measurement_gates and not isinstance(
-        measurement_gates.get("measurement_ready"), bool
-    ):
+    if measurement_gates and not isinstance(measurement_gates.get("measurement_ready"), bool):
         errors.append("measurement_gates.json lacks boolean measurement_ready")
-    validation_payload = _read_json(
-        report_directory / "validation.json", errors, required=False
-    )
+    validation_payload = _read_json(report_directory / "validation.json", errors, required=False)
     if validation_payload and validation_payload.get("run_identity") not in {
         None,
         run_identity,

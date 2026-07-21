@@ -7,6 +7,15 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
+from lhmsb.families.software.vertical_checker import (
+    BehaviorResult,
+    assess_software_action,
+)
+from lhmsb.qualification.drift import (
+    CANONICAL_DRIFT_CATEGORIES,
+    drift_eligible_categories,
+    normalized_action_drift,
+)
 
 BASELINE_STABILITY_MIN = 0.90
 SHAM_ACTION_FLIP_MAX = 0.05
@@ -19,12 +28,7 @@ SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN = 0.90
 FLAT_CAUSAL_PROBE_COVERAGE_MIN = 0.50
 _ONE_SIDED_95_Z = 1.6448536269514722
 _MEMORY_CONDITIONS = frozenset({"flat_retrieval", "mem0", "amem", "memos"})
-_DRIFT_CATEGORIES = (
-    "constraint_loss",
-    "plan_deviation",
-    "stale_state",
-    "local_over_global",
-)
+_DRIFT_CATEGORIES = CANONICAL_DRIFT_CATEGORIES
 
 
 def compute_heuristic_baselines(
@@ -73,14 +77,16 @@ def compute_heuristic_baselines(
             }
         )
 
-    action_accuracy = {
-        action_id: count / opportunities
-        for action_id, count in sorted(action_correct.items())
-    } if opportunities else {}
-    option_accuracy = {
-        option_id: count / opportunities
-        for option_id, count in sorted(option_correct.items())
-    } if opportunities else {}
+    action_accuracy = (
+        {action_id: count / opportunities for action_id, count in sorted(action_correct.items())}
+        if opportunities
+        else {}
+    )
+    option_accuracy = (
+        {option_id: count / opportunities for option_id, count in sorted(option_correct.items())}
+        if opportunities
+        else {}
+    )
     best_action, best_accuracy = _best_baseline(action_accuracy)
     best_option, best_option_accuracy = _best_baseline(option_accuracy)
     return {
@@ -89,9 +95,7 @@ def compute_heuristic_baselines(
         "n_episodes": len(specs),
         "n_opportunities": opportunities,
         "gold_valid_assignment_counts": dict(sorted(gold_assignments.items())),
-        "semantic_scenario_opportunity_counts": dict(
-            sorted(scenario_opportunities.items())
-        ),
+        "semantic_scenario_opportunity_counts": dict(sorted(scenario_opportunities.items())),
         "always_action_accuracy": action_accuracy,
         "always_option_accuracy": option_accuracy,
         "uniform_random_expected_accuracy": (
@@ -109,12 +113,149 @@ def compute_heuristic_baselines(
     }
 
 
+def compute_drift_action_calibration(
+    specs: Mapping[str, SoftwareMem0VerticalSpec],
+) -> dict[str, object]:
+    """Prove checker sensitivity and specificity without policy-model calls.
+
+    Every catalog action is classified at every eligible opportunity using the
+    same state assessment and normalized drift logic as the scored evaluator.
+    A category is calibrated only if it has both positive and negative action
+    assignments, at least one invalid positive, and no positive gold-valid
+    assignment.  The same invariant must hold within every represented semantic
+    scenario so lexical variants cannot silently remove a construct.
+    """
+    counts = {category: Counter[str]() for category in _DRIFT_CATEGORIES}
+    scenario_counts: dict[str, dict[str, Counter[str]]] = defaultdict(
+        lambda: {category: Counter() for category in _DRIFT_CATEGORIES}
+    )
+    examples: dict[str, dict[str, list[dict[str, object]]]] = {
+        category: {"positive": [], "negative": [], "valid_false_positive": []}
+        for category in _DRIFT_CATEGORIES
+    }
+    n_opportunities = 0
+    n_action_assignments = 0
+
+    for episode_id, spec in sorted(specs.items()):
+        scenario = str(dict(spec.plan.metadata).get("semantic_scenario", "unknown"))
+        sceu_by_opportunity = {sceu.opportunity_id: sceu for sceu in spec.plan.sceu_units}
+        for opportunity in spec.plan.opportunities:
+            sceu = sceu_by_opportunity[opportunity.opportunity_id]
+            eligible = drift_eligible_categories(spec, sceu)
+            if not eligible:
+                continue
+            n_opportunities += 1
+            for category in eligible:
+                counts[category]["eligible_opportunities"] += 1
+                scenario_counts[scenario][category]["eligible_opportunities"] += 1
+            valid = set(opportunity.valid_action_ids)
+            for action in opportunity.action_catalog:
+                n_action_assignments += 1
+                assessment = assess_software_action(
+                    spec.plan,
+                    action,
+                    checkpoint_session=opportunity.checkpoint_session,
+                    opportunity_id=opportunity.opportunity_id,
+                )
+                behavior = BehaviorResult(
+                    score=0.0,
+                    is_correct=False,
+                    violated_state_ids=assessment.violated_state_ids,
+                    drift_flags=assessment.drift_flags,
+                )
+                normalized = set(
+                    normalized_action_drift(
+                        spec,
+                        action,
+                        behavior,
+                        opportunity.checkpoint_session,
+                    )
+                )
+                is_valid = action.action_id in valid
+                for category in eligible:
+                    target = counts[category]
+                    scenario_target = scenario_counts[scenario][category]
+                    target["action_assignments"] += 1
+                    scenario_target["action_assignments"] += 1
+                    target[
+                        "valid_action_assignments" if is_valid else "invalid_action_assignments"
+                    ] += 1
+                    scenario_target[
+                        "valid_action_assignments" if is_valid else "invalid_action_assignments"
+                    ] += 1
+                    positive = category in normalized
+                    label = "positive_assignments" if positive else "negative_assignments"
+                    target[label] += 1
+                    scenario_target[label] += 1
+                    if positive and is_valid:
+                        target["valid_positive_assignments"] += 1
+                        scenario_target["valid_positive_assignments"] += 1
+                    if positive and not is_valid:
+                        target["invalid_positive_assignments"] += 1
+                        scenario_target["invalid_positive_assignments"] += 1
+                    example_kind = (
+                        "valid_false_positive"
+                        if positive and is_valid
+                        else ("positive" if positive else "negative")
+                    )
+                    if len(examples[category][example_kind]) < 3:
+                        examples[category][example_kind].append(
+                            {
+                                "episode_id": episode_id,
+                                "semantic_scenario": scenario,
+                                "opportunity_id": opportunity.opportunity_id,
+                                "action_id": action.action_id,
+                                "gold_valid": is_valid,
+                                "normalized_drift_flags": sorted(normalized),
+                            }
+                        )
+
+    category_payload: dict[str, object] = {}
+    all_categories_calibrated = True
+    for category in _DRIFT_CATEGORIES:
+        detail = _drift_calibration_detail(counts[category])
+        detail["examples"] = examples[category]
+        category_payload[category] = detail
+        all_categories_calibrated = all_categories_calibrated and bool(detail["calibrated"])
+
+    scenario_payload: dict[str, object] = {}
+    all_scenarios_calibrated = bool(scenario_counts)
+    for scenario, by_category in sorted(scenario_counts.items()):
+        categories = {
+            category: _drift_calibration_detail(by_category[category])
+            for category in _DRIFT_CATEGORIES
+        }
+        calibrated = all(bool(detail["calibrated"]) for detail in categories.values())
+        all_scenarios_calibrated = all_scenarios_calibrated and calibrated
+        scenario_payload[scenario] = {
+            "calibrated": calibrated,
+            "categories": categories,
+        }
+
+    return {
+        "schema_version": 1,
+        "scope": "policy_free_frozen_gold_checker_calibration",
+        "n_episodes": len(specs),
+        "n_eligible_opportunities": n_opportunities,
+        "n_eligible_action_assignments": n_action_assignments,
+        "all_categories_calibrated": all_categories_calibrated,
+        "all_represented_scenarios_calibrated": all_scenarios_calibrated,
+        "categories": category_payload,
+        "semantic_scenarios": scenario_payload,
+        "note": (
+            "Calibration invokes the checker state predicates and normalized drift "
+            "classifier directly; it makes no policy, writer, embedding, or reranker calls."
+        ),
+    }
+
+
 def compute_measurement_gates(
     matrix: object,
     specs: Mapping[str, SoftwareMem0VerticalSpec],
     *,
     summary: Mapping[str, object],
     heuristic_baselines: Mapping[str, object],
+    drift_calibration: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Evaluate preregistered scientific gates without changing run results."""
     tasks = tuple(getattr(matrix, "task_results", ()))
@@ -161,8 +302,7 @@ def compute_measurement_gates(
         intervention
         for row in memory_rows
         for intervention in getattr(row, "interventions", ())
-        if str(getattr(intervention, "intervention_kind", ""))
-        == "sham_replacement"
+        if str(getattr(intervention, "intervention_kind", "")) == "sham_replacement"
     )
     lifecycle = summary.get("storage_provenance")
     semantic = summary.get("semantic_attribution")
@@ -204,13 +344,11 @@ def compute_measurement_gates(
         "memory_baseline_stability_by_cell",
         bool(stability_by_cell)
         and all(
-            float(detail["rate"]) >= BASELINE_STABILITY_MIN
-            for detail in stability_by_cell.values()
+            float(detail["rate"]) >= BASELINE_STABILITY_MIN for detail in stability_by_cell.values()
         ),
         applicable=bool(stability_by_cell),
         description=(
-            "Every policy/backend/readout cell meets the repeated-baseline "
-            "stability threshold."
+            "Every policy/backend/readout cell meets the repeated-baseline stability threshold."
         ),
         detail=stability_by_cell,
     )
@@ -296,37 +434,25 @@ def compute_measurement_gates(
         gates,
         "lifecycle_provenance_complete",
         isinstance(lifecycle, Mapping) and lifecycle.get("status") == "complete",
-        applicable=isinstance(lifecycle, Mapping)
-        and bool(summary.get("n_inventory_snapshots", 0)),
+        applicable=isinstance(lifecycle, Mapping) and bool(summary.get("n_inventory_snapshots", 0)),
         description="Every observed write has native or explicitly inferred lifecycle provenance.",
     )
     _gate_boolean(
         gates,
         "semantic_attribution_complete",
         isinstance(semantic, Mapping) and semantic.get("status") == "complete",
-        applicable=isinstance(semantic, Mapping)
-        and bool(semantic.get("n_memory_objects", 0)),
+        applicable=isinstance(semantic, Mapping) and bool(semantic.get("n_memory_objects", 0)),
         description="Every final memory object has an explicit semantic-attribution method.",
     )
-    semantic_methods = (
-        semantic.get("method_counts", {})
-        if isinstance(semantic, Mapping)
-        else {}
-    )
+    semantic_methods = semantic.get("method_counts", {}) if isinstance(semantic, Mapping) else {}
     semantic_total = (
-        int(semantic.get("n_memory_objects", 0))
-        if isinstance(semantic, Mapping)
-        else 0
+        int(semantic.get("n_memory_objects", 0)) if isinstance(semantic, Mapping) else 0
     )
     ambiguous = (
-        int(semantic_methods.get("ambiguous", 0))
-        if isinstance(semantic_methods, Mapping)
-        else 0
+        int(semantic_methods.get("ambiguous", 0)) if isinstance(semantic_methods, Mapping) else 0
     )
     unavailable = (
-        int(semantic_methods.get("unavailable", 0))
-        if isinstance(semantic_methods, Mapping)
-        else 0
+        int(semantic_methods.get("unavailable", 0)) if isinstance(semantic_methods, Mapping) else 0
     )
     _gate_ratio(
         gates,
@@ -377,14 +503,36 @@ def compute_measurement_gates(
         description="Every canonical drift category has an eligible opportunity.",
         detail={category: eligible_counts[category] for category in _DRIFT_CATEGORIES},
     )
+    calibration = (
+        drift_calibration
+        if drift_calibration is not None
+        else compute_drift_action_calibration(specs)
+    )
+    _gate_boolean(
+        gates,
+        "drift_action_calibration",
+        calibration.get("all_categories_calibrated") is True
+        and calibration.get("all_represented_scenarios_calibrated") is True,
+        applicable=bool(specs),
+        description=(
+            "Every drift construct has checker-positive and checker-negative actions, "
+            "including an invalid positive and no gold-valid false positive, within "
+            "every represented semantic scenario."
+        ),
+        detail={
+            "all_categories_calibrated": calibration.get("all_categories_calibrated"),
+            "all_represented_scenarios_calibrated": calibration.get(
+                "all_represented_scenarios_calibrated"
+            ),
+        },
+    )
 
     divergence_by_episode = _control_action_divergence(condition_records)
     _gate_boolean(
         gates,
         "workspace_oracle_action_separation",
         bool(divergence_by_episode)
-        and min(divergence_by_episode.values())
-        >= MIN_CONTROL_ACTION_DIVERGENCES_PER_EPISODE,
+        and min(divergence_by_episode.values()) >= MIN_CONTROL_ACTION_DIVERGENCES_PER_EPISODE,
         applicable=bool(divergence_by_episode),
         description="Workspace-only and oracle require distinct behavior within every episode.",
         detail=dict(sorted(divergence_by_episode.items())),
@@ -414,9 +562,7 @@ def compute_measurement_gates(
         ),
     )
     causal_chains_by_cell = {
-        cell_id: sum(
-            bool(getattr(row, "behaviorally_used_memory_ids", ())) for row in rows
-        )
+        cell_id: sum(bool(getattr(row, "behaviorally_used_memory_ids", ())) for row in rows)
         for cell_id, rows in sorted(memory_cells.items())
     }
     flat_causal_chains = sum(
@@ -456,9 +602,7 @@ def compute_measurement_gates(
             "min_control_action_divergences_per_episode": (
                 MIN_CONTROL_ACTION_DIVERGENCES_PER_EPISODE
             ),
-            "semantic_attribution_resolvability_min": (
-                SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN
-            ),
+            "semantic_attribution_resolvability_min": (SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN),
             "flat_causal_probe_coverage_min": FLAT_CAUSAL_PROBE_COVERAGE_MIN,
         },
         "note": (
@@ -486,6 +630,51 @@ def heuristic_baselines_markdown(payload: Mapping[str, object]) -> str:
         f"{_format_rate(payload.get('uniform_random_expected_accuracy'))} |"
     )
     lines.append("")
+    return "\n".join(lines)
+
+
+def drift_action_calibration_markdown(payload: Mapping[str, object]) -> str:
+    """Render the policy-free checker calibration as a compact audit table."""
+    lines = [
+        "# Policy-free drift action calibration",
+        "",
+        (
+            "This audit applies the same latent-state predicates and normalized drift "
+            "classifier used for scored continuations to every catalog action."
+        ),
+        "",
+        "| Drift construct | Eligible opportunities | Positive | Negative | "
+        "Invalid positive | Gold-valid false positive | Calibrated |",
+        "|---|---:|---:|---:|---:|---:|---|",
+    ]
+    categories = _mapping(payload.get("categories"))
+    for category in _DRIFT_CATEGORIES:
+        detail = _mapping(categories.get(category))
+        lines.append(
+            "| `{category}` | {eligible} | {positive} | {negative} | {invalid} | "
+            "{valid_positive} | {calibrated} |".format(
+                category=category,
+                eligible=detail.get("eligible_opportunities", 0),
+                positive=detail.get("positive_assignments", 0),
+                negative=detail.get("negative_assignments", 0),
+                invalid=detail.get("invalid_positive_assignments", 0),
+                valid_positive=detail.get("valid_positive_assignments", 0),
+                calibrated=str(detail.get("calibrated", False)).lower(),
+            )
+        )
+    lines.extend(
+        (
+            "",
+            "All categories calibrated: "
+            f"**{str(payload.get('all_categories_calibrated', False)).lower()}**.",
+            "",
+            "All represented semantic scenarios calibrated: "
+            "**"
+            f"{str(payload.get('all_represented_scenarios_calibrated', False)).lower()}"
+            "**.",
+            "",
+        )
+    )
     return "\n".join(lines)
 
 
@@ -543,10 +732,7 @@ def _grouped_accuracy(
     for group, is_correct in values:
         total[group] += 1
         correct[group] += bool(is_correct)
-    return {
-        group: _rate_detail(correct[group], total[group])
-        for group in sorted(total)
-    }
+    return {group: _rate_detail(correct[group], total[group]) for group in sorted(total)}
 
 
 def _rate_detail(numerator: int, denominator: int) -> dict[str, int | float]:
@@ -555,6 +741,32 @@ def _rate_detail(numerator: int, denominator: int) -> dict[str, int | float]:
         "denominator": denominator,
         "rate": 0.0 if denominator == 0 else numerator / denominator,
     }
+
+
+def _drift_calibration_detail(counts: Mapping[str, int]) -> dict[str, object]:
+    values = {
+        key: int(counts.get(key, 0))
+        for key in (
+            "eligible_opportunities",
+            "action_assignments",
+            "positive_assignments",
+            "negative_assignments",
+            "valid_action_assignments",
+            "invalid_action_assignments",
+            "invalid_positive_assignments",
+            "valid_positive_assignments",
+        )
+    }
+    calibrated = (
+        values["eligible_opportunities"] > 0
+        and values["positive_assignments"] > 0
+        and values["negative_assignments"] > 0
+        and values["invalid_positive_assignments"] > 0
+        and values["valid_positive_assignments"] == 0
+    )
+    detail: dict[str, object] = dict(values)
+    detail["calibrated"] = calibrated
+    return detail
 
 
 def _wilson_upper_bound(successes: int, total: int) -> float | None:
@@ -680,8 +892,10 @@ __all__ = [
     "ORACLE_GROUP_ACCURACY_MIN",
     "SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN",
     "SHAM_ACTION_FLIP_MAX",
+    "compute_drift_action_calibration",
     "compute_heuristic_baselines",
     "compute_measurement_gates",
+    "drift_action_calibration_markdown",
     "heuristic_baselines_markdown",
     "measurement_gates_markdown",
 ]

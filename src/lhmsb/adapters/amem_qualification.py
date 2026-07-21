@@ -140,8 +140,13 @@ class AMemQualificationAdapter:
             )
         if policy.provider != "deepseek":
             raise AMemQualificationError(
-                "writer_profile_mismatch", "controlled A-MEM requires the DeepSeek writer"
+                "writer_profile_mismatch",
+                "controlled A-MEM requires the DeepSeek writer",
             )
+        # The official A-MEM import pulls in LiteLLM.  LiteLLM otherwise fetches
+        # a mutable cost map at import time, which is unrelated to benchmark
+        # behavior and makes an offline prefix depend on external availability.
+        os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
         module = module or _load_official_module()
         _validate_official_identity(
             module,
@@ -163,7 +168,8 @@ class AMemQualificationAdapter:
         memory_class = getattr(module, "AgenticMemorySystem", None)
         if not callable(memory_class):
             raise AMemQualificationError(
-                "upstream_api_mismatch", "official A-MEM module lacks AgenticMemorySystem"
+                "upstream_api_mismatch",
+                "official A-MEM module lacks AgenticMemorySystem",
             )
         # The upstream Chroma retriever constructs a SentenceTransformer before
         # the benchmark can inject the common TEI embedding runtime.  On an
@@ -172,9 +178,7 @@ class AMemQualificationAdapter:
         # An explicit path therefore acts only as an offline bootstrap hint;
         # the public profile and the subsequently injected embedding runtime
         # remain unchanged.
-        embedding_model = os.environ.get(
-            "LHMSB_AMEM_EMBEDDING_MODEL_PATH", profile.embedding_model
-        )
+        embedding_model = os.environ.get("LHMSB_AMEM_EMBEDDING_MODEL_PATH", profile.embedding_model)
         kwargs: dict[str, object] = {
             "model_name": embedding_model,
             # A-MEM's official controller only accepts ``openai`` or ``ollama``.
@@ -328,7 +332,8 @@ class AMemQualificationAdapter:
             memory_id = _row_id(self._snapshot_notes().get(deterministic_id))
         if not memory_id:
             raise AMemQualificationError(
-                "malformed_upstream_response", "A-MEM add_note did not return a memory ID"
+                "malformed_upstream_response",
+                "A-MEM add_note did not return a memory ID",
             )
         if self.require_deterministic_ids and memory_id != deterministic_id:
             raise AMemQualificationError(
@@ -409,7 +414,8 @@ class AMemQualificationAdapter:
             raise AMemQualificationError("amem_search_failure", str(exc)) from exc
         if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
             raise AMemQualificationError(
-                "malformed_upstream_response", "A-MEM search_agentic must return an array"
+                "malformed_upstream_response",
+                "A-MEM search_agentic must return an array",
             )
         notes = self._snapshot_notes()
         candidates: list[RetrievalCandidate] = []
@@ -422,7 +428,8 @@ class AMemQualificationAdapter:
                 )
             if memory_id in seen:
                 raise AMemQualificationError(
-                    "duplicate_memory_id", f"A-MEM search returned duplicate ID {memory_id!r}"
+                    "duplicate_memory_id",
+                    f"A-MEM search returned duplicate ID {memory_id!r}",
                 )
             seen.add(memory_id)
             note = notes.get(memory_id)
@@ -630,9 +637,7 @@ class AMemQualificationAdapter:
         )
         self.diagnostics.append(("dangling_link_ids", dangling))
         self.diagnostics.append(("link_validity", not dangling))
-        self.diagnostics.append(
-            ("in_memory_chroma_consistent", not missing and not extra)
-        )
+        self.diagnostics.append(("in_memory_chroma_consistent", not missing and not extra))
         self.diagnostics.append(("in_memory_vs_chroma", not missing and not extra))
         self.diagnostics.append(("silent_degradation", bool(missing or extra or dangling)))
 
@@ -650,7 +655,8 @@ class AMemQualificationAdapter:
         method = getattr(runtime, "embed", None) or getattr(runtime, "embed_batch", None)
         if not callable(method):
             raise AMemQualificationError(
-                "embedding_contract", "common BGE runtime must expose embed or embed_batch"
+                "embedding_contract",
+                "common BGE runtime must expose embed or embed_batch",
             )
         injected = False
         for target in (retriever, getattr(retriever, "collection", None)):
@@ -670,9 +676,7 @@ class AMemQualificationAdapter:
         writer = getattr(getattr(self.backend, "llm_controller", None), "llm", None)
         calls = getattr(writer, "calls", ())
         if isinstance(calls, Sequence) and not isinstance(calls, (str, bytes)):
-            return tuple(
-                item for item in calls if isinstance(item, ProviderUsageEvent)
-            )
+            return tuple(item for item in calls if isinstance(item, ProviderUsageEvent))
         return ()
 
     def _ensure_open(self) -> None:
@@ -681,6 +685,7 @@ class AMemQualificationAdapter:
 
 
 def _load_official_module() -> Any:
+    os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
     try:
         return importlib.import_module(_OFFICIAL_MODULE)
     except ImportError as exc:
@@ -694,7 +699,8 @@ def _validate_official_identity(module: object, *, expected_commit: str) -> None
     module_name = getattr(module, "__name__", "")
     if not isinstance(module_name, str) or not module_name.startswith("agentic_memory"):
         raise AMemQualificationError(
-            "package_identity_mismatch", "A-MEM module is not the official agentic_memory package"
+            "package_identity_mismatch",
+            "A-MEM module is not the official agentic_memory package",
         )
     commit = _first_text(
         module,
@@ -735,7 +741,8 @@ def _install_writer(backend: object, writer: DeepSeekJSONBridge) -> None:
     controller = getattr(backend, "llm_controller", None)
     if controller is None:
         raise AMemQualificationError(
-            "upstream_api_mismatch", "A-MEM backend lacks llm_controller for controlled writer"
+            "upstream_api_mismatch",
+            "A-MEM backend lacks llm_controller for controlled writer",
         )
     if not hasattr(controller, "llm"):
         raise AMemQualificationError(
@@ -751,11 +758,13 @@ def _amem_writer_max_output_tokens() -> int:
         value = int(raw)
     except ValueError as exc:
         raise AMemQualificationError(
-            "invalid_writer_budget", "LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS must be an integer"
+            "invalid_writer_budget",
+            "LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS must be an integer",
         ) from exc
     if value < 1:
         raise AMemQualificationError(
-            "invalid_writer_budget", "LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS must be positive"
+            "invalid_writer_budget",
+            "LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS must be positive",
         )
     return value
 

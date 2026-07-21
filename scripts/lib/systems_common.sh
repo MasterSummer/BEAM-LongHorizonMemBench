@@ -50,6 +50,15 @@ systems_load_env() {
   # shellcheck disable=SC1090
   source "${env_file}"
   set +a
+  # LiteLLM is an A-MEM transitive dependency.  Its default import path fetches
+  # a mutable model-cost catalog from GitHub, even though benchmark inference
+  # itself uses the explicitly configured DeepSeek endpoint.  Force the
+  # package-bundled catalog so prefix preparation is network-deterministic.
+  export LITELLM_LOCAL_MODEL_COST_MAP=True
+  # MemOS uses a remote universal-API embedder in the controlled track and
+  # never instantiates a local Transformers model.  Suppress only the advisory
+  # emitted by Transformers when torch is intentionally absent from that venv.
+  export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 }
 
 systems_prepare_dirs() {
@@ -289,6 +298,8 @@ LHMSB_EMBEDDING_URL=$(printf '%q' "${LHMSB_EMBEDDING_URL:-http://127.0.0.1:8080}
 LHMSB_RERANKER_URL=$(printf '%q' "${LHMSB_RERANKER_URL:-http://127.0.0.1:8081}")
 LHMSB_SERVICE_ROOT=$(printf '%q' "${service_root}")
 LHMSB_NEO4J_PASSWORD=$(printf '%q' "${LHMSB_NEO4J_PASSWORD:-}")
+LITELLM_LOCAL_MODEL_COST_MAP=True
+TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 EOF
   mv "${path}.tmp" "${path}"
 }

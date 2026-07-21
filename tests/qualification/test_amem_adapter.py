@@ -114,6 +114,17 @@ def _unit(content: str, session: int = 0) -> PublicHistoryUnit:
     )
 
 
+def test_official_import_forces_package_local_litellm_cost_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "False")
+    monkeypatch.setattr(amem_module.importlib, "import_module", lambda _name: sentinel)
+
+    assert amem_module._load_official_module() is sentinel
+    assert amem_module.os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] == "True"
+
+
 def test_add_note_uses_native_api_and_normalizes_inventory_and_search() -> None:
     backend = FakeAMem()
     adapter = AMemQualificationAdapter(
@@ -190,7 +201,9 @@ def test_source_identity_can_come_from_verified_external_manifest(monkeypatch) -
         validate_amem_source(module)
 
 
-def test_amem_writer_budget_has_offline_reasoning_headroom(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_amem_writer_budget_has_offline_reasoning_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS", raising=False)
     assert _amem_writer_max_output_tokens() == 2048
     monkeypatch.setenv("LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS", "3072")

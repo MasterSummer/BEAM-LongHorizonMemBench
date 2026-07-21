@@ -22,7 +22,6 @@ from lhmsb.longhorizon.attribution import (
     build_software_fact_signatures,
     eligible_write_state_ids,
 )
-from lhmsb.longhorizon.drift import DriftEvidence, classify_long_horizon_drift
 from lhmsb.longhorizon.interventions import (
     CausalUseResult,
     ContinuationOutcome,
@@ -34,6 +33,10 @@ from lhmsb.longhorizon.replay import replay_plan
 from lhmsb.longhorizon.schema import SCEU, ActionSpec, SessionSurface, StateUnit
 from lhmsb.qualification.config import NO_PREFIX_ARTIFACT, canonical_hash
 from lhmsb.qualification.context import build_public_history_units, render_full_context
+from lhmsb.qualification.drift import (
+    drift_eligible_categories,
+    normalized_action_drift,
+)
 from lhmsb.qualification.memory_runtime import (
     CandidateSearch,
     MemoryObject,
@@ -52,7 +55,11 @@ from lhmsb.qualification.providers import (
     PolicyRequest,
     PolicyResponse,
 )
-from lhmsb.qualification.schema import CausalSamplingProfile, EvaluationTask, ReadoutKind
+from lhmsb.qualification.schema import (
+    CausalSamplingProfile,
+    EvaluationTask,
+    ReadoutKind,
+)
 
 _SYSTEM_PROMPT = (
     "Continue the software project using only the supplied current-session surface, "
@@ -103,9 +110,7 @@ class EvaluationRetrievalTrace:
             "visible_memory_ids": list(self.visible_memory_ids),
             "candidate_shortfall": self.candidate_shortfall,
             "query_hash": self.query_hash,
-            "backend_retrieved_memory_ids": list(
-                self.backend_retrieved_memory_ids
-            ),
+            "backend_retrieved_memory_ids": list(self.backend_retrieved_memory_ids),
             "selected_memory_ids": list(self.selected_memory_ids),
         }
 
@@ -261,13 +266,9 @@ class EvaluationSCEUResult:
             "transcript_hash": self.transcript_hash,
             "model_visible_context_hash": self.model_visible_context_hash,
             "candidate_shortfall": self.candidate_shortfall,
-            "backend_retrieved_memory_ids": list(
-                self.backend_retrieved_memory_ids
-            ),
+            "backend_retrieved_memory_ids": list(self.backend_retrieved_memory_ids),
             "selected_memory_ids": list(self.selected_memory_ids),
-            "behaviorally_used_memory_ids": list(
-                self.behaviorally_used_memory_ids
-            ),
+            "behaviorally_used_memory_ids": list(self.behaviorally_used_memory_ids),
             "drift_eligible_categories": (
                 None
                 if self.drift_eligible_categories is None
@@ -501,22 +502,19 @@ def evaluate_task(
                     transcript_hash=primary.transcript_hash,
                     model_visible_context_hash=primary.model_visible_context_hash,
                     candidate_shortfall=readout.candidate_shortfall,
-                    backend_retrieved_memory_ids=(
-                        readout.backend_retrieved_memory_ids
-                    ),
+                    backend_retrieved_memory_ids=(readout.backend_retrieved_memory_ids),
                     selected_memory_ids=readout.selected_memory_ids,
                     behaviorally_used_memory_ids=tuple(
                         sorted(
                             {
                                 item.target_memory_id
                                 for item in interventions
-                                if item.intervention_kind
-                                == "neutral_replacement"
+                                if item.intervention_kind == "neutral_replacement"
                                 and item.classification.behaviorally_used
                             }
                         )
                     ),
-                    drift_eligible_categories=_drift_eligible_categories(
+                    drift_eligible_categories=drift_eligible_categories(
                         spec,
                         sceu,
                     ),
@@ -790,7 +788,7 @@ def _calls(
             )
         except Exception as exc:
             raise EvaluationError("checker_failure", str(exc)) from exc
-        normalized = _normalized_drift(
+        normalized = normalized_action_drift(
             spec,
             actions[action_id],
             behavior,
@@ -1203,9 +1201,7 @@ def _neutral_replacement_candidate(
     content = repeated if target_chars else ""
     target_digest = hashlib.sha256(target.memory_id.encode("utf-8")).hexdigest()[:16]
     return RetrievalCandidate(
-        memory_id=(
-            f"{control_kind}-replacement:{sceu.sceu_id}:{target_digest}"
-        ),
+        memory_id=(f"{control_kind}-replacement:{sceu.sceu_id}:{target_digest}"),
         content=content,
         content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
         native_rank=target.native_rank,
@@ -1322,9 +1318,7 @@ def _attributions(
                 for event in events
                 if getattr(event, "operation_id", "")
             ),
-            source_session=(
-                source_session if isinstance(source_session, int) else None
-            ),
+            source_session=(source_session if isinstance(source_session, int) else None),
         )
     return result
 
@@ -1418,124 +1412,6 @@ def _replacement_candidate(
         ):
             return candidate
     return None
-
-
-def _normalized_drift(
-    spec: SoftwareMem0VerticalSpec,
-    action: ActionSpec,
-    behavior: BehaviorResult,
-    checkpoint_session: int,
-) -> tuple[str, ...]:
-    current = replay_plan(spec.plan, checkpoint_session).current
-    state_by_id = {item.state_id: item for item in spec.plan.state_units}
-    stale = tuple(
-        item.state_id
-        for item in spec.plan.state_units
-        if item.valid_from <= checkpoint_session and item.state_id not in current
-    )
-    future = tuple(
-        item.state_id
-        for item in spec.plan.state_units
-        if item.valid_from > checkpoint_session
-        and item.state_id in action.satisfies_state_ids
-    )
-    local = tuple(
-        state_id
-        for state_id in action.satisfies_state_ids
-        if state_id in state_by_id
-        and (
-            "local" in state_by_id[state_id].scope
-            or state_by_id[state_id].authority == "local-operator"
-        )
-    )
-    result = classify_long_horizon_drift(
-        DriftEvidence(
-            outcome=ContinuationOutcome(
-                action_id=action.action_id,
-                behavior_score=behavior.score,
-                is_correct=behavior.is_correct,
-                violated_state_ids=behavior.violated_state_ids,
-                drift_flags=behavior.drift_flags,
-            ),
-            used_state_ids=action.satisfies_state_ids,
-            active_constraint_ids=tuple(
-                state_id for state_id, state in current.items() if state.kind == "constraint"
-            ),
-            current_plan_state_ids=tuple(
-                state_id for state_id, state in current.items() if state.kind == "plan_node"
-            ),
-            stale_state_ids=stale,
-            selected_local_state_ids=local,
-            global_state_ids=tuple(
-                state_id
-                for state_id, state in current.items()
-                if state.kind in {"global_goal", "constraint"}
-            ),
-            future_state_ids=future,
-        )
-    )
-    return result.flags
-
-
-def _drift_eligible_categories(
-    spec: SoftwareMem0VerticalSpec,
-    sceu: SCEU,
-) -> tuple[str, ...]:
-    """Return preregistered drift constructs targeted by this opportunity.
-
-    An always-present distractor can technically violate several invariants at
-    almost every checkpoint.  Counting every expressible violation would dilute
-    category denominators and turn, for example, a branch-update probe into a
-    scope-conflict probe.  We therefore intersect the flags expressible by an
-    invalid available action with the opportunity's intended construct.
-    """
-    opportunity = next(
-        item
-        for item in spec.plan.opportunities
-        if item.opportunity_id == sceu.opportunity_id
-    )
-    valid = set(opportunity.valid_action_ids)
-    expressible: set[str] = set()
-    for action in opportunity.action_catalog:
-        if action.action_id in valid:
-            continue
-        synthetic = BehaviorResult(
-            score=0.0,
-            is_correct=False,
-            violated_state_ids=action.violates_state_ids,
-            drift_flags=(),
-        )
-        expressible.update(
-            _normalized_drift(
-                spec,
-                action,
-                synthetic,
-                sceu.checkpoint_session,
-            )
-        )
-    intended: set[str]
-    if opportunity.challenge_type == "matched-branch":
-        current = replay_plan(spec.plan, sceu.checkpoint_session).current
-        intended = (
-            {"stale_state", "plan_deviation"}
-            if "P2" in current
-            else {"plan_deviation"}
-        )
-    elif opportunity.challenge_type == "premature-v2":
-        intended = {"plan_deviation"}
-    elif opportunity.challenge_type in {
-        "stale-after-revoke",
-        "valid-update",
-        "valid-local-accelerator",
-    }:
-        intended = {"stale_state", "plan_deviation"}
-    elif opportunity.challenge_type in {"scope-conflict", "global-local-conflict"}:
-        intended = {"constraint_loss", "local_over_global"}
-    elif opportunity.challenge_type == "fresh-reminder":
-        intended = {"constraint_loss", "stale_state", "plan_deviation"}
-    else:
-        intended = expressible
-    return tuple(sorted(expressible.intersection(intended)))
 
 
 def _current_state_signature(
