@@ -1,6 +1,6 @@
 schema_version: 2
-experiment_id: systems_controlled_gpt_only_aaai_v8
-dataset_release: software-vertical-mem0-v0.8.0
+experiment_id: systems_controlled_gpt_only_aaai_v9
+dataset_release: software-vertical-mem0-v0.9.0
 data_root_env: LHMSB_DATA_ROOT
 systems_lock: ../systems-v2.lock.yaml
 policy_profiles:

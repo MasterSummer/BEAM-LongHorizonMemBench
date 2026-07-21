@@ -165,7 +165,7 @@ def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
         ):
             assert marker in text
     assert "--episode-limit 1" in smoke
-    assert "datasets/software_v8" in smoke
+    assert "datasets/software_v9" in smoke
     assert "systems_controlled_gpt_only_aaai.yaml" in smoke
 
 
@@ -175,7 +175,7 @@ def test_preflight_and_bootstrap_default_to_the_confirmatory_release() -> None:
         ROOT / "scripts" / "bootstrap_systems_server.sh",
     ):
         text = path.read_text(encoding="utf-8")
-        assert "datasets/software_v8" in text
+        assert "datasets/software_v9" in text
         assert "systems_controlled_gpt_only_aaai.yaml" in text
 
 

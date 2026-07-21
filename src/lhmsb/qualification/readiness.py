@@ -362,7 +362,10 @@ def compute_measurement_gates(
         sham_flips,
         len(sham),
         maximum=SHAM_ACTION_FLIP_MAX,
-        description="State-irrelevant sham replacements rarely flip actions.",
+        description=(
+            "Count-, rank-, and length-matched neutral-A versus neutral-B sham "
+            "replacements rarely flip actions."
+        ),
     )
     _gate_scalar(
         gates,
@@ -370,8 +373,8 @@ def compute_measurement_gates(
         _wilson_upper_bound(sham_flips, len(sham)),
         maximum=SHAM_ACTION_FLIP_MAX,
         description=(
-            "The one-sided 95% Wilson upper bound for sham action flips is below "
-            "the preregistered false-positive ceiling."
+            "The one-sided 95% Wilson upper bound for paired-neutral sham action "
+            "flips is below the preregistered false-positive ceiling."
         ),
         detail={
             "numerator": sham_flips,

@@ -4,14 +4,14 @@ import pytest
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.families.software.vertical_checker import BehaviorResult
-from lhmsb.longhorizon.attribution import MemoryAttribution
 from lhmsb.longhorizon.replay import replay_plan
 from lhmsb.qualification.config import NO_PREFIX_ARTIFACT, canonical_hash
 from lhmsb.qualification.context import FullContextLimitError
 from lhmsb.qualification.evaluate import (
+    _SYSTEM_PROMPT,
     EvaluationError,
+    _neutral_replacement_candidate,
     _oracle_context,
-    _sham_target,
     evaluate_task,
 )
 from lhmsb.qualification.memory_runtime import (
@@ -85,8 +85,12 @@ def test_oracle_context_exposes_authority_and_scope_without_gold_ids() -> None:
     assert "scope=all-code" in rendered
     assert "authority=local-operator" in rendered
     assert "scope=isolated-local-profiler" in rendered
+    assert "branch: v2" in rendered
+    assert {"P2", "U1", "C2"}.issubset(sceu.required_state_ids)
     assert "C1" not in rendered
     assert "D1" not in rendered
+    assert "P2" not in rendered
+    assert "project-owner constraint governs a local-operator plan" in _SYSTEM_PROMPT
 
 
 class _Runtime:
@@ -221,53 +225,25 @@ def _candidate(memory_id: str, content: str) -> RetrievalCandidate:
     )
 
 
-def test_sham_target_excludes_every_state_in_the_sceu_dependency_closure() -> None:
-    causal = _candidate("causal", "owner authorization")
-    global_constraint = _candidate("constraint", "offline constraint")
-    unrelated = _candidate("unrelated", "held-out fixture")
-    attributions = {
-        "causal": MemoryAttribution(
-            "causal", ("L1",), "exact_signature", True, "test"
-        ),
-        "constraint": MemoryAttribution(
-            "constraint", ("C1",), "exact_signature", True, "test"
-        ),
-        "unrelated": MemoryAttribution(
-            "unrelated", ("C2",), "exact_signature", True, "test"
-        ),
-    }
+def test_paired_neutral_controls_match_position_count_and_length() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=16)
+    sceu = spec.plan.sceu_units[0]
+    target = _candidate("target", "semantic memory " * 20)
 
-    selected = _sham_target(
-        (causal, global_constraint, unrelated),
-        target=causal,
-        attributions=attributions,
-        relevant_state_ids=("C1", "D1", "G0", "L1"),
-    )
+    neutral_a = _neutral_replacement_candidate(sceu, target, control_kind="causal")
+    neutral_b = _neutral_replacement_candidate(sceu, target, control_kind="sham")
 
-    assert selected == unrelated
+    assert neutral_a.memory_id != neutral_b.memory_id
+    assert neutral_a.content != neutral_b.content
+    assert len(neutral_a.content) == len(target.content)
+    assert len(neutral_b.content) == len(target.content)
+    assert neutral_a.native_rank == neutral_b.native_rank == target.native_rank
+    assert neutral_a.score == neutral_b.score == target.score
+    assert "No project requirement" in neutral_a.content
+    assert "did not revise any project goal" in neutral_b.content
 
-
-def test_sham_target_does_not_treat_unresolved_memory_as_irrelevant() -> None:
-    causal = _candidate("causal", "owner authorization")
-    unresolved = _candidate("unresolved", "unknown summary")
-    attributions = {
-        "causal": MemoryAttribution(
-            "causal", ("L1",), "exact_signature", True, "test"
-        ),
-        "unresolved": MemoryAttribution(
-            "unresolved", (), "ambiguous", False, "test"
-        ),
-    }
-
-    assert (
-        _sham_target(
-            (causal, unresolved),
-            target=causal,
-            attributions=attributions,
-            relevant_state_ids=("L1",),
-        )
-        is None
-    )
+    with pytest.raises(ValueError, match="neutral replacement kind"):
+        _neutral_replacement_candidate(sceu, target, control_kind="unknown")
 
 
 def _task(spec, condition, readout="none", *, prefix_hash=NO_PREFIX_ARTIFACT):
@@ -458,6 +434,25 @@ def test_flat_prefix_readout_is_reused_without_memory_runtime(tmp_path) -> None:
             assert (
                 item.evaluations[0].visible_object_chars
                 == row.baseline_evaluations[0].visible_object_chars
+            )
+        sham = [
+            item
+            for item in row.interventions
+            if item.intervention_kind == "sham_replacement"
+        ]
+        assert len(sham) == len(neutral)
+        neutral_by_target = {item.target_memory_id: item for item in neutral}
+        for item in sham:
+            reference = neutral_by_target[item.target_memory_id]
+            assert item.baseline_memory_count == item.intervention_memory_count
+            assert item.count_contrast == "neutral_a_vs_neutral_b"
+            assert (
+                item.evaluations[0].visible_object_chars
+                == reference.evaluations[0].visible_object_chars
+            )
+            assert (
+                item.evaluations[0].model_visible_context_hash
+                != reference.evaluations[0].model_visible_context_hash
             )
 
 

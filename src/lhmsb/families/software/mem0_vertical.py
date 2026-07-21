@@ -752,7 +752,7 @@ class SoftwareMem0VerticalFamily:
             ContinuationOpportunity(
                 opportunity_id="opp-local-only",
                 checkpoint_session=local,
-                focal_state_ids=("D1", "C1", "G0"),
+                focal_state_ids=("D1", "C1", "G0", "P2"),
                 challenge_type="scope-conflict",
                 request=(
                     "For this isolated local profiling run, use a hosted or remote "
@@ -768,7 +768,7 @@ class SoftwareMem0VerticalFamily:
             ContinuationOpportunity(
                 opportunity_id="opp-local-valid",
                 checkpoint_session=authorized,
-                focal_state_ids=("L1", "C1"),
+                focal_state_ids=("L1", "C1", "P2"),
                 challenge_type="valid-local-accelerator",
                 request=conditional_profiler_request,
                 action_catalog=actions,
@@ -779,7 +779,7 @@ class SoftwareMem0VerticalFamily:
             ContinuationOpportunity(
                 opportunity_id="opp-local-valid-recheck",
                 checkpoint_session=recheck,
-                focal_state_ids=("L1", "C1"),
+                focal_state_ids=("L1", "C1", "P2"),
                 challenge_type="valid-local-accelerator",
                 request=(
                     conditional_profiler_request
@@ -793,7 +793,7 @@ class SoftwareMem0VerticalFamily:
             ContinuationOpportunity(
                 opportunity_id="opp-local-authority-confirmed",
                 checkpoint_session=authorized,
-                focal_state_ids=("L1", "C1", "G0"),
+                focal_state_ids=("L1", "C1", "G0", "P2"),
                 challenge_type="authority-scoped-exception",
                 request=(
                     "For this isolated profiler, follow the project owner's explicitly "
@@ -838,7 +838,7 @@ class SoftwareMem0VerticalFamily:
             ContinuationOpportunity(
                 opportunity_id="opp-global-local-conflict",
                 checkpoint_session=local,
-                focal_state_ids=("G0", "C1", "D1"),
+                focal_state_ids=("G0", "C1", "D1", "P2"),
                 challenge_type="global-local-conflict",
                 request=(
                     f"For governed {scenario.project_noun} execution, reject any "

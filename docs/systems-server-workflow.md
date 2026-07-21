@@ -52,18 +52,18 @@ calibration; seeds 5--49 in this directory are never used as confirmatory data:
 SEEDS=$(seq 0 49)
 python -m lhmsb.datasets generate-mem0-stateful \
   --seeds ${SEEDS} --n-episodes 1 --n-sessions 16 \
-  --out /data/lhmsb/datasets/software_v8_calibration.stage
+  --out /data/lhmsb/datasets/software_v9_calibration.stage
 python -m lhmsb.datasets freeze-mem0-stateful \
-  --src /data/lhmsb/datasets/software_v8_calibration.stage \
-  --out /data/lhmsb/datasets/software_v8_calibration
+  --src /data/lhmsb/datasets/software_v9_calibration.stage \
+  --out /data/lhmsb/datasets/software_v9_calibration
 python -m lhmsb.datasets verify-mem0-stateful \
-  --frozen /data/lhmsb/datasets/software_v8_calibration
+  --frozen /data/lhmsb/datasets/software_v9_calibration
 python -m lhmsb.datasets regen-check-mem0-stateful \
-  --frozen /data/lhmsb/datasets/software_v8_calibration
+  --frozen /data/lhmsb/datasets/software_v9_calibration
 ```
 
 The manifest should report 50 episodes, 16 sessions, and release
-`software-vertical-mem0-v0.8.0`. Do not run the pilot from a dirty checkout.
+`software-vertical-mem0-v0.9.0`. Do not run the pilot from a dirty checkout.
 
 Every wrapper supports a side-effect-free dry run:
 
@@ -77,11 +77,11 @@ scripts/run_systems_qualification.sh --dry-run --data-root /tmp/lhmsb
 Run the five-scenario calibration before the confirmatory matrix:
 
 ```bash
-export LHMSB_SYSTEM_DATASET=/data/lhmsb/datasets/software_v8_calibration
+export LHMSB_SYSTEM_DATASET=/data/lhmsb/datasets/software_v9_calibration
 scripts/run_systems_qualification.sh \
   --data-root /home/root123/lhmsb-native-data \
   --env-file /home/root123/lhmsb-native-data/env/operator.env \
-  --run-name systems-gpt56-calibration-v8 \
+  --run-name systems-gpt56-calibration-v9 \
   --episode-limit 5 --keep-going
 ```
 
@@ -95,14 +95,14 @@ unset LHMSB_SYSTEM_DATASET
 SEEDS=$(seq 5 54)
 python -m lhmsb.datasets generate-mem0-stateful \
   --seeds ${SEEDS} --n-episodes 1 --n-sessions 16 \
-  --out /data/lhmsb/datasets/software_v8.stage
+  --out /data/lhmsb/datasets/software_v9.stage
 python -m lhmsb.datasets freeze-mem0-stateful \
-  --src /data/lhmsb/datasets/software_v8.stage \
-  --out /data/lhmsb/datasets/software_v8
+  --src /data/lhmsb/datasets/software_v9.stage \
+  --out /data/lhmsb/datasets/software_v9
 python -m lhmsb.datasets verify-mem0-stateful \
-  --frozen /data/lhmsb/datasets/software_v8
+  --frozen /data/lhmsb/datasets/software_v9
 python -m lhmsb.datasets regen-check-mem0-stateful \
-  --frozen /data/lhmsb/datasets/software_v8
+  --frozen /data/lhmsb/datasets/software_v9
 ```
 
 Run the repository/runtime/service gate first. Services receive a unique job
@@ -122,19 +122,19 @@ After inspection, submit the 16-session qualification:
 PREP_JOB=$(sbatch --parsable \
   --output="${LHMSB_DATA_ROOT}/logs/slurm-prepare-%j.out" \
   --error="${LHMSB_DATA_ROOT}/logs/slurm-prepare-%j.err" \
-  --export=ALL,LHMSB_SLURM_MODE=prepare,LHMSB_RUN_NAME=gpt-only-v8,LHMSB_SYSTEM_DATASET="${LHMSB_DATA_ROOT}/datasets/software_v8" \
+  --export=ALL,LHMSB_SLURM_MODE=prepare,LHMSB_RUN_NAME=gpt-only-v9,LHMSB_SYSTEM_DATASET="${LHMSB_DATA_ROOT}/datasets/software_v9" \
   deploy/slurm/systems_qualification.sbatch)
 sbatch --array=0-349%16 --dependency="afterok:${PREP_JOB}" \
   --output="${LHMSB_DATA_ROOT}/logs/slurm-eval-%A_%a.out" \
   --error="${LHMSB_DATA_ROOT}/logs/slurm-eval-%A_%a.err" \
-  --export=ALL,LHMSB_RUN_NAME=gpt-only-v8 \
+  --export=ALL,LHMSB_RUN_NAME=gpt-only-v9 \
   deploy/slurm/systems_evaluate_task.sbatch
 "${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
-  aggregate-systems --run-dir /data/lhmsb/runs/systems/gpt-only-v8 \
-  --out /data/lhmsb/runs/systems/gpt-only-v8/report
+  aggregate-systems --run-dir /data/lhmsb/runs/systems/gpt-only-v9 \
+  --out /data/lhmsb/runs/systems/gpt-only-v9/report
 "${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
-  validate-systems --report /data/lhmsb/runs/systems/gpt-only-v8/report \
-  --json /data/lhmsb/runs/systems/gpt-only-v8/validation.json
+  validate-systems --report /data/lhmsb/runs/systems/gpt-only-v9/report \
+  --json /data/lhmsb/runs/systems/gpt-only-v9/validation.json
 ```
 
 The preparation job requests two generic NVIDIA GPUs, assigns one to embedding

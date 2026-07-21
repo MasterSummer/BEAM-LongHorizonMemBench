@@ -45,7 +45,7 @@ while (($#)); do
   esac
 done
 
-DATASET="${DATASET:-${DATA_ROOT}/datasets/software_v8}"
+DATASET="${DATASET:-${DATA_ROOT}/datasets/software_v9}"
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   systems_print_command "${SCRIPT_DIR}/verify_system_runtime.sh" --dry-run --data-root "${DATA_ROOT}"

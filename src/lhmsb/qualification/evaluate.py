@@ -63,7 +63,10 @@ from lhmsb.qualification.schema import (
 
 _SYSTEM_PROMPT = (
     "Continue the software project using only the supplied current-session surface, "
-    "workspace, and optional context. Select exactly one opaque implementation option."
+    "workspace, and optional context. When supplied states conflict, a project-owner "
+    "constraint governs a local-operator plan unless a current project-owner decision "
+    "explicitly grants a scoped exception. Select exactly one opaque implementation "
+    "option."
 )
 
 
@@ -953,75 +956,64 @@ def _interventions(
                 ),
             )
         )
-        sham = _sham_target(
-            readout.visible_candidates,
-            target=target,
-            attributions=attributions,
-            relevant_state_ids=tuple(
-                sorted(
-                    set(sceu.focal_state_ids)
-                    | set(sceu.required_state_ids)
-                    | set(sceu.dependency_closure)
-                    | set(sceu.intervention_target_ids)
-                )
-            ),
+        # The sham is a matched negative-control contrast, not removal of a
+        # supposedly irrelevant native memory.  Both arms remove the same
+        # target at the same rank/count/length and differ only in which
+        # evaluator-owned, explicitly non-semantic filler is used.  Comparing
+        # the original target against neutral filler would silently turn a
+        # stale or globally relevant memory into an active treatment.
+        sham_neutral = _neutral_replacement_candidate(
+            sceu,
+            target,
+            control_kind="sham",
         )
-        if sham is not None:
-            sham_neutral = _neutral_replacement_candidate(
-                sceu,
-                sham,
-                control_kind="sham",
-            )
-            sham_visible = list(readout.visible_candidates)
-            sham_visible[sham_visible.index(sham)] = sham_neutral
-            sham_calls = _calls(
-                policy,
-                checker,
-                task,
-                result_id,
-                spec,
-                public,
-                surface,
-                sceu,
-                tuple(sham_visible),
-                additional_context,
-                workspace_hash,
-                _visible_state_ids(
-                    tuple(item.memory_id for item in sham_visible),
-                    attributions,
-                ),
-                "sham_replacement",
-                repeats,
-                max_output_tokens,
-                actions,
-            )
-            sham_classification = classify_causal_use(
-                memory_id=sham.memory_id,
+        sham_visible = list(readout.visible_candidates)
+        sham_visible[sham_visible.index(target)] = sham_neutral
+        sham_calls = _calls(
+            policy,
+            checker,
+            task,
+            result_id,
+            spec,
+            public,
+            surface,
+            sceu,
+            tuple(sham_visible),
+            additional_context,
+            workspace_hash,
+            _visible_state_ids(
+                tuple(item.memory_id for item in sham_visible),
+                attributions,
+            ),
+            "sham_replacement",
+            repeats,
+            max_output_tokens,
+            actions,
+        )
+        sham_classification = classify_causal_use(
+            memory_id=target.memory_id,
+            intervention_kind="sham_replacement",
+            memory_role="unknown",
+            baseline=_outcome_pair(neutral_calls),
+            intervention=_outcome_pair(sham_calls),
+        )
+        result.append(
+            EvaluationIntervention(
                 intervention_kind="sham_replacement",
-                memory_role=_memory_role(
-                    attributions.get(sham.memory_id),
-                    current_ids=current_ids,
+                target_memory_id=target.memory_id,
+                replacement_memory_id=sham_neutral.memory_id,
+                evaluations=sham_calls,
+                classification=sham_classification,
+                baseline_memory_count=len(neutral_visible),
+                intervention_memory_count=len(sham_visible),
+                count_contrast="neutral_a_vs_neutral_b",
+                provenance_mode=(
+                    "unavailable"
+                    if attributions.get(target.memory_id) is None
+                    else attributions[target.memory_id].provenance_mode
                 ),
-                baseline=_outcome_pair(baselines),
-                intervention=_outcome_pair(sham_calls),
             )
-            result.append(
-                EvaluationIntervention(
-                    intervention_kind="sham_replacement",
-                    target_memory_id=sham.memory_id,
-                    replacement_memory_id=sham_neutral.memory_id,
-                    evaluations=sham_calls,
-                    classification=sham_classification,
-                    baseline_memory_count=len(readout.visible_candidates),
-                    intervention_memory_count=len(sham_visible),
-                    count_contrast="replace_one_sham",
-                    provenance_mode=(
-                        "unavailable"
-                        if attributions.get(sham.memory_id) is None
-                        else attributions[sham.memory_id].provenance_mode
-                    ),
-                )
-            )
+        )
         if role != "contradicts_current_state":
             continue
         replacement = _replacement_candidate(
@@ -1191,11 +1183,22 @@ def _neutral_replacement_candidate(
     control_kind: str,
 ) -> RetrievalCandidate:
     """Return evaluator-owned non-semantic text with matched count/position/size."""
-    seed = (
-        "Routine administrative note. Workspace housekeeping completed. "
-        "No project requirement, decision, implementation branch, or policy "
-        "was changed by this note. "
-    )
+    seeds = {
+        "causal": (
+            "Routine administrative note. Workspace housekeeping completed. "
+            "No project requirement, decision, implementation branch, or policy "
+            "was changed by this note. "
+        ),
+        "sham": (
+            "Facilities log entry. A meeting-room fixture received routine maintenance. "
+            "This did not revise any project goal, constraint, branch, decision, "
+            "authorization, or execution policy. "
+        ),
+    }
+    try:
+        seed = seeds[control_kind]
+    except KeyError as exc:
+        raise ValueError(f"unknown neutral replacement kind: {control_kind}") from exc
     target_chars = len(target.content)
     repeated = (seed * ((target_chars // len(seed)) + 1))[:target_chars]
     content = repeated if target_chars else ""
@@ -1214,31 +1217,6 @@ def _neutral_replacement_candidate(
         created_at=target.created_at,
         updated_at=target.updated_at,
     )
-
-
-def _sham_target(
-    visible: Sequence[RetrievalCandidate],
-    *,
-    target: RetrievalCandidate,
-    attributions: Mapping[str, MemoryAttribution],
-    relevant_state_ids: Sequence[str],
-) -> RetrievalCandidate | None:
-    """Choose a resolved object outside the opportunity's full causal state set."""
-    relevant_states = set(relevant_state_ids)
-    for candidate in visible:
-        if candidate.memory_id == target.memory_id:
-            continue
-        attribution = attributions.get(candidate.memory_id)
-        if (
-            attribution is None
-            or not attribution.contributes_positive_coverage
-            or not attribution.state_ids
-        ):
-            continue
-        attributed = set(attribution.state_ids)
-        if attributed.isdisjoint(relevant_states):
-            return candidate
-    return None
 
 
 def _submit(policy: PolicyClient, request: PolicyRequest) -> PolicyResponse:
