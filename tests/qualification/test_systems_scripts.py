@@ -57,6 +57,13 @@ def test_system_scripts_are_executable_and_shell_valid() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_system_slurm_defaults_do_not_dirty_the_checkout() -> None:
+    for path in SLURM_SCRIPTS:
+        text = path.read_text(encoding="utf-8")
+        assert "#SBATCH --output=/tmp/lhmsb-" in text
+        assert "#SBATCH --error=/tmp/lhmsb-" in text
+
+
 @pytest.mark.parametrize("path", SCRIPTS)
 def test_system_wrappers_have_dependency_free_dry_run(path: Path, tmp_path: Path) -> None:
     result = _run(

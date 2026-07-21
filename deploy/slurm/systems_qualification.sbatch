@@ -7,8 +7,10 @@
 #SBATCH --mem=96G
 #SBATCH --time=2-00:00:00
 #SBATCH --signal=B:USR1@120
-#SBATCH --output=slurm-%x-%j.out
-#SBATCH --error=slurm-%x-%j.err
+# Keep default scheduler logs outside the checkout so formal runs remain clean.
+# Production submissions may override these paths with ``sbatch --output/--error``.
+#SBATCH --output=/tmp/lhmsb-%x-%j.out
+#SBATCH --error=/tmp/lhmsb-%x-%j.err
 set -euo pipefail
 
 REPO_ROOT="${LHMSB_REPO_ROOT:-${SLURM_SUBMIT_DIR:-${PWD}}}"

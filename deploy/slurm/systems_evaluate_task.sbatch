@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=12G
 #SBATCH --time=08:00:00
-#SBATCH --output=slurm-%x-%A_%a.out
-#SBATCH --error=slurm-%x-%A_%a.err
+#SBATCH --output=/tmp/lhmsb-%x-%A_%a.out
+#SBATCH --error=/tmp/lhmsb-%x-%A_%a.err
 set -euo pipefail
 
 REPO_ROOT="${LHMSB_REPO_ROOT:-${SLURM_SUBMIT_DIR:-${PWD}}}"
