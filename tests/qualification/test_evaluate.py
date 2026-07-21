@@ -4,9 +4,10 @@ import pytest
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.families.software.vertical_checker import BehaviorResult
+from lhmsb.longhorizon.attribution import MemoryAttribution
 from lhmsb.qualification.config import NO_PREFIX_ARTIFACT, canonical_hash
 from lhmsb.qualification.context import FullContextLimitError
-from lhmsb.qualification.evaluate import EvaluationError, evaluate_task
+from lhmsb.qualification.evaluate import EvaluationError, _sham_target, evaluate_task
 from lhmsb.qualification.memory_runtime import (
     CandidateSearch,
     InventorySnapshot,
@@ -179,6 +180,69 @@ class _Reranker:
             response_hash=sha256_text("|".join(ids)),
             latency_seconds=0.0,
         )
+
+
+def _candidate(memory_id: str, content: str) -> RetrievalCandidate:
+    return RetrievalCandidate(
+        memory_id=memory_id,
+        content=content,
+        content_hash=sha256_text(content),
+        native_rank=1,
+        score=1.0,
+        score_details=(),
+        metadata=(),
+        created_at="",
+        updated_at="",
+    )
+
+
+def test_sham_target_excludes_every_state_in_the_sceu_dependency_closure() -> None:
+    causal = _candidate("causal", "owner authorization")
+    global_constraint = _candidate("constraint", "offline constraint")
+    unrelated = _candidate("unrelated", "held-out fixture")
+    attributions = {
+        "causal": MemoryAttribution(
+            "causal", ("L1",), "exact_signature", True, "test"
+        ),
+        "constraint": MemoryAttribution(
+            "constraint", ("C1",), "exact_signature", True, "test"
+        ),
+        "unrelated": MemoryAttribution(
+            "unrelated", ("C2",), "exact_signature", True, "test"
+        ),
+    }
+
+    selected = _sham_target(
+        (causal, global_constraint, unrelated),
+        target=causal,
+        attributions=attributions,
+        relevant_state_ids=("C1", "D1", "G0", "L1"),
+    )
+
+    assert selected == unrelated
+
+
+def test_sham_target_does_not_treat_unresolved_memory_as_irrelevant() -> None:
+    causal = _candidate("causal", "owner authorization")
+    unresolved = _candidate("unresolved", "unknown summary")
+    attributions = {
+        "causal": MemoryAttribution(
+            "causal", ("L1",), "exact_signature", True, "test"
+        ),
+        "unresolved": MemoryAttribution(
+            "unresolved", (), "ambiguous", False, "test"
+        ),
+    }
+
+    assert (
+        _sham_target(
+            (causal, unresolved),
+            target=causal,
+            attributions=attributions,
+            relevant_state_ids=("L1",),
+        )
+        is None
+    )
 
 
 def _task(spec, condition, readout="none", *, prefix_hash=NO_PREFIX_ARTIFACT):

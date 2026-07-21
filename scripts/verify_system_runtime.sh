@@ -38,6 +38,13 @@ if [[ "${DRY_RUN}" == "1" ]]; then
     systems_print_command "${DATA_ROOT}/venvs/${environment}/bin/python" -m lhmsb.qualification --help
   done
   systems_print_command test -x "${DATA_ROOT}/manifests/native-runtime.json"
+  systems_print_command test -s "${DATA_ROOT}/manifests/system-sources.json"
+  systems_print_command python3 -m lhmsb.qualification.source_manifest verify \
+    --data-root "${DATA_ROOT}"
+  systems_print_command python3 -m lhmsb.qualification.source_manifest verify-module \
+    --data-root "${DATA_ROOT}" --source amem --module agentic_memory.memory_system
+  systems_print_command python3 -m lhmsb.qualification.source_manifest verify-module \
+    --data-root "${DATA_ROOT}" --source memos --module memos.memories.textual.tree
   systems_print_command test -d "${DATA_ROOT}/models/bge-m3"
   systems_print_command test -d "${DATA_ROOT}/models/bge-reranker-v2-m3"
   systems_print_command "${DATA_ROOT}/bin/qdrant" --version
@@ -55,6 +62,27 @@ for environment in core mem0 amem memos; do
     "${python}" -c 'import sys; assert sys.version_info[:2] == (3, 11); import lhmsb'
   PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
     "${python}" -m lhmsb.qualification --help >/dev/null
+done
+
+[[ -s "${DATA_ROOT}/manifests/system-sources.json" ]] || {
+  printf 'missing system source manifest\n' >&2
+  exit 1
+}
+PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+  "$(systems_venv_python "${DATA_ROOT}" core)" \
+  -m lhmsb.qualification.source_manifest verify --data-root "${DATA_ROOT}"
+for identity in \
+  "amem amem agentic_memory.memory_system" \
+  "memos memos memos.memories.textual.tree"; do
+  read -r environment source_name module_name <<<"${identity}"
+  LHMSB_DATA_ROOT="${DATA_ROOT}" \
+  LHMSB_SOURCE_TREE_MANIFEST_PATH="${DATA_ROOT}/manifests/system-sources.json" \
+  PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+    "$(systems_venv_python "${DATA_ROOT}" "${environment}")" \
+    -m lhmsb.qualification.source_manifest verify-module \
+    --data-root "${DATA_ROOT}" \
+    --manifest "${DATA_ROOT}/manifests/system-sources.json" \
+    --source "${source_name}" --module "${module_name}"
 done
 
 for required in "${LHMSB_QDRANT_BIN}" "${LHMSB_NEO4J_HOME}/bin/neo4j" \

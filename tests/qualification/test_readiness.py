@@ -143,6 +143,49 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
     assert payload["measurement_ready"] is True
     assert payload["gate_counts"] == {"pass": 17}
 
+    # A managed system may demonstrate causal use even when raw flat retrieval
+    # contains relevant text that the policy does not behaviorally use. That is
+    # a system result, not a failure of the intervention machinery.
+    memory_rows[0].behaviorally_used_memory_ids = ()
+    managed_row = SimpleNamespace(
+        baseline_stable=True,
+        interventions=sham_controls
+        + (
+            SimpleNamespace(
+                intervention_kind="neutral_replacement",
+                classification=SimpleNamespace(
+                    action_changed=True,
+                    behaviorally_used=True,
+                ),
+            ),
+        ),
+        drift_eligible_categories=(drift[0],),
+        behaviorally_used_memory_ids=("managed-memory",),
+        opportunity_id=opportunities[0],
+    )
+    original_conditions = task.condition_results
+    task.condition_results = original_conditions + (
+        SimpleNamespace(
+            condition="mem0",
+            readout="common_rerank",
+            status="complete",
+            sceu_results=(managed_row,),
+        ),
+    )
+    managed_chain = compute_measurement_gates(
+        SimpleNamespace(task_results=(task,)),
+        specs,
+        summary=summary,
+        heuristic_baselines=compute_heuristic_baselines(specs),
+    )
+    managed_gates = {item["gate_id"]: item for item in managed_chain["gates"]}
+    chain = managed_gates["stored_retrieved_visible_behavior_chain"]
+    assert chain["status"] == "pass"
+    assert chain["detail"]["flat_qualifying_sceu"] == 0
+    assert chain["detail"]["all_memory_qualifying_sceu"] == 1
+    task.condition_results = original_conditions
+    memory_rows[0].behaviorally_used_memory_ids = ("memory-1",)
+
     summary["semantic_attribution"]["method_counts"] = {"ambiguous": 1}
     ambiguous = compute_measurement_gates(
         SimpleNamespace(task_results=(task,)),

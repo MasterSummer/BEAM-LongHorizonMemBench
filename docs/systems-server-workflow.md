@@ -17,9 +17,10 @@ manifests, or result hashes.
 Install native Qdrant, Neo4j Community, Java 17, and the CUDA TEI binary on the
 host. Download the BGE-M3 and BGE-reranker-v2-m3 snapshots into the configured
 model directories. The canonical deployment needs two visible, distinct NVIDIA
-GPUs; the current server profile assigns GPU 0 to embeddings and GPU 1 to
-reranking. Set `LHMSB_REQUIRE_A100=1` only when reproducing a legacy A100-only
-deployment. Copy the repository and create a mode-0600 operator file:
+GPUs selected in the operator environment; on the current shared host, GPU 0
+is assigned to embeddings and GPU 2 to reranking. Set `LHMSB_REQUIRE_A100=1`
+only when reproducing a legacy A100-only deployment. Copy the repository and
+create a mode-0600 operator file:
 
 ```bash
 cp .env.example /data/lhmsb/env/operator.env
@@ -34,6 +35,12 @@ Bootstrap checks out the pinned A-MEM and MemOS sources, creates four isolated
 Python environments, generates hash-locked requirements and wheelhouses, and
 writes runtime and source manifests. It does not read provider keys during
 dependency or runtime installation.
+
+`manifests/system-sources.json` records each upstream origin, commit, Git tree,
+and the complete non-cache source file set. Verification also imports the live
+A-MEM and MemOS modules and requires their `__file__` paths to reside in those
+pristine checkouts. An exported directory, a manually injected commit marker,
+or an editable install pointing at another user's checkout is rejected.
 
 ## Validate and run
 
@@ -71,7 +78,7 @@ Run the five-scenario calibration before the confirmatory matrix:
 ```bash
 scripts/run_systems_qualification.sh \
   --data-root /home/root123/lhmsb-native-data \
-  --env-file /home/root123/lhmsb-native-data/operator.env \
+  --env-file /home/root123/lhmsb-native-data/env/operator.env \
   --run-name systems-gpt56-calibration-v5 \
   --episode-limit 5 --keep-going
 ```
@@ -124,7 +131,7 @@ same run identity.
 
 ```text
 /data/lhmsb/
-  manifests/{build,host,native-runtime}.json
+  manifests/{build,host,native-runtime,model-bundle,system-sources}.json
   sources/{amem,memos}/
   venvs/{core,mem0,amem,memos}/
   services/<run-instance>/

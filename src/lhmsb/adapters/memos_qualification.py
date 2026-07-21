@@ -47,6 +47,10 @@ from lhmsb.qualification.neo4j import (
     is_live_node,
 )
 from lhmsb.qualification.schema import MemOSTreeProfile, PolicyProfile
+from lhmsb.qualification.source_manifest import (
+    SourceManifestError,
+    verified_source_commit_for_module,
+)
 
 _PINNED_SOURCE_COMMIT = "583b07b998afc4debb6c5078439b0b3896f5b097"
 _OFFICIAL_TREE_MODULE = "memos.memories.textual.tree"
@@ -1072,6 +1076,14 @@ def _validate_official_identity(module: object, *, expected_commit: str) -> None
         if isinstance(value, str):
             commit = value
             break
+    if commit is None:
+        try:
+            commit = verified_source_commit_for_module(module, "memos")
+        except SourceManifestError as exc:
+            raise MemOSQualificationError(
+                "source_pin_mismatch",
+                f"MemOS external source identity is not verified: {exc}",
+            ) from exc
     if commit != expected_commit:
         raise MemOSQualificationError(
             "source_pin_mismatch", f"MemOS source commit {commit!r} != expected {expected_commit!r}"

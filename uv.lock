@@ -2537,6 +2537,7 @@ qualification = [
     { name = "openai" },
     { name = "pandas" },
     { name = "pyarrow" },
+    { name = "pytest" },
     { name = "qdrant-client" },
 ]
 tokenizers = [
@@ -2564,6 +2565,7 @@ requires-dist = [
     { name = "pandas", marker = "extra == 'qualification'", specifier = ">=2.2,<3" },
     { name = "pyarrow", marker = "extra == 'qualification'", specifier = ">=19,<22" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pytest", marker = "extra == 'qualification'", specifier = ">=8" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "qdrant-client", marker = "extra == 'qualification'", specifier = ">=1.15,<2" },

@@ -256,6 +256,48 @@ def _runtime_manifest_hash(environment: Mapping[str, str]) -> str:
     )
 
 
+def _source_tree_manifest_hash(environment: Mapping[str, str]) -> str:
+    return _manifest_hash(
+        environment,
+        path_keys=("LHMSB_SOURCE_TREE_MANIFEST_PATH",),
+        hash_keys=("LHMSB_SOURCE_TREE_MANIFEST_HASH",),
+        unavailable_label="source-tree-manifest-unavailable",
+    )
+
+
+def _assert_planned_preparation_manifests(
+    manifest: Mapping[str, object],
+    environment: Mapping[str, str],
+) -> tuple[str, str, str]:
+    """Require every preparation worker to use the three planned manifests."""
+    runtime_hash = _runtime_manifest_hash(environment)
+    source_tree_hash = _source_tree_manifest_hash(environment)
+    model_bundle_hash = _model_files_hash(environment)
+    comparisons = (
+        (
+            "runtime manifest",
+            manifest.get("runtime_manifest_hash"),
+            runtime_hash,
+        ),
+        (
+            "source-tree manifest",
+            manifest.get("source_tree_manifest_hash"),
+            source_tree_hash,
+        ),
+        (
+            "model bundle",
+            manifest.get("model_bundle_hash", manifest.get("model_files_hash")),
+            model_bundle_hash,
+        ),
+    )
+    for label, expected, actual in comparisons:
+        if expected is not None and expected != actual:
+            raise MultisystemCliError(
+                f"{label} identity differs from the immutable run plan"
+            )
+    return runtime_hash, source_tree_hash, model_bundle_hash
+
+
 def _config(path: Path) -> SystemsQualificationConfig:
     loaded = load_qualification_config(path.resolve())
     if not isinstance(loaded, SystemsQualificationConfig):
@@ -403,6 +445,7 @@ def plan_systems_run(
         raise MultisystemCliError("Git worktree is dirty; pass --allow-dirty")
     env = dict(os.environ if environment is None else environment)
     runtime_manifest_hash = _runtime_manifest_hash(env)
+    source_tree_manifest_hash = _source_tree_manifest_hash(env)
     model_bundle_hash = _model_files_hash(env)
     manifest_path = run_directory / "run_manifest.json"
     dataset_manifest = dataset.resolve() / "MANIFEST.json"
@@ -416,6 +459,7 @@ def plan_systems_run(
         "config_hash": config.config_hash,
         "source_lock_hash": config.source_lock_hash,
         "runtime_manifest_hash": runtime_manifest_hash,
+        "source_tree_manifest_hash": source_tree_manifest_hash,
         "model_bundle_hash": model_bundle_hash,
         # Prefix artifacts use the historical ``model_files_hash`` name.
         "model_files_hash": model_bundle_hash,
@@ -605,18 +649,9 @@ def _prepare_live_task(
         run_identity=_text(manifest.get("run_identity"), "run_identity"),
     )
     env = dict(os.environ if environment is None else environment)
-    runtime_manifest_hash = _runtime_manifest_hash(env)
-    model_bundle_hash = _model_files_hash(env)
-    expected_runtime_hash = manifest.get("runtime_manifest_hash")
-    if expected_runtime_hash is not None and expected_runtime_hash != runtime_manifest_hash:
-        raise MultisystemCliError(
-            "runtime manifest identity differs from the immutable run plan"
-        )
-    expected_model_hash = manifest.get("model_bundle_hash", manifest.get("model_files_hash"))
-    if expected_model_hash is not None and expected_model_hash != model_bundle_hash:
-        raise MultisystemCliError(
-            "model bundle identity differs from the immutable run plan"
-        )
+    _runtime_manifest, _source_tree_manifest, model_bundle_hash = (
+        _assert_planned_preparation_manifests(manifest, env)
+    )
     profile = config.system_profiles[task.backend]
     source_commit = getattr(profile, "source_commit", "repository")
     expected_identity = {

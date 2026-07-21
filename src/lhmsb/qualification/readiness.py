@@ -422,16 +422,19 @@ def compute_measurement_gates(
     flat_causal_chains = sum(
         bool(getattr(row, "behaviorally_used_memory_ids", ())) for row in flat_rows
     )
+    total_causal_chains = sum(causal_chains_by_cell.values())
     _gate_boolean(
         gates,
         "stored_retrieved_visible_behavior_chain",
-        flat_causal_chains > 0,
-        applicable=bool(flat_rows),
+        total_causal_chains > 0,
+        applicable=bool(memory_rows),
         description=(
-            "The controlled flat-retrieval positive control establishes at least one "
-            "stable stored-to-behavior chain."
+            "At least one preregistered memory condition establishes a stable "
+            "stored-to-retrieved-to-visible-to-behavior chain. Flat retrieval remains "
+            "reported separately and is not assumed to be behaviorally sufficient."
         ),
         detail={
+            "all_memory_qualifying_sceu": total_causal_chains,
             "flat_qualifying_sceu": flat_causal_chains,
             "qualifying_sceu_by_cell": causal_chains_by_cell,
         },

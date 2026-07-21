@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+import lhmsb.adapters.memos_qualification as memos_module
 from lhmsb.adapters.memos_qualification import (
     MemOSDeepSeekBridge,
     MemOSLLMConfig,
@@ -14,6 +15,7 @@ from lhmsb.adapters.memos_qualification import (
     _build_tree_config,
     _graph_diff_events,
     _install_memos_bridges,
+    validate_memos_source,
 )
 from lhmsb.qualification.memory_runtime import LifecycleCapabilities
 from lhmsb.qualification.neo4j import (
@@ -36,6 +38,24 @@ class FakeManager:
 
     def close(self) -> None:
         return None
+
+
+def test_source_identity_can_come_from_verified_external_manifest(monkeypatch) -> None:
+    module = SimpleNamespace(
+        __name__="memos.memories.textual.tree",
+        __file__="/verified/sources/memos/src/memos/memories/textual/tree.py",
+        TreeTextMemory=FakeTree,
+    )
+    monkeypatch.setattr(
+        memos_module,
+        "verified_source_commit_for_module",
+        lambda value, source: "583b07b998afc4debb6c5078439b0b3896f5b097",
+    )
+    validate_memos_source(module)
+
+    module.__source_commit__ = "wrong"
+    with pytest.raises(MemOSQualificationError, match="source commit"):
+        validate_memos_source(module)
 
 
 class FakeTree:

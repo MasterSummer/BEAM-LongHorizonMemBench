@@ -1653,6 +1653,7 @@ def _state_metrics(
     )
     for method in (
         "exact_signature",
+        "multi_signature",
         "lexical_signature",
         "unique_provenance",
         "no_match",
@@ -1778,6 +1779,7 @@ def _aligned_attribution_methods(
     """Return one explicit semantic-attribution label per memory object."""
     allowed = {
         "exact_signature",
+        "multi_signature",
         "lexical_signature",
         "unique_provenance",
         "no_match",

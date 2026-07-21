@@ -186,6 +186,8 @@ def test_bootstrap_uses_native_venv_and_pinned_sources() -> None:
         "MemOS",
         "native-runtime.json",
         "native-runtime.lock.yaml",
+        "system-sources.json",
+        "source_manifest",
     ):
         assert marker in text
     assert "OPENCODE_ZEN_API_KEY" not in text
@@ -287,5 +289,6 @@ def test_native_services_keep_memos_state_out_of_source_checkout() -> None:
 def test_runtime_verifier_is_native() -> None:
     text = (ROOT / "scripts" / "verify_system_runtime.sh").read_text(encoding="utf-8")
     assert "native-runtime.json" in text
+    assert "system-sources.json" in text
     assert "venvs" in text
     assert "docker" not in text.lower()

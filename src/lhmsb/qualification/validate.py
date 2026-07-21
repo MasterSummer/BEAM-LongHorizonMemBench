@@ -465,6 +465,7 @@ def _validate_semantic_attributions(
     """Keep lifecycle provenance distinct from evaluator state attribution."""
     allowed_methods = {
         "exact_signature",
+        "multi_signature",
         "lexical_signature",
         "unique_provenance",
         "no_match",

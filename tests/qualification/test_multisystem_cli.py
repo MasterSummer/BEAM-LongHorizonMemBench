@@ -84,11 +84,12 @@ def test_prepare_task_dry_run_does_not_require_backend(tmp_path: Path) -> None:
     assert main(["prepare-task", "--run-dir", str(run), "--task-index", "0", "--dry-run"]) == 0
 
 
-def test_plan_binds_native_runtime_and_model_bundle_manifests(tmp_path: Path) -> None:
+def test_plan_binds_runtime_source_and_model_bundle_manifests(tmp_path: Path) -> None:
     dataset = _dataset(tmp_path)
     run = tmp_path / "run"
     runtime = "a" * 64
     models = "b" * 64
+    sources = "c" * 64
     from lhmsb.qualification.multisystem_cli import plan_systems_run
 
     payload = plan_systems_run(
@@ -100,9 +101,11 @@ def test_plan_binds_native_runtime_and_model_bundle_manifests(tmp_path: Path) ->
         environment={
             "LHMSB_RUNTIME_MANIFEST_HASH": runtime,
             "LHMSB_MODEL_BUNDLE_HASH": models,
+            "LHMSB_SOURCE_TREE_MANIFEST_HASH": sources,
         },
     )
     assert payload["runtime_manifest_hash"] == runtime
+    assert payload["source_tree_manifest_hash"] == sources
     assert payload["model_bundle_hash"] == models
     assert payload["model_files_hash"] == models
     manifest = json.loads((run / "run_manifest.json").read_text())
@@ -218,3 +221,32 @@ def test_manifest_hash_rejects_non_digest_environment_values(tmp_path: Path) -> 
         assert "SHA-256" in str(exc)
     else:
         raise AssertionError("invalid runtime manifest digest was accepted")
+
+
+def test_preparation_worker_rejects_changed_source_tree_manifest() -> None:
+    from lhmsb.qualification import multisystem_cli
+
+    manifest = {
+        "runtime_manifest_hash": "a" * 64,
+        "source_tree_manifest_hash": "b" * 64,
+        "model_bundle_hash": "c" * 64,
+    }
+    environment = {
+        "LHMSB_RUNTIME_MANIFEST_HASH": "a" * 64,
+        "LHMSB_SOURCE_TREE_MANIFEST_HASH": "b" * 64,
+        "LHMSB_MODEL_BUNDLE_HASH": "c" * 64,
+    }
+    assert multisystem_cli._assert_planned_preparation_manifests(
+        manifest,
+        environment,
+    ) == ("a" * 64, "b" * 64, "c" * 64)
+
+    environment["LHMSB_SOURCE_TREE_MANIFEST_HASH"] = "d" * 64
+    with pytest.raises(
+        multisystem_cli.MultisystemCliError,
+        match="source-tree manifest identity differs",
+    ):
+        multisystem_cli._assert_planned_preparation_manifests(
+            manifest,
+            environment,
+        )

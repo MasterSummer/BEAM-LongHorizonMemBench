@@ -5,10 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
+import lhmsb.adapters.amem_qualification as amem_module
 from lhmsb.adapters.amem_qualification import (
     AMemQualificationAdapter,
     AMemQualificationError,
     _amem_writer_max_output_tokens,
+    validate_amem_source,
 )
 from lhmsb.qualification.context import PublicHistoryUnit
 
@@ -168,6 +170,24 @@ def test_source_and_api_mismatch_fail_without_fallback() -> None:
     # Constructor-level fake identity is checked by the live factory; ensure the
     # explicit source verifier remains strict through the public helper path.
     assert bad.__source_commit__ == "wrong"
+
+
+def test_source_identity_can_come_from_verified_external_manifest(monkeypatch) -> None:
+    module = SimpleNamespace(
+        __name__="agentic_memory.memory_system",
+        __file__="/verified/sources/amem/agentic_memory/memory_system.py",
+        AgenticMemorySystem=FakeAMem,
+    )
+    monkeypatch.setattr(
+        amem_module,
+        "verified_source_commit_for_module",
+        lambda value, source: "ceffb860f0712bbae97b184d440df62bc910ca8d",
+    )
+    validate_amem_source(module)
+
+    module.__source_commit__ = "wrong"
+    with pytest.raises(AMemQualificationError, match="source commit"):
+        validate_amem_source(module)
 
 
 def test_amem_writer_budget_has_offline_reasoning_headroom(monkeypatch: pytest.MonkeyPatch) -> None:

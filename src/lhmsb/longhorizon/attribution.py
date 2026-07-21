@@ -12,6 +12,7 @@ from lhmsb.longhorizon.schema import EpisodePlan
 
 AttributionMethod = Literal[
     "exact_signature",
+    "multi_signature",
     "lexical_signature",
     "unique_provenance",
     "no_match",
@@ -183,8 +184,8 @@ def attribute_memory(
         return MemoryAttribution(
             memory_id=memory_id,
             state_ids=variant_exact,
-            method="ambiguous",
-            contributes_positive_coverage=False,
+            method="multi_signature",
+            contributes_positive_coverage=True,
             reason="memory text contains multiple generated canonical fact surfaces",
             provenance_mode=provenance_mode,
             source_event_ids=source_event_ids,
@@ -213,8 +214,8 @@ def attribute_memory(
         return MemoryAttribution(
             memory_id=memory_id,
             state_ids=anchor_exact,
-            method="ambiguous",
-            contributes_positive_coverage=False,
+            method="multi_signature",
+            contributes_positive_coverage=True,
             reason="memory text satisfies multiple complete fact signatures",
             provenance_mode=provenance_mode,
             source_event_ids=source_event_ids,
@@ -246,21 +247,24 @@ def attribute_memory(
             and not _has_negative_anchor(normalized, signature)
         )
     )
-    if (
-        len(provenance_ids) == 1
-        and partial_matches == provenance_ids
-    ):
+    provenance_matches = tuple(
+        sorted(set(provenance_ids).intersection(partial_matches))
+    )
+    if len(provenance_matches) == 1:
         return MemoryAttribution(
             memory_id=memory_id,
-            state_ids=provenance_ids,
+            state_ids=provenance_matches,
             method="unique_provenance",
             contributes_positive_coverage=True,
-            reason="one eligible write source and one uncontested partial signature match",
+            reason=(
+                "one write-eligible state remains after intersecting source-session "
+                "provenance with partial fact signatures"
+            ),
             provenance_mode=provenance_mode,
             source_event_ids=source_event_ids,
             source_session=source_session,
         )
-    if not partial_matches and not _contains_cjk(text):
+    if not partial_matches and _signatures_support_script(text, signatures):
         return MemoryAttribution(
             memory_id=memory_id,
             state_ids=(),
@@ -330,6 +334,8 @@ def _contains_phrase(text: str, phrase: str) -> bool:
     normalized_phrase = normalize_fact_text(phrase)
     if not normalized_phrase:
         return False
+    if _contains_cjk(normalized_phrase) or _contains_cjk(text):
+        return normalized_phrase in text
     return f" {normalized_phrase} " in f" {text} "
 
 
@@ -404,6 +410,28 @@ def _contains_cjk(text: str) -> bool:
     return sum("\u3400" <= character <= "\u9fff" for character in text) >= 2
 
 
+def _signatures_support_script(
+    text: str,
+    signatures: tuple[FactSignature, ...],
+) -> bool:
+    """Return whether deterministic signatures cover the input's writing system."""
+    if not _contains_cjk(text):
+        return True
+    return any(
+        _contains_cjk(candidate)
+        for signature in signatures
+        for candidate in (
+            *signature.allowed_surface_variants,
+            *signature.negative_anchors,
+            *(
+                anchor
+                for group in signature.required_anchor_groups
+                for anchor in group
+            ),
+        )
+    )
+
+
 def _unique_lexical_match(
     normalized_text: str,
     signatures: tuple[FactSignature, ...],
@@ -437,19 +465,66 @@ def _software_catalog() -> dict[str, _SignatureDefinition]:
     return {
         "G0": _SignatureDefinition(
             required_anchor_groups=(
-                ("reproducible",),
-                ("auditable",),
-                ("experiment pipeline",),
+                ("reproducible", "deterministic", "可复现", "确定性"),
+                (
+                    "auditable",
+                    "traceable",
+                    "reviewable",
+                    "inspectable",
+                    "attestable",
+                    "可审计",
+                    "可追溯",
+                    "可审查",
+                    "可检查",
+                    "可验证",
+                ),
+                (
+                    "experiment pipeline",
+                    "benchmark execution service",
+                    "schema migration tool",
+                    "release packaging workflow",
+                    "firmware validation workflow",
+                    "实验管线",
+                    "基准执行服务",
+                    "模式迁移工具",
+                    "发布打包工作流",
+                    "固件验证工作流",
+                ),
             ),
             allowed_surface_variants=(
                 "build a reproducible and auditable experiment pipeline",
+                "构建一个确定性和可追溯的基准执行服务",
             ),
-            negative_anchors=("not reproducible", "not auditable"),
+            negative_anchors=(
+                "not reproducible",
+                "not auditable",
+                "不可复现",
+                "不可审计",
+            ),
         ),
         "C1": _SignatureDefinition(
             required_anchor_groups=(
-                ("offline",),
-                ("cloud services", "cloud api"),
+                (
+                    "offline",
+                    "network isolated",
+                    "network-isolated",
+                    "locally isolated",
+                    "without external network access",
+                    "本地隔离",
+                    "网络隔离",
+                    "无外部网络访问",
+                    "完全离线",
+                ),
+                (
+                    "cloud services",
+                    "cloud api",
+                    "remote endpoints",
+                    "hosted services",
+                    "远程端点",
+                    "云端服务",
+                    "托管服务",
+                    "远程服务",
+                ),
             ),
             allowed_surface_variants=(
                 "pipeline execution must remain completely offline do not call cloud services",
@@ -457,44 +532,96 @@ def _software_catalog() -> dict[str, _SignatureDefinition]:
                     "execution policy the pipeline must remain offline "
                     "and must not call cloud services"
                 ),
+                "评分的基准运行不得使用远程端点评估执行必须保持本地隔离",
             ),
             negative_anchors=(
                 "may call cloud",
                 "cloud services are allowed",
                 "online execution is allowed",
+                "允许调用云端服务",
+                "允许使用远程端点",
+                "可以使用远程端点",
             ),
         ),
         "C2": _SignatureDefinition(
             required_anchor_groups=(
-                ("held out test set", "heldout test set", "heldout"),
-                ("never be modified", "must not be modified", "do not modify", "frozen"),
+                (
+                    "held out test set",
+                    "heldout test set",
+                    "heldout",
+                    "sealed scoring fixtures",
+                    "golden compatibility fixtures",
+                    "locked validation corpus",
+                    "signed conformance vectors",
+                    "密封的评分夹具",
+                    "密封评分夹具",
+                    "黄金兼容性夹具",
+                    "锁定的验证语料库",
+                    "签名一致性向量",
+                ),
+                (
+                    "never be modified",
+                    "must not be modified",
+                    "do not modify",
+                    "frozen",
+                    "never be edited",
+                    "never be rewritten",
+                    "never be altered",
+                    "绝不能被修改",
+                    "不得修改",
+                    "绝不能被编辑",
+                    "绝不能被重写",
+                    "绝不能被改动",
+                ),
             ),
             allowed_surface_variants=(
                 "the held out test set must never be modified",
                 "the evaluation split is frozen",
+                "密封的评分夹具绝不能被修改",
             ),
             negative_anchors=(
                 "may modify the held out",
                 "held out test set may change",
+                "可以修改评分夹具",
+                "允许修改验证语料库",
             ),
         ),
         "P1": _SignatureDefinition(
             required_anchor_groups=(
                 ("v1",),
-                ("initial implementation", "initial branch"),
+                ("initial implementation", "initial branch", "初始实现", "初始分支"),
             ),
-            allowed_surface_variants=("initial implementation branch v1",),
-            negative_anchors=("v2 is the initial implementation",),
+            allowed_surface_variants=(
+                "initial implementation branch v1",
+                "当前分支为v1状态为初始实现",
+                "分支为v1状态为初始实现",
+            ),
+            negative_anchors=("v2 is the initial implementation", "v2是初始实现"),
         ),
         "U1": _SignatureDefinition(
             required_anchor_groups=(
-                ("data leakage", "leakage"),
+                (
+                    "data leakage",
+                    "leakage",
+                    "contamination",
+                    "数据泄漏",
+                    "记录泄漏",
+                    "夹具泄漏",
+                    "依赖污染",
+                    "一致性向量泄漏",
+                ),
                 ("v1",),
             ),
             allowed_surface_variants=(
                 "data leakage was found in the v1 implementation",
+                "在v1实现中发现数据泄漏",
             ),
-            negative_anchors=("v1 has no data leakage", "no leakage in v1"),
+            negative_anchors=(
+                "v1 has no data leakage",
+                "no leakage in v1",
+                "v1没有数据泄漏",
+                "v1不存在泄漏",
+            ),
         ),
         "P2": _SignatureDefinition(
             required_anchor_groups=(
@@ -504,19 +631,64 @@ def _software_catalog() -> dict[str, _SignatureDefinition]:
                     "current branch",
                     "leakage fix",
                     "leakage remediation",
+                    "current runner",
+                    "current migration path",
+                    "当前实现",
+                    "当前分支",
+                    "当前运行器",
+                    "当前迁移路径",
+                    "泄漏修复",
+                    "隔离修复",
+                    "依赖修复",
+                    "一致性修复",
                 ),
             ),
             allowed_surface_variants=(
                 "v2 is the current implementation after the leakage fix",
+                "v2是泄漏修复后的当前实现",
             ),
-            negative_anchors=("v1 is the current implementation",),
+            negative_anchors=("v1 is the current implementation", "v1是当前实现"),
         ),
         "D1": _SignatureDefinition(
             required_anchor_groups=(
-                ("local operator",),
-                ("proposes", "proposal"),
-                ("hosted api", "hosted accelerator", "cloud api"),
-                ("profiling run", "profiling"),
+                (
+                    "local operator",
+                    "database operator",
+                    "lab operator",
+                    "release engineer",
+                    "operator",
+                    "本地操作员",
+                    "数据库操作员",
+                    "实验室操作员",
+                    "发布工程师",
+                    "操作员",
+                ),
+                ("proposes", "proposal", "提出", "提议", "提案"),
+                (
+                    "hosted api",
+                    "hosted accelerator",
+                    "cloud api",
+                    "hosted analyzer",
+                    "hosted compiler",
+                    "remote accelerator",
+                    "远程加速器",
+                    "托管分析器",
+                    "托管编译器",
+                    "云端api",
+                ),
+                (
+                    "profiling run",
+                    "profiling",
+                    "latency profile",
+                    "performance trace",
+                    "timing run",
+                    "dry run",
+                    "延迟配置",
+                    "性能追踪",
+                    "计时运行",
+                    "试运行",
+                    "分析器",
+                ),
             ),
             allowed_surface_variants=(
                 (
@@ -524,14 +696,52 @@ def _software_catalog() -> dict[str, _SignatureDefinition]:
                     "this is a suggestion not authorization or a policy exception"
                 ),
             ),
-            negative_anchors=("project owner explicitly authorizes",),
+            negative_anchors=(
+                "project owner explicitly authorizes",
+                "owner authorizes",
+                "所有者授权",
+                "所有者明确授权",
+            ),
         ),
         "L1": _SignatureDefinition(
             required_anchor_groups=(
-                ("project owner",),
-                ("authorizes", "authorization"),
-                ("hosted api", "hosted accelerator"),
-                ("isolated local profiler", "isolated profiler"),
+                (
+                    "project owner",
+                    "benchmark owner",
+                    "data owner",
+                    "release owner",
+                    "validation owner",
+                    "项目所有者",
+                    "基准测试所有者",
+                    "数据所有者",
+                    "发布所有者",
+                    "验证所有者",
+                ),
+                ("authorizes", "authorization", "授权", "明确授权"),
+                (
+                    "hosted api",
+                    "hosted accelerator",
+                    "remote accelerator",
+                    "hosted analyzer",
+                    "hosted compiler",
+                    "远程加速器",
+                    "托管分析器",
+                    "托管编译器",
+                    "云端api",
+                ),
+                (
+                    "isolated local profiler",
+                    "isolated profiler",
+                    "isolated latency profiler",
+                    "isolated dry run profiler",
+                    "isolated timing profiler",
+                    "isolated performance tracer",
+                    "隔离的延迟分析器",
+                    "隔离延迟分析器",
+                    "隔离的试运行分析器",
+                    "隔离的计时分析器",
+                    "隔离的性能追踪器",
+                ),
             ),
             allowed_surface_variants=(
                 (
@@ -539,18 +749,42 @@ def _software_catalog() -> dict[str, _SignatureDefinition]:
                     "the isolated local profiler"
                 ),
             ),
-            negative_anchors=("not authorization", "no authorization"),
+            negative_anchors=(
+                "not authorization",
+                "no authorization",
+                "不构成授权",
+                "没有授权",
+                "并非授权",
+            ),
         ),
         "V2": _SignatureDefinition(
             required_anchor_groups=(
                 ("v2",),
-                ("held out integrity", "heldout integrity", "integrity audit"),
-                ("passed", "passes"),
+                (
+                    "held out integrity",
+                    "heldout integrity",
+                    "integrity audit",
+                    "sealed fixture integrity",
+                    "golden fixture integrity",
+                    "locked corpus integrity",
+                    "signed vector integrity",
+                    "完整性审计",
+                    "密封夹具完整性",
+                    "黄金夹具完整性",
+                    "锁定语料库完整性",
+                    "签名向量完整性",
+                ),
+                ("passed", "passes", "通过", "成功通过"),
             ),
             allowed_surface_variants=(
                 "the v2 branch passes the held out integrity audit",
+                "v2运行器通过了密封夹具完整性审计",
             ),
-            negative_anchors=("v2 failed the held out integrity audit",),
+            negative_anchors=(
+                "v2 failed the held out integrity audit",
+                "v2未通过完整性审计",
+                "v2完整性审计失败",
+            ),
         ),
     }
 

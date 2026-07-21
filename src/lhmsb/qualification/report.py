@@ -1434,6 +1434,7 @@ def _semantic_attribution_diagnostics(
                 contributes = value.get("contributes_positive_coverage") is True
                 if method not in {
                     "exact_signature",
+                    "multi_signature",
                     "lexical_signature",
                     "unique_provenance",
                     "no_match",

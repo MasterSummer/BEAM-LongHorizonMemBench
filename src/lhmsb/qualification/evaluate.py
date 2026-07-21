@@ -959,7 +959,14 @@ def _interventions(
             readout.visible_candidates,
             target=target,
             attributions=attributions,
-            intervention_target_state_ids=sceu.intervention_target_ids,
+            relevant_state_ids=tuple(
+                sorted(
+                    set(sceu.focal_state_ids)
+                    | set(sceu.required_state_ids)
+                    | set(sceu.dependency_closure)
+                    | set(sceu.intervention_target_ids)
+                )
+            ),
         )
         if sham is not None:
             sham_neutral = _neutral_replacement_candidate(
@@ -1218,20 +1225,22 @@ def _sham_target(
     *,
     target: RetrievalCandidate,
     attributions: Mapping[str, MemoryAttribution],
-    intervention_target_state_ids: Sequence[str],
+    relevant_state_ids: Sequence[str],
 ) -> RetrievalCandidate | None:
-    """Choose a visible object with no evaluator-attributed target-state overlap."""
-    target_states = set(intervention_target_state_ids)
+    """Choose a resolved object outside the opportunity's full causal state set."""
+    relevant_states = set(relevant_state_ids)
     for candidate in visible:
         if candidate.memory_id == target.memory_id:
             continue
         attribution = attributions.get(candidate.memory_id)
-        attributed = (
-            set(attribution.state_ids)
-            if attribution is not None and attribution.contributes_positive_coverage
-            else set()
-        )
-        if not attributed.intersection(target_states):
+        if (
+            attribution is None
+            or not attribution.contributes_positive_coverage
+            or not attribution.state_ids
+        ):
+            continue
+        attributed = set(attribution.state_ids)
+        if attributed.isdisjoint(relevant_states):
             return candidate
     return None
 

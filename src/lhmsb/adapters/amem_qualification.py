@@ -35,6 +35,10 @@ from lhmsb.qualification.memory_runtime import (
     sha256_text,
 )
 from lhmsb.qualification.schema import AMemProfile, PolicyProfile
+from lhmsb.qualification.source_manifest import (
+    SourceManifestError,
+    verified_source_commit_for_module,
+)
 
 _ID_NAMESPACE = uuid.UUID("f6c4b6d5-8b8b-4a1d-99b4-5c8a7a0b4e12")
 _PINNED_SOURCE_COMMIT = "ceffb860f0712bbae97b184d440df62bc910ca8d"
@@ -699,6 +703,14 @@ def _validate_official_identity(module: object, *, expected_commit: str) -> None
         "__commit__",
         "COMMIT_SHA",
     )
+    if commit is None:
+        try:
+            commit = verified_source_commit_for_module(module, "amem")
+        except SourceManifestError as exc:
+            raise AMemQualificationError(
+                "source_pin_mismatch",
+                f"A-MEM external source identity is not verified: {exc}",
+            ) from exc
     if commit != expected_commit:
         raise AMemQualificationError(
             "source_pin_mismatch",

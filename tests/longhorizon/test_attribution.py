@@ -93,12 +93,22 @@ def test_allowed_surface_variant_can_encode_the_complete_fact() -> None:
     assert result.state_ids == ("C2",)
 
 
-def test_multiple_exact_matches_remain_ambiguous() -> None:
+def test_multiple_complete_matches_are_resolved_as_multi_signature() -> None:
     first = _signature("P1", ("branch",), ("v1",))
     second = _signature("U1", ("branch",), ("v1",))
     result = attribute_memory("m1", "The branch is v1.", (first, second))
+    assert result.method == "multi_signature"
+    assert result.state_ids == ("P1", "U1")
+    assert result.contributes_positive_coverage
+
+
+def test_multiple_partial_matches_remain_ambiguous() -> None:
+    first = _signature("P1", ("branch",), ("v1",))
+    second = _signature("U1", ("branch",), ("leakage",))
+    result = attribute_memory("m1", "The branch was discussed.", (first, second))
     assert result.method == "ambiguous"
     assert result.state_ids == ("P1", "U1")
+    assert not result.contributes_positive_coverage
 
 
 def test_unique_provenance_can_attribute_a_partial_but_uncontested_memory() -> None:
@@ -114,10 +124,26 @@ def test_unique_provenance_can_attribute_a_partial_but_uncontested_memory() -> N
     assert result.contributes_positive_coverage
 
 
+def test_source_session_provenance_disambiguates_overlapping_partial_matches() -> None:
+    signatures = (
+        _signature("P2", ("v2",), ("current branch",)),
+        _signature("V2", ("v2",), ("integrity audit",)),
+    )
+    result = attribute_memory(
+        "m1",
+        'Opened results/session_6.json: {"branch": "v2"}',
+        signatures,
+        unique_write_state_ids=("P2",),
+    )
+    assert result.method == "unique_provenance"
+    assert result.state_ids == ("P2",)
+    assert result.contributes_positive_coverage
+
+
 def test_unique_provenance_rejects_multiple_eligible_states() -> None:
     signatures = (
         _signature("U1", ("data leakage",), ("v1",)),
-        _signature("P2", ("branch",), ("v2",)),
+        _signature("P2", ("data leakage",), ("v2",)),
     )
     result = attribute_memory(
         "m1",
@@ -165,7 +191,7 @@ def test_software_signature_catalog_covers_every_latent_state_with_provenance() 
         state.state_id for state in spec.plan.state_units
     }
     c1 = next(item for item in signatures if item.state_id == "C1")
-    assert ("offline",) in c1.required_anchor_groups
+    assert "offline" in c1.required_anchor_groups[0]
     assert c1.scope == "all-code"
     assert c1.authority == "project-owner"
     assert c1.source_sessions == (0,)
@@ -236,6 +262,49 @@ def test_generated_lexical_signatures_cover_writer_paraphrases(
     assert result.state_ids == (state_id,)
     assert result.method in {"exact_signature", "lexical_signature"}
     assert result.contributes_positive_coverage
+
+
+@pytest.mark.parametrize(
+    ("state_id", "text"),
+    (
+        ("G0", "用户的目标是构建一个确定性和可追溯的基准执行服务。"),
+        (
+            "C1",
+            "评分的基准运行不得使用远程端点，评估执行必须保持本地隔离。",
+        ),
+        ("C2", "用户强调密封的评分夹具绝不能被修改。"),
+        ("P1", "项目当前分支为v1，状态为初始实现。"),
+        (
+            "L1",
+            "基准测试所有者仅授权远程加速器用于隔离的延迟分析器。",
+        ),
+        ("V2", "v2运行器成功通过了密封夹具完整性审计。"),
+    ),
+)
+def test_programmatic_signatures_cover_chinese_native_memory(
+    state_id: str,
+    text: str,
+) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=16)
+    result = attribute_memory(
+        f"m-{state_id}",
+        text,
+        build_software_fact_signatures(spec.plan),
+    )
+    assert result.state_ids == (state_id,)
+    assert result.method == "exact_signature"
+    assert result.contributes_positive_coverage
+
+
+def test_supported_chinese_non_fact_is_no_match() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=16)
+    result = attribute_memory(
+        "m-note",
+        "用户打开了一个文件并继续处理软件项目。",
+        build_software_fact_signatures(spec.plan),
+    )
+    assert result.method == "no_match"
+    assert result.state_ids == ()
 
 
 def test_write_eligibility_includes_current_updates_and_excludes_retirements() -> None:

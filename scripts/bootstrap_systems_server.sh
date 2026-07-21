@@ -70,6 +70,9 @@ if [[ "${DRY_RUN}" == "1" ]]; then
     "${DATA_ROOT}/sources/memos"
   systems_print_command git -C "${DATA_ROOT}/sources/memos" checkout \
     583b07b998afc4debb6c5078439b0b3896f5b097
+  systems_print_command python3 -m lhmsb.qualification.source_manifest create \
+    --data-root "${DATA_ROOT}" \
+    --manifest "${DATA_ROOT}/manifests/system-sources.json"
   systems_print_command uv pip compile --generate-hashes --python-version 3.11 \
     "${REPO_ROOT}/pyproject.toml" --extra qualification \
     --output-file "${DATA_ROOT}/wheelhouse/core-requirements.txt"
@@ -83,6 +86,12 @@ if [[ "${DRY_RUN}" == "1" ]]; then
     systems_print_command uv pip sync --python "${DATA_ROOT}/venvs/${environment}/bin/python" \
       --require-hashes "${DATA_ROOT}/locks/${environment}-requirements.txt"
   done
+  systems_print_command uv pip install \
+    --python "${DATA_ROOT}/venvs/amem/bin/python" --no-deps --editable \
+    "${DATA_ROOT}/sources/amem"
+  systems_print_command uv pip install \
+    --python "${DATA_ROOT}/venvs/memos/bin/python" --no-deps --editable \
+    "${DATA_ROOT}/sources/memos"
   systems_print_command verify_system_runtime.sh --data-root "${DATA_ROOT}"
   systems_print_command uv run python -m lhmsb.qualification preflight-systems \
     --repository-only --dataset "${DATA_ROOT}/datasets/software_v5" \
@@ -191,6 +200,19 @@ for environment in core mem0 amem memos; do
     "${DATA_ROOT}/locks/${environment}-requirements.txt"
   uv pip install --python "${python}" --no-deps --editable "${REPO_ROOT}"
 done
+
+# Keep the imported upstream modules rooted in the verified source checkouts.
+# The generated transitive locks still own dependencies; these editable
+# installs bind only the two source projects themselves.
+uv pip install --python "${DATA_ROOT}/venvs/amem/bin/python" --no-deps \
+  --editable "${DATA_ROOT}/sources/amem"
+uv pip install --python "${DATA_ROOT}/venvs/memos/bin/python" --no-deps \
+  --editable "${DATA_ROOT}/sources/memos"
+
+PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+  "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification.source_manifest \
+  create --data-root "${DATA_ROOT}" \
+  --manifest "${DATA_ROOT}/manifests/system-sources.json"
 
 for required in LHMSB_QDRANT_BIN LHMSB_NEO4J_HOME LHMSB_JAVA_HOME LHMSB_TEI_BIN \
   LHMSB_EMBEDDING_MODEL_DIR LHMSB_RERANKER_MODEL_DIR; do

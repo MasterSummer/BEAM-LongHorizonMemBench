@@ -276,11 +276,13 @@ systems_write_runtime_env() {
   local service_root="${data_root}/services/${LHMSB_SERVICE_INSTANCE:-manual}"
   export LHMSB_RUNTIME_MANIFEST_PATH="${data_root}/manifests/native-runtime.json"
   export LHMSB_MODEL_BUNDLE_MANIFEST_PATH="${data_root}/manifests/model-bundle.json"
+  export LHMSB_SOURCE_TREE_MANIFEST_PATH="${data_root}/manifests/system-sources.json"
   mkdir -p "$(dirname "${path}")"
   cat >"${path}.tmp" <<EOF
 LHMSB_DATA_ROOT=$(printf '%q' "${data_root}")
 LHMSB_RUNTIME_MANIFEST_PATH=$(printf '%q' "${LHMSB_RUNTIME_MANIFEST_PATH}")
 LHMSB_MODEL_BUNDLE_MANIFEST_PATH=$(printf '%q' "${LHMSB_MODEL_BUNDLE_MANIFEST_PATH}")
+LHMSB_SOURCE_TREE_MANIFEST_PATH=$(printf '%q' "${LHMSB_SOURCE_TREE_MANIFEST_PATH}")
 LHMSB_QDRANT_URL=$(printf '%q' "${LHMSB_QDRANT_URL:-http://127.0.0.1:6333}")
 LHMSB_NEO4J_URI=$(printf '%q' "${LHMSB_NEO4J_URI:-bolt://127.0.0.1:7687}")
 LHMSB_EMBEDDING_URL=$(printf '%q' "${LHMSB_EMBEDDING_URL:-http://127.0.0.1:8080}")
