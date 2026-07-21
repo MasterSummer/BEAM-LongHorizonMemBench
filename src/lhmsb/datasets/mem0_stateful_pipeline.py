@@ -361,7 +361,17 @@ def _write_stage(out: Path, generated: Sequence[Mem0StatefulGenerated]) -> None:
     _write_jsonl(evaluator_root / "sceu.jsonl", all_sceu)
     _write_jsonl(evaluator_root / "continuation_mappings.jsonl", mappings)
     _write_json(evaluator_root / "dependencies.json", dependencies)
-    _write_json(evaluator_root / "dataset_audit.json", _dataset_audit(generated))
+    audit = _dataset_audit(generated)
+    _write_json(evaluator_root / "dataset_audit.json", audit)
+    checks = audit.get("checks")
+    if len(generated) >= 50 and isinstance(checks, Mapping):
+        failures = sorted(
+            str(name) for name, passed in checks.items() if passed is not True
+        )
+        if failures:
+            raise Mem0StatefulDatasetError(
+                "formal v0.4 dataset audit failed: " + ", ".join(failures)
+            )
     release_id, generator_version = _release_for_generation(
         n_episodes=len(generated),
         n_sessions=(generated[0].spec.plan.n_sessions if generated else 0),
@@ -444,6 +454,17 @@ def _dataset_audit(
         and isinstance(best_option_accuracy, int | float)
         and float(best_option_accuracy) <= 0.50
     )
+    formal_v04 = len(generated) >= 50
+    scenario_balance_ok = not formal_v04 or (
+        len(scenarios) == 5 and max(scenarios.values()) - min(scenarios.values()) <= 1
+    )
+    schedule_balance_ok = not formal_v04 or (
+        len(schedules) == 10
+        and max(schedules.values()) - min(schedules.values()) <= 1
+    )
+    factorial_coverage_ok = not formal_v04 or (
+        len(cells) == 50 and max(cells.values()) - min(cells.values()) <= 1
+    )
     return {
         "schema_version": 1,
         "n_episodes": len(generated),
@@ -462,6 +483,9 @@ def _dataset_audit(
             ) == len(generated),
             "max_always_action_accuracy_le_0_60": action_dominance_ok,
             "max_always_option_accuracy_le_0_50": option_dominance_ok,
+            "formal_semantic_scenarios_balanced": scenario_balance_ok,
+            "formal_phase_schedules_balanced": schedule_balance_ok,
+            "formal_scenario_schedule_factorial_covered": factorial_coverage_ok,
             "all_action_ids_have_at_least_two_gold_uses_per_episode": all(
                 min(
                     Counter(

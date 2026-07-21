@@ -5,6 +5,8 @@ import json
 import tarfile
 from pathlib import Path
 
+import pytest
+
 from lhmsb.datasets.cli import main
 from lhmsb.datasets.mem0_stateful_pipeline import (
     MEM0_STATEFUL_GENERATOR_VERSION,
@@ -12,6 +14,7 @@ from lhmsb.datasets.mem0_stateful_pipeline import (
     MEM0_STATEFUL_GENERATOR_VERSION_V4,
     MEM0_STATEFUL_RELEASE_ID_V3,
     MEM0_STATEFUL_RELEASE_ID_V4,
+    Mem0StatefulDatasetError,
     build_mem0_release_archive,
     freeze_mem0_stateful,
     generate_mem0_stateful_to_staging,
@@ -138,6 +141,24 @@ def test_fifty_episode_release_passes_all_audits_and_uses_v04(tmp_path: Path) ->
     )
     assert verify_mem0_stateful(frozen).ok
     assert regen_check_mem0_stateful(frozen).ok
+
+
+def test_v04_audit_rejects_misbalanced_seed_expansion(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    with pytest.raises(Mem0StatefulDatasetError, match="formal v0.4 dataset audit"):
+        generate_mem0_stateful_to_staging(
+            stage,
+            seeds=[42],
+            n_episodes=50,
+            n_sessions=16,
+        )
+    audit = json.loads(
+        (stage / "evaluator" / "dataset_audit.json").read_text(encoding="utf-8")
+    )
+
+    assert audit["checks"]["formal_semantic_scenarios_balanced"] is False
+    assert audit["checks"]["formal_phase_schedules_balanced"] is False
+    assert audit["checks"]["formal_scenario_schedule_factorial_covered"] is False
 
 
 def test_verify_detects_public_tampering(tmp_path: Path) -> None:
