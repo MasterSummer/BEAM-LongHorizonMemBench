@@ -305,3 +305,21 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
     )
     incomplete_gates = {item["gate_id"]: item for item in incomplete["gates"]}
     assert incomplete_gates["task_completion"]["status"] == "fail"
+
+    missing_result = compute_measurement_gates(
+        SimpleNamespace(task_results=(task,)),
+        specs,
+        summary=summary,
+        heuristic_baselines=compute_heuristic_baselines(specs),
+        expected_task_count=2,
+    )
+    missing_result_gate = {
+        item["gate_id"]: item for item in missing_result["gates"]
+    }["task_completion"]
+    assert missing_result_gate["status"] == "fail"
+    assert missing_result_gate["detail"] == {
+        "numerator": 0,
+        "denominator": 2,
+        "observed_task_results": 1,
+        "missing_task_results": 1,
+    }

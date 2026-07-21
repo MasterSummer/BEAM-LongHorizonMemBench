@@ -102,6 +102,25 @@ def validate_qualification_artifacts(
     unknown_result_tasks = sorted(result_task_ids - task_ids)
     if unknown_result_tasks:
         errors.append(f"task_results contain unknown task IDs: {unknown_result_tasks}")
+    expected_task_count = manifest.get("evaluation_task_count")
+    if expected_task_count is not None:
+        if (
+            isinstance(expected_task_count, bool)
+            or not isinstance(expected_task_count, int)
+            or expected_task_count < 0
+        ):
+            errors.append("run manifest evaluation_task_count must be a non-negative integer")
+        else:
+            if len(task_ids) != expected_task_count:
+                errors.append(
+                    "tasks.jsonl coverage does not match run manifest "
+                    f"evaluation_task_count: {len(task_ids)}/{expected_task_count}"
+                )
+            if len(result_task_ids) != expected_task_count:
+                errors.append(
+                    "task_results.jsonl coverage does not match run manifest "
+                    f"evaluation_task_count: {len(result_task_ids)}/{expected_task_count}"
+                )
 
     traces = {
         str(row.get("trace_id")): row

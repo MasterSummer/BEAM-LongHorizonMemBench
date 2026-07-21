@@ -90,7 +90,8 @@ def test_oracle_context_exposes_authority_and_scope_without_gold_ids() -> None:
     assert "C1" not in rendered
     assert "D1" not in rendered
     assert "P2" not in rendered
-    assert "project-owner constraint governs a local-operator plan" in _SYSTEM_PROMPT
+    assert "project-owner constraint governs a local-operator plan" in rendered
+    assert "project-owner constraint governs a local-operator plan" not in _SYSTEM_PROMPT
 
 
 class _Runtime:

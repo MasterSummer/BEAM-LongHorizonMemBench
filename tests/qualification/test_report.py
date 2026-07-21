@@ -27,7 +27,10 @@ from lhmsb.qualification.runner import (
     SCEURunResult,
 )
 from lhmsb.qualification.tei import RerankResult
-from lhmsb.qualification.validate import _validate_semantic_attributions
+from lhmsb.qualification.validate import (
+    _validate_semantic_attributions,
+    validate_qualification_artifacts,
+)
 
 
 def _matrix() -> tuple[QualificationMatrixResult, dict[str, object]]:
@@ -173,6 +176,34 @@ def test_report_emits_required_deterministic_hashed_artifacts(
     assert (episode_directory / "scorecard.csv").is_file()
     assert (episode_directory / "summary.json").is_file()
     assert "episodes/index.json" in manifest["artifact_hashes"]
+
+
+def test_report_rejects_missing_planned_evaluation_results(tmp_path: Path) -> None:
+    matrix, specs = _matrix()
+    out = tmp_path / "partial"
+
+    write_qualification_report(
+        matrix,
+        specs,  # type: ignore[arg-type]
+        out,
+        run_metadata={
+            "code_commit": "abc123",
+            "evaluation_task_count": 2,
+        },
+    )
+
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    gates = json.loads((out / "measurement_gates.json").read_text(encoding="utf-8"))
+    completion = {item["gate_id"]: item for item in gates["gates"]}["task_completion"]
+    validation = validate_qualification_artifacts(out)
+
+    assert summary["n_planned_tasks"] == 2
+    assert summary["n_observed_task_results"] == 1
+    assert summary["n_missing_task_results"] == 1
+    assert completion["status"] == "fail"
+    assert completion["detail"]["denominator"] == 2
+    assert validation.ok is False
+    assert any("evaluation_task_count" in error for error in validation.errors)
 
 
 def test_report_separates_evaluated_subset_from_frozen_dataset_scope(

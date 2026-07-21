@@ -256,6 +256,7 @@ def compute_measurement_gates(
     summary: Mapping[str, object],
     heuristic_baselines: Mapping[str, object],
     drift_calibration: Mapping[str, object] | None = None,
+    expected_task_count: int | None = None,
 ) -> dict[str, object]:
     """Evaluate preregistered scientific gates without changing run results."""
     tasks = tuple(getattr(matrix, "task_results", ()))
@@ -316,13 +317,20 @@ def compute_measurement_gates(
         )
         for task in tasks
     )
+    planned_tasks = len(tasks) if expected_task_count is None else expected_task_count
+    if planned_tasks < len(tasks):
+        raise ValueError("expected_task_count cannot be smaller than observed task results")
     _gate_ratio(
         gates,
         "task_completion",
         completed,
-        len(tasks),
+        planned_tasks,
         minimum=1.0,
         description="All planned tasks and every nested condition completed.",
+        detail={
+            "observed_task_results": len(tasks),
+            "missing_task_results": planned_tasks - len(tasks),
+        },
     )
     _gate_ratio(
         gates,
@@ -874,8 +882,15 @@ def _gate_ratio(
     description: str,
     minimum: float | None = None,
     maximum: float | None = None,
+    detail: Mapping[str, object] | None = None,
 ) -> None:
     value = None if denominator == 0 else numerator / denominator
+    ratio_detail: dict[str, object] = {
+        "numerator": numerator,
+        "denominator": denominator,
+    }
+    if detail is not None:
+        ratio_detail.update(detail)
     _gate_scalar(
         gates,
         gate_id,
@@ -883,7 +898,7 @@ def _gate_ratio(
         minimum=minimum,
         maximum=maximum,
         description=description,
-        detail={"numerator": numerator, "denominator": denominator},
+        detail=ratio_detail,
     )
 
 

@@ -277,7 +277,13 @@ def write_qualification_report(
             }
         ),
     )
-    summary_payload = _summary(matrix, rows, specs=specs)
+    expected_task_count = _expected_task_count(run_metadata, len(matrix.task_results))
+    summary_payload = _summary(
+        matrix,
+        rows,
+        specs=specs,
+        expected_task_count=expected_task_count,
+    )
     memory_count_scorecard_rows = _memory_count_scorecard_rows(rows["interventions.jsonl"])
     heuristic_payload = compute_heuristic_baselines(specs)
     drift_calibration_payload = compute_drift_action_calibration(specs)
@@ -287,6 +293,7 @@ def write_qualification_report(
         summary=summary_payload,
         heuristic_baselines=heuristic_payload,
         drift_calibration=drift_calibration_payload,
+        expected_task_count=expected_task_count,
     )
     _atomic_write(
         output_directory / "summary.json",
@@ -1302,6 +1309,7 @@ def _summary(
     rows: Mapping[str, Sequence[dict[str, object]]],
     *,
     specs: Mapping[str, SoftwareMem0VerticalSpec],
+    expected_task_count: int | None = None,
 ) -> dict[str, object]:
     statuses: dict[str, int] = defaultdict(int)
     condition_statuses: dict[str, int] = defaultdict(int)
@@ -1312,10 +1320,19 @@ def _summary(
     evaluated_episode_ids = sorted(
         {str(getattr(task, "episode_id", "")) for task in matrix.task_results}
     )
+    observed_task_count = len(matrix.task_results)
+    planned_task_count = (
+        observed_task_count if expected_task_count is None else expected_task_count
+    )
+    if planned_task_count < observed_task_count:
+        raise ValueError("expected_task_count cannot be smaller than observed task results")
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "run_identity": matrix.run_identity,
-        "n_tasks": len(matrix.task_results),
+        "n_tasks": observed_task_count,
+        "n_planned_tasks": planned_task_count,
+        "n_observed_task_results": observed_task_count,
+        "n_missing_task_results": planned_task_count - observed_task_count,
         "n_evaluated_episodes": len(evaluated_episode_ids),
         "n_frozen_dataset_episodes": len(specs),
         "evaluated_episode_ids": evaluated_episode_ids,
@@ -1347,6 +1364,20 @@ def _summary(
             for row in rows["interventions.jsonl"]
         ),
     }
+
+
+def _expected_task_count(
+    run_metadata: Mapping[str, object] | None,
+    observed_task_count: int,
+) -> int:
+    if run_metadata is None or "evaluation_task_count" not in run_metadata:
+        return observed_task_count
+    raw = run_metadata["evaluation_task_count"]
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ValueError("evaluation_task_count must be a non-negative integer")
+    if raw < observed_task_count:
+        raise ValueError("evaluation_task_count cannot be smaller than observed results")
+    return raw
 
 
 def _storage_provenance_diagnostics(
