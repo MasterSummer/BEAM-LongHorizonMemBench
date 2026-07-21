@@ -304,5 +304,10 @@ def test_bootstrap_locks_official_memos_tree_and_reader_extras() -> None:
 
     assert "--extra tree-mem --extra mem-reader" in bootstrap
     assert '"${DATA_ROOT}/sources/memos/pyproject.toml"' in bootstrap
+    assert "uv tool run --from pip==25.1.1 pip download" in bootstrap
+    assert "uv pip download" not in bootstrap
+    assert 'local staged="${destination}.next"' in bootstrap
+    assert "--no-index" in bootstrap
+    assert '--find-links "${DATA_ROOT}/wheelhouse/${environment}"' in bootstrap
     for module in ("chonkie", "langchain_text_splitters", "markitdown"):
         assert f'"{module}"' in verifier

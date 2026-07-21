@@ -76,15 +76,18 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   systems_print_command uv pip compile --generate-hashes --python-version 3.11 \
     "${REPO_ROOT}/pyproject.toml" --extra qualification \
     --output-file "${DATA_ROOT}/wheelhouse/core-requirements.txt"
-  systems_print_command uv pip download --require-hashes \
-    --dest "${DATA_ROOT}/wheelhouse" -r "${DATA_ROOT}/wheelhouse/core-requirements.txt"
+  systems_print_command uv tool run --from pip==25.1.1 pip download \
+    --require-hashes --dest "${DATA_ROOT}/wheelhouse/core" \
+    -r "${DATA_ROOT}/wheelhouse/core-requirements.txt"
   for environment in core mem0 amem memos; do
     systems_print_command python3 -m venv "${DATA_ROOT}/venvs/${environment}"
     systems_print_command uv pip compile --generate-hashes --python-version 3.11 \
       --output-file "${DATA_ROOT}/locks/${environment}-requirements.txt" \
       "${REPO_ROOT}/pyproject.toml"
     systems_print_command uv pip sync --python "${DATA_ROOT}/venvs/${environment}/bin/python" \
-      --require-hashes "${DATA_ROOT}/locks/${environment}-requirements.txt"
+      --require-hashes --no-index \
+      --find-links "${DATA_ROOT}/wheelhouse/${environment}" \
+      "${DATA_ROOT}/locks/${environment}-requirements.txt"
   done
   systems_print_command uv pip install \
     --python "${DATA_ROOT}/venvs/amem/bin/python" --no-deps --editable \
@@ -175,30 +178,52 @@ clone_at_pin https://github.com/MemTensor/MemOS \
 
 # Generate hash-locked transitive requirements and wheelhouses for each native
 # environment. A stale checked-in contract is never accepted as a live lock.
+download_hash_locked_wheels() {
+  local environment="$1"
+  local destination="${DATA_ROOT}/wheelhouse/${environment}"
+  local staged="${destination}.next"
+  local previous="${destination}.previous"
+  # uv intentionally has no ``pip download`` subcommand.  Run a pinned pip as
+  # an isolated uv tool so wheelhouse creation is explicit and reproducible.
+  # Populate a staging directory completely before replacing the live archive;
+  # a failed download therefore cannot corrupt a previously usable wheelhouse.
+  rm -rf "${staged}"
+  mkdir -p "${staged}"
+  uv tool run --from pip==25.1.1 pip download --require-hashes \
+    --dest "${staged}" \
+    -r "${DATA_ROOT}/locks/${environment}-requirements.txt"
+  rm -rf "${previous}"
+  if [[ -e "${destination}" ]]; then
+    mv "${destination}" "${previous}"
+  fi
+  if ! mv "${staged}" "${destination}"; then
+    [[ ! -e "${previous}" ]] || mv "${previous}" "${destination}"
+    return 1
+  fi
+  rm -rf "${previous}"
+}
+
 uv pip compile --generate-hashes --python-version 3.11 \
   "${REPO_ROOT}/pyproject.toml" --extra qualification \
   --output-file "${DATA_ROOT}/locks/core-requirements.txt"
-uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse/core" \
-  -r "${DATA_ROOT}/locks/core-requirements.txt"
+download_hash_locked_wheels core
 uv pip compile --generate-hashes --python-version 3.11 \
   "${REPO_ROOT}/pyproject.toml" --output-file "${DATA_ROOT}/locks/mem0-requirements.txt"
-uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse/mem0" \
-  -r "${DATA_ROOT}/locks/mem0-requirements.txt"
+download_hash_locked_wheels mem0
 uv pip compile --generate-hashes --python-version 3.11 \
   "${DATA_ROOT}/sources/amem" --output-file "${DATA_ROOT}/locks/amem-requirements.txt"
-uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse/amem" \
-  -r "${DATA_ROOT}/locks/amem-requirements.txt"
+download_hash_locked_wheels amem
 uv pip compile --generate-hashes --python-version 3.11 \
   --extra tree-mem --extra mem-reader \
   "${DATA_ROOT}/sources/memos/pyproject.toml" \
   --output-file "${DATA_ROOT}/locks/memos-requirements.txt"
-uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse/memos" \
-  -r "${DATA_ROOT}/locks/memos-requirements.txt"
+download_hash_locked_wheels memos
 
 for environment in core mem0 amem memos; do
   python="${DATA_ROOT}/venvs/${environment}/bin/python"
   [[ -x "${python}" ]] || python3 -m venv "${DATA_ROOT}/venvs/${environment}"
-  uv pip sync --python "${python}" --require-hashes \
+  uv pip sync --python "${python}" --require-hashes --no-index \
+    --find-links "${DATA_ROOT}/wheelhouse/${environment}" \
     "${DATA_ROOT}/locks/${environment}-requirements.txt"
   uv pip install --python "${python}" --no-deps --editable "${REPO_ROOT}"
 done
