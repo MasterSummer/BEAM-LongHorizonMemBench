@@ -360,7 +360,11 @@ def _replay_prefix(
                 "runtime write inventory must identify its source session",
             )
         _raise_on_provider_usage_errors(write.usage_events)
-        previous_write = write
+        # Some native backends return an authoritative post-write inventory but
+        # omit lifecycle rows for objects they created during consolidation.
+        # Reconcile that immediate inventory against the pre-write boundary so
+        # every newly visible object has at least inferred storage provenance.
+        previous_write = _reconcile_write_inventory(current_inventory, write)
         current_inventory = runtime.snapshot_inventory(
             checkpoint_session=checkpoint_session + 1,
         )
@@ -394,23 +398,22 @@ def _replay_prefix(
     )
 
 
-def _reconcile_async_inventory(
+def _inventory_diff_events(
+    *,
+    before: InventorySnapshot,
+    after: InventorySnapshot,
     write: WriteSessionResult,
-    observed: InventorySnapshot,
-) -> WriteSessionResult:
-    """Infer mutations completed after ``write_session`` returned.
-
-    Native systems may finish background consolidation before the next
-    continuation boundary. The boundary snapshot is authoritative, so attach
-    a deterministic inventory-diff event instead of leaving those objects
-    without lifecycle provenance.
-    """
-    before = {item.memory_id: item for item in write.inventory.items}
-    after = {item.memory_id: item for item in observed.items}
+    source: str,
+    native_prefix: str,
+    operation_prefix: str,
+) -> tuple[MemoryMutationEvent, ...]:
+    """Return deterministic inferred mutations not covered by native events."""
+    before_by_id = {item.memory_id: item for item in before.items}
+    after_by_id = {item.memory_id: item for item in after.items}
     inferred: list[MemoryMutationEvent] = []
-    for memory_id in sorted(before.keys() | after.keys()):
-        old = before.get(memory_id)
-        new = after.get(memory_id)
+    for memory_id in sorted(before_by_id.keys() | after_by_id.keys()):
+        old = before_by_id.get(memory_id)
+        new = after_by_id.get(memory_id)
         if old is None and new is not None:
             kind = "ADD"
             text = new.content
@@ -428,31 +431,84 @@ def _reconcile_async_inventory(
             new_hash = new.content_hash
         else:
             continue
+        # A backend-native event is authoritative even when its native label
+        # differs from our normalized ADD/UPDATE/DELETE name. Matching the
+        # final content transition prevents double counting an exact event.
+        if any(
+            event.memory_id == memory_id
+            and (
+                (new_hash is not None and event.new_content_hash == new_hash)
+                or (
+                    new_hash is None
+                    and event.new_content_hash is None
+                    and (
+                        old_hash is None
+                        or event.old_content_hash in {None, old_hash}
+                    )
+                )
+            )
+            for event in write.events
+        ):
+            continue
         digest = hashlib.sha256(
-            f"{write.session_index}\0{kind}\0{memory_id}\0{old_hash}\0{new_hash}".encode()
+            (
+                f"{source}\0{write.session_index}\0{kind}\0{memory_id}\0"
+                f"{old_hash}\0{new_hash}"
+            ).encode()
         ).hexdigest()[:20]
         inferred.append(
             MemoryMutationEvent(
-                operation_id=f"async-{write.session_index:06d}-{kind.lower()}-{digest}",
+                operation_id=(
+                    f"{operation_prefix}-{write.session_index:06d}-"
+                    f"{kind.lower()}-{digest}"
+                ),
                 session_index=write.session_index,
-                native_event=f"INFERRED_ASYNC_{kind}",
+                native_event=f"{native_prefix}_{kind}",
                 memory_id=memory_id,
                 memory_text=text,
                 old_content_hash=old_hash,
                 new_content_hash=new_hash,
-                source="inventory_snapshot_diff",
+                source=source,
                 latency_seconds=0.0,
             )
         )
-    known = {
-        (event.native_event, event.memory_id, event.old_content_hash, event.new_content_hash)
-        for event in write.events
-    }
-    additions = tuple(
-        event
-        for event in inferred
-        if (event.native_event, event.memory_id, event.old_content_hash, event.new_content_hash)
-        not in known
+    return tuple(inferred)
+
+
+def _reconcile_write_inventory(
+    before: InventorySnapshot,
+    write: WriteSessionResult,
+) -> WriteSessionResult:
+    """Infer immediate write mutations omitted from a backend lifecycle reply."""
+    additions = _inventory_diff_events(
+        before=before,
+        after=write.inventory,
+        write=write,
+        source="write_inventory_diff",
+        native_prefix="INFERRED_WRITE",
+        operation_prefix="write-diff",
+    )
+    return replace(write, events=(*write.events, *additions))
+
+
+def _reconcile_async_inventory(
+    write: WriteSessionResult,
+    observed: InventorySnapshot,
+) -> WriteSessionResult:
+    """Infer mutations completed after ``write_session`` returned.
+
+    Native systems may finish background consolidation before the next
+    continuation boundary. The boundary snapshot is authoritative, so attach
+    a deterministic inventory-diff event instead of leaving those objects
+    without lifecycle provenance.
+    """
+    additions = _inventory_diff_events(
+        before=write.inventory,
+        after=observed,
+        write=write,
+        source="inventory_snapshot_diff",
+        native_prefix="INFERRED_ASYNC",
+        operation_prefix="async",
     )
     settled_inventory = replace(
         observed,

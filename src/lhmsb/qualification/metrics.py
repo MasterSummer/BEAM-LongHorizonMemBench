@@ -1874,6 +1874,7 @@ def _event_provenance(event: object) -> str:
         "inventory_diff",
         "inventory_delta",
         "inventory_snapshot_diff",
+        "write_inventory_diff",
         "snapshot_diff",
         "neo4j_graph_diff",
     }:

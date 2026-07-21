@@ -1347,6 +1347,7 @@ def _provenance_mode(event: object) -> ProvenanceMode:
         "inventory_diff",
         "inventory_delta",
         "inventory_snapshot_diff",
+        "write_inventory_diff",
         "snapshot_diff",
         "neo4j_graph_diff",
     } or native_event.upper().startswith("INFERRED"):

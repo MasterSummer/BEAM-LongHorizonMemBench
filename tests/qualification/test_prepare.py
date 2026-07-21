@@ -27,6 +27,7 @@ from lhmsb.qualification.prepare import (
     PrefixPreparationError,
     _artifact_identity,
     _reconcile_async_inventory,
+    _reconcile_write_inventory,
     prepare_prefix,
 )
 from lhmsb.qualification.report import (
@@ -557,6 +558,67 @@ def test_async_inventory_diff_infers_add_update_and_delete_provenance() -> None:
     assert reconciled.inventory.checkpoint_session == write.session_index
     assert reconciled.inventory.items == observed.items
     assert _reconcile_async_inventory(write, observed) == reconciled
+
+
+def test_write_inventory_diff_covers_unreported_objects_without_duplicating_exact_events() -> None:
+    def memory(memory_id: str, content: str) -> MemoryObject:
+        return MemoryObject(
+            memory_id=memory_id,
+            content=content,
+            content_hash=sha256_text(content),
+            metadata=(),
+            created_at="",
+            updated_at="",
+            history_length=1,
+        )
+
+    exact = memory("m-exact", "native fact")
+    unreported = memory("m-topic", "background topic summary")
+    before = InventorySnapshot(
+        checkpoint_session=0,
+        n_write=0,
+        n_live=0,
+        items=(),
+        store_hash=sha256_text("empty"),
+        backend_count=0,
+    )
+    after = InventorySnapshot(
+        checkpoint_session=0,
+        n_write=2,
+        n_live=2,
+        items=(exact, unreported),
+        store_hash=sha256_text("after-write"),
+        backend_count=2,
+    )
+    native = MemoryMutationEvent(
+        operation_id="native-exact",
+        session_index=0,
+        native_event="ADD",
+        memory_id=exact.memory_id,
+        memory_text=exact.content,
+        old_content_hash=None,
+        new_content_hash=exact.content_hash,
+        source="native_response",
+        latency_seconds=0.0,
+    )
+    write = WriteSessionResult(
+        session_index=0,
+        events=(native,),
+        inventory=after,
+        n_write=2,
+        latency_seconds=0.0,
+    )
+
+    reconciled = _reconcile_write_inventory(before, write)
+
+    assert reconciled.events[0] == native
+    assert len(reconciled.events) == 2
+    inferred = reconciled.events[1]
+    assert inferred.memory_id == unreported.memory_id
+    assert inferred.native_event == "INFERRED_WRITE_ADD"
+    assert inferred.source == "write_inventory_diff"
+    assert inferred.new_content_hash == unreported.content_hash
+    assert _reconcile_write_inventory(before, reconciled) == reconciled
 
 
 def test_cumulative_write_count_does_not_mark_noop_session_incomplete(

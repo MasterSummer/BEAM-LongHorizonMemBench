@@ -37,6 +37,7 @@ def build_pipeline(data=None):
         "offline": True,
         "heldout_modified": False,
         "profiler_backend": "local",
+        "urgent_profile_target_met": False,
     }
 '''
 
@@ -51,6 +52,7 @@ def build_pipeline(data=None):
         "offline": True,
         "heldout_modified": False,
         "profiler_backend": "local",
+        "urgent_profile_target_met": False,
     }
 '''
 
@@ -65,6 +67,7 @@ def build_pipeline(data=None):
         "offline": True,
         "heldout_modified": False,
         "profiler_backend": "hosted",
+        "urgent_profile_target_met": True,
     }
 '''
 
