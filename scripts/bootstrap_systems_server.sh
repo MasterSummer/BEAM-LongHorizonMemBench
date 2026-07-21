@@ -190,7 +190,8 @@ uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse/amem" \
   -r "${DATA_ROOT}/locks/amem-requirements.txt"
 uv pip compile --generate-hashes --python-version 3.11 \
   --extra tree-mem --extra mem-reader \
-  "${DATA_ROOT}/sources/memos" --output-file "${DATA_ROOT}/locks/memos-requirements.txt"
+  "${DATA_ROOT}/sources/memos/pyproject.toml" \
+  --output-file "${DATA_ROOT}/locks/memos-requirements.txt"
 uv pip download --require-hashes --dest "${DATA_ROOT}/wheelhouse/memos" \
   -r "${DATA_ROOT}/locks/memos-requirements.txt"
 

@@ -303,5 +303,6 @@ def test_bootstrap_locks_official_memos_tree_and_reader_extras() -> None:
     verifier = (ROOT / "scripts" / "verify_system_runtime.sh").read_text(encoding="utf-8")
 
     assert "--extra tree-mem --extra mem-reader" in bootstrap
+    assert '"${DATA_ROOT}/sources/memos/pyproject.toml"' in bootstrap
     for module in ("chonkie", "langchain_text_splitters", "markitdown"):
         assert f'"{module}"' in verifier
