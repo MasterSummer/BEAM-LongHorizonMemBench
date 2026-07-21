@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from lhmsb.qualification import factory
 from lhmsb.qualification.config import load_qualification_config
@@ -24,3 +25,24 @@ def test_native_service_defaults_are_loopback_not_container_dns() -> None:
     finally:
         embedding.close()
         reranker.close()
+
+
+def test_memos_factory_uses_native_user_name_namespace(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_transport(uri: str, **kwargs: object) -> object:
+        captured["uri"] = uri
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(factory, "Neo4jBoltTransport", fake_transport)
+    graph = factory._memos_graph(
+        {
+            "LHMSB_NEO4J_URI": "bolt://127.0.0.1:17687",
+            "LHMSB_NEO4J_PASSWORD": "secret",
+        }
+    )
+
+    assert graph is not None
+    assert captured["exclusive_database"] is False
+    assert captured["namespace_property"] == "user_name"

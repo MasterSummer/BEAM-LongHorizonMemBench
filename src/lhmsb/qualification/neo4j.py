@@ -438,11 +438,12 @@ class FakeNeo4jTransport:
 class Neo4jBoltTransport:
     """Lazy official Bolt-driver boundary.
 
-    No ``neo4j`` import happens at module import time.  The live worker creates
-    one transport per preparation task.  ``exclusive_database`` is the
-    canonical MemOS mode: Slurm starts a fresh Community data directory for
-    the task, so evaluator snapshots cover the whole database and do not rely
-    on MemOS writing a benchmark-specific property.
+    No ``neo4j`` import happens at module import time.  A preparation job may
+    execute several episode prefixes against one Community database.  MemOS
+    stores its task identity in the native ``user_name`` property, while other
+    adapters may use the benchmark-owned ``lhmsb_namespace`` property.  The
+    selected property is validated against a fixed allow-list before it is
+    interpolated into Cypher.
     """
 
     def __init__(
@@ -454,6 +455,7 @@ class Neo4jBoltTransport:
         database: str = "neo4j",
         driver: object | None = None,
         exclusive_database: bool = False,
+        namespace_property: str = "lhmsb_namespace",
     ) -> None:
         if not uri or not user or not password:
             raise ValueError("Neo4j uri/user/password must be non-empty")
@@ -461,6 +463,9 @@ class Neo4jBoltTransport:
         self.user = user
         self.database = database
         self.exclusive_database = exclusive_database
+        if namespace_property not in {"lhmsb_namespace", "user_name"}:
+            raise ValueError("unsupported Neo4j namespace property")
+        self.namespace_property = namespace_property
         if driver is None:
             try:
                 import neo4j  # type: ignore[import-not-found]
@@ -501,8 +506,9 @@ class Neo4jBoltTransport:
         if self.exclusive_database:
             rows = self._run("MATCH (n) RETURN count(n) AS node_count")
         else:
+            property_name = self.namespace_property
             rows = self._run(
-                "MATCH (n) WHERE n.lhmsb_namespace = $namespace "
+                f"MATCH (n) WHERE n.{property_name} = $namespace "
                 "RETURN count(n) AS node_count",
                 namespace=namespace,
             )
@@ -529,13 +535,14 @@ class Neo4jBoltTransport:
                 "relationship: type(r), properties: properties(r)} END) AS edges"
             )
         else:
+            property_name = self.namespace_property
             rows = self._run(
-                "MATCH (n) WHERE n.lhmsb_namespace = $namespace "
+                f"MATCH (n) WHERE n.{property_name} = $namespace "
                 "WITH collect({node_id: coalesce(n.id, elementId(n)), "
                 "labels: labels(n), properties: properties(n)}) AS nodes "
                 "OPTIONAL MATCH (a)-[r]->(b) "
-                "WHERE a.lhmsb_namespace = $namespace "
-                "AND b.lhmsb_namespace = $namespace "
+                f"WHERE a.{property_name} = $namespace "
+                f"AND b.{property_name} = $namespace "
                 "RETURN nodes, collect(CASE WHEN r IS NULL THEN null ELSE "
                 "{edge_id: coalesce(r.id, elementId(r)), "
                 "source_id: coalesce(a.id, elementId(a)), "

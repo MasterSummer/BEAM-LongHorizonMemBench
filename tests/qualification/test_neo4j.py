@@ -143,3 +143,43 @@ def test_bolt_exclusive_database_snapshots_official_memos_graph_without_namespac
     assert all(not params for _query, params in driver.calls)
     assert len(driver.calls) == 2
     assert "collect(" in driver.calls[1][0]
+
+
+def test_bolt_native_user_name_isolates_consecutive_memos_prefixes() -> None:
+    driver = _FakeDriver(
+        [
+            [{"node_count": 0}],
+            [{"nodes": [], "edges": []}],
+            [{"node_count": 0}],
+        ]
+    )
+    transport = Neo4jBoltTransport(
+        "bolt://127.0.0.1:7687",
+        user="neo4j",
+        password="secret",
+        driver=driver,
+        namespace_property="user_name",
+    )
+
+    transport.validate_empty(namespace="episode-a")
+    assert transport.snapshot(namespace="episode-a").node_count == 0
+    transport.validate_empty(namespace="episode-b")
+
+    assert len(driver.calls) == 3
+    assert all("user_name" in query for query, _params in driver.calls)
+    assert [params["namespace"] for _query, params in driver.calls] == [
+        "episode-a",
+        "episode-a",
+        "episode-b",
+    ]
+
+
+def test_bolt_rejects_untrusted_namespace_property() -> None:
+    with pytest.raises(ValueError, match="namespace property"):
+        Neo4jBoltTransport(
+            "bolt://127.0.0.1:7687",
+            user="neo4j",
+            password="secret",
+            driver=_FakeDriver([]),
+            namespace_property="user_name) MATCH (secret",
+        )

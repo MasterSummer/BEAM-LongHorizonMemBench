@@ -401,9 +401,31 @@ class MemOSTreeQualificationAdapter:
             neo4j_database=neo4j_database,
             neo4j_user_name=namespace,
         )
+        graph = neo4j_transport
+        if graph is None:
+            from lhmsb.qualification.neo4j import Neo4jBoltTransport
+
+            graph = Neo4jBoltTransport(
+                neo4j_uri,
+                user=neo4j_user,
+                password=neo4j_password,
+                database=neo4j_database,
+                exclusive_database=False,
+                namespace_property="user_name",
+            )
+        # Validate the native MemOS user namespace before constructing the
+        # official Tree backend.  Tree construction owns background workers;
+        # detecting contamination afterwards can otherwise leave a failed
+        # preparation process alive while those workers drain.
+        try:
+            graph.validate_empty(namespace=namespace)
+        except Neo4jError as exc:
+            graph.close()
+            raise MemOSQualificationError(exc.error_class, str(exc)) from exc
         try:
             backend = tree_class(tree_config)
         except Exception as exc:
+            graph.close()
             raise MemOSQualificationError("upstream_init_failure", str(exc)) from exc
         reader = _build_official_reader(
             reader_module,
@@ -424,17 +446,6 @@ class MemOSTreeQualificationAdapter:
         }
         _install_memos_bridges(backend, reader, bridges)
         _assert_runtime_configuration(backend, components)
-        graph = neo4j_transport
-        if graph is None:
-            from lhmsb.qualification.neo4j import Neo4jBoltTransport
-
-            graph = Neo4jBoltTransport(
-                neo4j_uri,
-                user=neo4j_user,
-                password=neo4j_password,
-                database=neo4j_database,
-                exclusive_database=True,
-            )
         return cls(
             backend,
             graph=graph,
@@ -445,7 +456,7 @@ class MemOSTreeQualificationAdapter:
             reader=reader,
             llm_components=components,
             llm_bridges=tuple(bridges.values()),
-            require_fresh_namespace=True,
+            require_fresh_namespace=False,
             reorganize=True,
             internet_retrieval=False,
             expected_source_commit=profile.source_commit,

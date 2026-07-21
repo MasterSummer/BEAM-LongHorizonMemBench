@@ -24,7 +24,7 @@ from lhmsb.qualification.neo4j import (
     Neo4jGraphSnapshot,
     Neo4jNode,
 )
-from lhmsb.qualification.schema import MemOSTreeProfile
+from lhmsb.qualification.schema import MemOSTreeProfile, PolicyProfile
 
 
 class FakeManager:
@@ -324,6 +324,51 @@ def test_tree_config_uses_explicit_native_embedding_and_neo4j_identity() -> None
         "auto_create": False,
         "embedding_dimension": 1024,
     }
+
+
+def test_live_factory_checks_namespace_before_constructing_tree_workers() -> None:
+    graph = FakeNeo4jTransport()
+    graph.add_node(namespace="episode", node_id="existing")
+    constructed: list[object] = []
+
+    class OfficialTree:
+        def __init__(self, config: object) -> None:
+            constructed.append(config)
+
+    module = SimpleNamespace(
+        __name__="memos.memories.textual.tree",
+        __source_commit__="583b07b998afc4debb6c5078439b0b3896f5b097",
+        TreeTextMemory=OfficialTree,
+    )
+    policy = PolicyProfile(
+        profile_id="deepseek_v4_pro_writer",
+        provider="deepseek",
+        model_id="deepseek-v4-pro",
+        route_id="deepseek-v4-pro",
+        api_key_env="DEEPSEEK_API_KEY",
+        endpoint="https://api.deepseek.com",
+        endpoint_override_env=None,
+        request_api="chat_completions",
+        timeout_seconds=60.0,
+        max_retries=1,
+        format_repair_attempts=0,
+    )
+
+    with pytest.raises(MemOSQualificationError, match="not empty"):
+        MemOSTreeQualificationAdapter.create_live(
+            MemOSTreeProfile(profile_id="memos_tree_controlled"),
+            policy=policy,
+            api_key="secret",
+            embedding_runtime=object(),
+            namespace="episode",
+            episode_id="episode",
+            neo4j_transport=graph,
+            neo4j_uri="bolt://127.0.0.1:7687",
+            neo4j_password="secret",
+            module=module,
+        )
+
+    assert constructed == []
 
 
 def test_controlled_bridges_replace_every_official_memos_llm_reference() -> None:

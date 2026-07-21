@@ -96,6 +96,17 @@ def _neo4j_uri(environment: Mapping[str, str]) -> str:
     return environment.get("LHMSB_NEO4J_URI", "bolt://127.0.0.1:7687")
 
 
+def _memos_graph(environment: Mapping[str, str]) -> Neo4jTransport:
+    return Neo4jBoltTransport(
+        _neo4j_uri(environment),
+        user=environment.get("LHMSB_NEO4J_USER", "neo4j"),
+        password=environment.get("LHMSB_NEO4J_PASSWORD", ""),
+        database=environment.get("LHMSB_NEO4J_DATABASE", "neo4j"),
+        exclusive_database=False,
+        namespace_property="user_name",
+    )
+
+
 def _namespace(task: PreparationTask) -> str:
     return f"{task.run_identity[:16]}--{task.episode_id}--{task.backend}"
 
@@ -190,13 +201,7 @@ def build_preparation_components(
 
         if isinstance(profile, MemOSTreeProfile):
             neo4j_uri = _neo4j_uri(env)
-            graph: Neo4jTransport = Neo4jBoltTransport(
-                neo4j_uri,
-                user=env.get("LHMSB_NEO4J_USER", "neo4j"),
-                password=env.get("LHMSB_NEO4J_PASSWORD", ""),
-                database=env.get("LHMSB_NEO4J_DATABASE", "neo4j"),
-                exclusive_database=True,
-            )
+            graph = _memos_graph(env)
             runtime = MemOSTreeQualificationAdapter.create_live(
                 profile,
                 policy=_effective_policy(config.writer_profile, env),
