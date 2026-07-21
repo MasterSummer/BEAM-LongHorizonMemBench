@@ -149,7 +149,7 @@ for name, root in roots.items():
     actual_paths = {
         path.relative_to(root).as_posix(): path
         for path in root.rglob("*")
-        if path.is_file()
+        if path.is_file() and ".cache" not in path.relative_to(root).parts
     }
     if set(actual_paths) != set(expected):
         missing = sorted(set(expected) - set(actual_paths))

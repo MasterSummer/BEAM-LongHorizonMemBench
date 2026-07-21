@@ -213,7 +213,11 @@ def snapshot(root: Path) -> dict[str, object]:
     if not root.is_dir():
         raise SystemExit(f"model directory is not a directory: {root}")
     files: list[dict[str, object]] = []
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+    for path in sorted(
+        item
+        for item in root.rglob("*")
+        if item.is_file() and ".cache" not in item.relative_to(root).parts
+    ):
         digest = hashlib.sha256()
         with path.open("rb") as handle:
             for block in iter(lambda: handle.read(1024 * 1024), b""):
