@@ -7,10 +7,17 @@ isolation runtime.
 
 The run contains Workspace-only, Full-context, Oracle-current-state, Flat
 retrieval, Mem0, official A-MEM, and MemOS-Tree. The current repaired pilot uses
-GPT-5.6 Sol as the only continuation/policy model through OpenCode Zen; native
+GPT-5.6 Sol as the only continuation/policy model through ShengSuanYun; native
 memory systems may use DeepSeek for the fixed writer. Provider keys
 are read only by the policy process and never enter service environments,
 manifests, or result hashes.
+
+The tracked policy profile pins `https://router.shengsuanyun.com/api/v1` and
+model ID `openai/gpt-5.6-sol`; the operator file supplies only
+`SHENGSUANYUN_API_KEY`. Before a new run, the live preflight must confirm that
+exact model. If it is unavailable, select the exact 5.5 ID returned by
+`GET /models` in a new tracked profile and generate a new run identity—never
+fall back between models inside one run.
 
 ## Prepare the server
 
@@ -81,7 +88,7 @@ export LHMSB_SYSTEM_DATASET=/data/lhmsb/datasets/software_v9_calibration
 scripts/run_systems_qualification.sh \
   --data-root /home/root123/lhmsb-native-data \
   --env-file /home/root123/lhmsb-native-data/env/operator.env \
-  --run-name systems-gpt56-calibration-v9 \
+  --run-name systems-gpt56-shengsuanyun-calibration-v10 \
   --episode-limit 5 --keep-going
 ```
 
@@ -122,19 +129,19 @@ After inspection, submit the 16-session qualification:
 PREP_JOB=$(sbatch --parsable \
   --output="${LHMSB_DATA_ROOT}/logs/slurm-prepare-%j.out" \
   --error="${LHMSB_DATA_ROOT}/logs/slurm-prepare-%j.err" \
-  --export=ALL,LHMSB_SLURM_MODE=prepare,LHMSB_RUN_NAME=gpt-only-v9,LHMSB_SYSTEM_DATASET="${LHMSB_DATA_ROOT}/datasets/software_v9" \
+  --export=ALL,LHMSB_SLURM_MODE=prepare,LHMSB_RUN_NAME=gpt-only-shengsuanyun-v10,LHMSB_SYSTEM_DATASET="${LHMSB_DATA_ROOT}/datasets/software_v9" \
   deploy/slurm/systems_qualification.sbatch)
 sbatch --array=0-349%16 --dependency="afterok:${PREP_JOB}" \
   --output="${LHMSB_DATA_ROOT}/logs/slurm-eval-%A_%a.out" \
   --error="${LHMSB_DATA_ROOT}/logs/slurm-eval-%A_%a.err" \
-  --export=ALL,LHMSB_RUN_NAME=gpt-only-v9 \
+  --export=ALL,LHMSB_RUN_NAME=gpt-only-shengsuanyun-v10 \
   deploy/slurm/systems_evaluate_task.sbatch
 "${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
-  aggregate-systems --run-dir /data/lhmsb/runs/systems/gpt-only-v9 \
-  --out /data/lhmsb/runs/systems/gpt-only-v9/report
+  aggregate-systems --run-dir /data/lhmsb/runs/systems/gpt-only-shengsuanyun-v10 \
+  --out /data/lhmsb/runs/systems/gpt-only-shengsuanyun-v10/report
 "${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
-  validate-systems --report /data/lhmsb/runs/systems/gpt-only-v9/report \
-  --json /data/lhmsb/runs/systems/gpt-only-v9/validation.json
+  validate-systems --report /data/lhmsb/runs/systems/gpt-only-shengsuanyun-v10/report \
+  --json /data/lhmsb/runs/systems/gpt-only-shengsuanyun-v10/validation.json
 ```
 
 The preparation job requests two generic NVIDIA GPUs, assigns one to embedding

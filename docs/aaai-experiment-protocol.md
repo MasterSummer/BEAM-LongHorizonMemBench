@@ -21,7 +21,8 @@ response to full-run outcomes. Any later deviation is recorded as exploratory.
 
 ## Compared conditions
 
-The sole continuation policy is `gpt_5_6_sol_zen`. The seven conditions are
+The sole continuation policy is `gpt_5_6_sol_shengsuanyun`, pinned to routed
+model ID `openai/gpt-5.6-sol`. The seven conditions are
 workspace-only, full-context, oracle-current-state, flat retrieval, Mem0,
 A-MEM, and MemOS. Native memory writers remain fixed backend components rather
 than compared policy models. Common retrieval/reranking and native retrieval

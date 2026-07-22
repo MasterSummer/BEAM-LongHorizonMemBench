@@ -105,6 +105,54 @@ def test_openai_responses_tool_call_and_usage_are_normalized() -> None:
     assert response.endpoint_identity == "https://openai.example"
 
 
+def test_shengsuanyun_versioned_route_uses_exact_responses_path_and_model() -> None:
+    seen: list[httpx.Request] = []
+    profile = replace(
+        _profile("openai"),
+        profile_id="gpt_5_6_sol_shengsuanyun",
+        model_id="openai/gpt-5.6-sol",
+        route_id="shengsuanyun",
+        api_key_env="SHENGSUANYUN_API_KEY",
+        endpoint="https://router.shengsuanyun.com/api/v1",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body = json.loads(request.content)
+        assert request.url.path == "/api/v1/responses"
+        assert request.headers["authorization"] == "Bearer test-key"
+        assert body["model"] == "openai/gpt-5.6-sol"
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_shengsuanyun",
+                "model": "openai/gpt-5.6-sol",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "submit_action",
+                        "arguments": (
+                            '{"action_id":"option-01",'
+                            '"concise_rationale":"Selected."}'
+                        ),
+                    }
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 4},
+            },
+        )
+
+    response = HttpPolicyClient(
+        profile,
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    ).submit_action(_request())
+
+    assert len(seen) == 1
+    assert response.model_id == "openai/gpt-5.6-sol"
+    assert response.provider == "openai"
+    assert response.endpoint_identity == "https://router.shengsuanyun.com/api/v1"
+
+
 def test_anthropic_messages_tool_call_is_normalized() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/messages"

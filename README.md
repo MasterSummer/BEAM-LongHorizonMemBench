@@ -124,7 +124,7 @@ All commands assume the repository root as working directory and an activated vi
 
 The first repaired long-horizon qualification slice is frozen separately from
 the legacy v1 pilot. The native server entry points default to
-`configs/experiments/systems_controlled_gpt_only.yaml`, which runs GPT-5.6 Sol
+`configs/experiments/systems_controlled_gpt_only_aaai.yaml`, which runs GPT-5.6 Sol
 over workspace-only, full-context, oracle-current-state, flat retrieval, Mem0,
 A-MEM, and MemOS. Native memory writers may use the fixed DeepSeek profile, but
 it is not a continuation/policy comparison model.
@@ -144,7 +144,7 @@ qualification. These live tests run on the server, not this workstation:
 sudo install -d -m 0750 -o "$(id -un)" -g "$(id -gn)" /data/lhmsb
 cp .env.example .env
 chmod 600 .env
-# Fill OPENCODE_ZEN_API_KEY and DEEPSEEK_API_KEY.
+# Fill SHENGSUANYUN_API_KEY and DEEPSEEK_API_KEY.
 
 scripts/bootstrap_systems_server.sh --data-root /data/lhmsb --env-file .env
 scripts/preflight_systems.sh --data-root /data/lhmsb --env-file .env

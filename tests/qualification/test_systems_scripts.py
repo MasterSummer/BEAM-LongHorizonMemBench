@@ -76,7 +76,7 @@ def test_system_wrappers_have_dependency_free_dry_run(path: Path, tmp_path: Path
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "DRY-RUN" in result.stdout
-    assert "OPENCODE_ZEN_API_KEY" not in result.stdout
+    assert "SHENGSUANYUN_API_KEY" not in result.stdout
     assert "DEEPSEEK_API_KEY" not in result.stdout
     assert not (tmp_path / "data").exists()
 
@@ -275,15 +275,48 @@ def test_bootstrap_uses_native_venv_and_pinned_sources() -> None:
         "source_manifest",
     ):
         assert marker in text
-    assert "OPENCODE_ZEN_API_KEY" not in text
+    assert "SHENGSUANYUN_API_KEY" not in text
     assert "DEEPSEEK_API_KEY" not in text
 
 
 def test_common_helper_does_not_emit_secret_values() -> None:
     text = COMMON.read_text(encoding="utf-8")
-    assert "printf '%s' \"${OPENCODE_ZEN_API_KEY" not in text
+    assert "printf '%s' \"${SHENGSUANYUN_API_KEY" not in text
     assert "printf '%s' \"${DEEPSEEK_API_KEY" not in text
     assert "systems_require_live_secrets" in text
+
+
+def test_common_helper_requires_current_policy_and_writer_secrets() -> None:
+    environment = dict(os.environ)
+    environment.pop("SHENGSUANYUN_API_KEY", None)
+    environment["DEEPSEEK_API_KEY"] = "writer-secret"
+    missing = subprocess.run(
+        ["bash", "-c", f"source {COMMON!s}; systems_require_live_secrets"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert missing.returncode == 1
+    assert missing.stdout == ""
+    assert missing.stderr == (
+        "SHENGSUANYUN_API_KEY is required for live evaluation\n"
+    )
+    assert "writer-secret" not in missing.stderr
+
+    environment["SHENGSUANYUN_API_KEY"] = "policy-secret"
+    present = subprocess.run(
+        ["bash", "-c", f"source {COMMON!s}; systems_require_live_secrets"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert present.returncode == 0
+    assert present.stdout == ""
+    assert present.stderr == ""
 
 
 def test_gpu_configuration_accepts_two_visible_rtx_devices_by_default(

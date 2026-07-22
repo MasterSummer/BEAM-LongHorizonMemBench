@@ -987,14 +987,28 @@ class SystemsQualificationConfig:
                 1,
             ),
         )
+        shengsuanyun_gpt_policy = (
+            "gpt_5_6_sol_shengsuanyun",
+            "openai",
+            "openai/gpt-5.6-sol",
+            "shengsuanyun",
+            "SHENGSUANYUN_API_KEY",
+            "https://router.shengsuanyun.com/api/v1",
+            None,
+            "responses",
+            180.0,
+            2,
+            1,
+        )
         actual_policies = tuple(_policy_identity(item) for item in self.policy_profiles)
-        # The released controlled track uses all three policy profiles, while
-        # the repaired pilot intentionally runs GPT-5.6 alone.  Both are
-        # canonical configurations; accepting the singleton here keeps the
-        # same schema and artifact contract for the pilot.
+        # Historical Zen runs retain their original identities.  The current
+        # controlled pilot pins the ShengSuanYun route and exact routed model
+        # name as a separate singleton identity, so a provider/model change
+        # necessarily changes the config and run hashes.
         if actual_policies not in {
             expected_policies,
             (expected_policies[2],),
+            (shengsuanyun_gpt_policy,),
         }:
             raise ValueError("schema-v2 continuation policy identities are not canonical")
         expected_writer = (

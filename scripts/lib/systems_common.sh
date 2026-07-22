@@ -307,8 +307,8 @@ EOF
 }
 
 systems_require_live_secrets() {
-  [[ -n "${OPENCODE_ZEN_API_KEY:-}" ]] || {
-    printf 'OPENCODE_ZEN_API_KEY is required for live evaluation\n' >&2
+  [[ -n "${SHENGSUANYUN_API_KEY:-}" ]] || {
+    printf 'SHENGSUANYUN_API_KEY is required for live evaluation\n' >&2
     return 1
   }
   [[ -n "${DEEPSEEK_API_KEY:-}" ]] || {

@@ -27,6 +27,12 @@ from lhmsb.qualification.schema import (
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / "configs" / "experiments" / "systems_controlled_zen.yaml"
+AAAI_CONFIG_PATH = (
+    ROOT
+    / "configs"
+    / "experiments"
+    / "systems_controlled_gpt_only_aaai.yaml"
+)
 RUN_ID = "1" * 64
 OTHER_RUN_ID = "2" * 64
 
@@ -187,6 +193,41 @@ def test_schema_v2_repository_matrix_and_exact_pins() -> None:
     assert config.system_profiles["mem0"].source_commit == (
         "42cf18c4e6adb448e981aa1c7b55c1602b0cb670"
     )
+
+
+def test_aaai_gpt_only_profile_pins_shengsuanyun_route_and_secret() -> None:
+    config = load_qualification_config(AAAI_CONFIG_PATH)
+
+    assert isinstance(config, SystemsQualificationConfig)
+    assert config.experiment_id == "systems_controlled_gpt_only_aaai_v10"
+    assert config.required_secret_env == (
+        "SHENGSUANYUN_API_KEY",
+        "DEEPSEEK_API_KEY",
+    )
+    assert [
+        (
+            profile.profile_id,
+            profile.provider,
+            profile.model_id,
+            profile.route_id,
+            profile.api_key_env,
+            profile.endpoint,
+            profile.endpoint_override_env,
+            profile.request_api,
+        )
+        for profile in config.policy_profiles
+    ] == [
+        (
+            "gpt_5_6_sol_shengsuanyun",
+            "openai",
+            "openai/gpt-5.6-sol",
+            "shengsuanyun",
+            "SHENGSUANYUN_API_KEY",
+            "https://router.shengsuanyun.com/api/v1",
+            None,
+            "responses",
+        )
+    ]
 
 
 def test_schema_v2_config_is_deeply_immutable_and_serializes_condition_definitions() -> None:

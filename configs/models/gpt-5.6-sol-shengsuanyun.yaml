@@ -1,0 +1,11 @@
+profile_id: gpt_5_6_sol_shengsuanyun
+provider: openai
+model_id: openai/gpt-5.6-sol
+route_id: shengsuanyun
+api_key_env: SHENGSUANYUN_API_KEY
+endpoint: https://router.shengsuanyun.com/api/v1
+endpoint_override_env: null
+request_api: responses
+timeout_seconds: 180
+max_retries: 2
+format_repair_attempts: 1

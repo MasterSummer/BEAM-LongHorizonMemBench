@@ -184,8 +184,7 @@ def test_slurm_uses_two_a100s_and_the_same_frozen_cli_contract() -> None:
 def test_env_example_declares_only_expected_provider_and_service_controls() -> None:
     text = ENV_EXAMPLE.read_text(encoding="utf-8")
     for name in (
-        "OPENCODE_ZEN_API_KEY=",
-        "OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen",
+        "SHENGSUANYUN_API_KEY=",
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL=https://api.deepseek.com",
         "LHMSB_QDRANT_URL=http://127.0.0.1:6333",
@@ -198,31 +197,38 @@ def test_env_example_declares_only_expected_provider_and_service_controls() -> N
     ):
         assert name in text
     current_provider_section = text.split(
-        "# Controlled-Zen provider routes. Keep keys only in the operator env file.\n",
+        "# Canonical controlled provider routes. Keep keys only in the operator env file.\n",
         maxsplit=1,
     )[1]
     assert current_provider_section.strip().splitlines() == [
-        "OPENCODE_ZEN_API_KEY=",
-        "OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen",
+        "# The policy route is deliberately fixed in its tracked model profile; do not",
+        "# change models or endpoints inside a running experiment.",
+        "SHENGSUANYUN_API_KEY=",
         "DEEPSEEK_API_KEY=",
         "DEEPSEEK_BASE_URL=https://api.deepseek.com",
     ]
+    assert "OPENCODE_ZEN_API_KEY=" not in text
+    assert "OPENCODE_ZEN_BASE_URL=" not in text
     assert "AWS_" not in text
     assert "AZURE_" not in text
     assert "GOOGLE_" not in text
 
 
-def test_docs_name_the_current_controlled_zen_server_workflow() -> None:
+def test_docs_distinguish_current_native_and_historical_zen_workflows() -> None:
     readme = README.read_text(encoding="utf-8")
     workflow = SERVER_WORKFLOW.read_text(encoding="utf-8")
 
-    for text in (readme, workflow):
-        assert "configs/experiments/mem0_controlled_zen.yaml" in text
-        assert "OPENCODE_ZEN_API_KEY" in text
-        assert "DEEPSEEK_API_KEY" in text
-        assert "workspace_only" in text
-        assert "oracle_current_state" in text
-        assert "mem0_controlled" in text
+    assert "configs/experiments/systems_controlled_gpt_only_aaai.yaml" in readme
+    assert "SHENGSUANYUN_API_KEY" in readme
+    assert "DEEPSEEK_API_KEY" in readme
+    assert "workspace_only" in readme
+    assert "oracle_current_state" in readme
+    assert "configs/experiments/mem0_controlled_zen.yaml" in workflow
+    assert "OPENCODE_ZEN_API_KEY" in workflow
+    assert "DEEPSEEK_API_KEY" in workflow
+    assert "workspace_only" in workflow
+    assert "oracle_current_state" in workflow
+    assert "mem0_controlled" in workflow
     assert "excludes `mem0_native`" in readme
     assert "run on the server, not this workstation" in readme
     assert "不包含 `mem0_native`" in workflow
