@@ -358,7 +358,12 @@ class HttpPolicyClient:
                 "provider_model_unavailable",
                 f"provider omitted model identity for requested {self.profile.model_id!r}",
             )
-        if returned != self.profile.model_id:
+        accepted = returned == self.profile.model_id
+        if self.profile.route_id == "shengsuanyun" and "/" in self.profile.model_id:
+            # The gateway accepts provider-qualified catalog IDs but reports
+            # the same model without the provider namespace in responses.
+            accepted = accepted or returned == self.profile.model_id.split("/", 1)[1]
+        if not accepted:
             raise PolicyCallError(
                 "provider_model_unavailable",
                 f"requested {self.profile.model_id!r}, provider returned {returned!r}",

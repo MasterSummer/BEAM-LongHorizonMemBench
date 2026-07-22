@@ -127,7 +127,7 @@ def test_shengsuanyun_versioned_route_uses_exact_responses_path_and_model() -> N
             200,
             json={
                 "id": "resp_shengsuanyun",
-                "model": "openai/gpt-5.6-sol",
+                "model": "gpt-5.6-sol",
                 "output": [
                     {
                         "type": "function_call",
