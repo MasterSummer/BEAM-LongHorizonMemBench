@@ -181,12 +181,15 @@ class AMemQualificationAdapter:
         embedding_model = os.environ.get("LHMSB_AMEM_EMBEDDING_MODEL_PATH", profile.embedding_model)
         kwargs: dict[str, object] = {
             "model_name": embedding_model,
-            # A-MEM's official controller only accepts ``openai`` or ``ollama``.
-            # ``ollama`` is a constructor-only inert controller here; it is
-            # replaced with the DeepSeek bridge before the first add/search call,
-            # so no OpenAI key or default OpenAI URL is ever constructed.
-            "llm_backend": "ollama",
+            # A-MEM constructs its controller eagerly.  Use its dependency-
+            # complete OpenAI placeholder, then replace it with the controlled
+            # DeepSeek bridge before the first add/search call.  Constructing
+            # the placeholder performs no provider request; using ``ollama``
+            # here would import an optional package absent from the canonical
+            # native environment.
+            "llm_backend": "openai",
             "llm_model": policy.model_id,
+            "api_key": api_key,
         }
         if storage_path is not None:
             kwargs["persist_directory"] = storage_path

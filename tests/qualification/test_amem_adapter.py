@@ -13,6 +13,7 @@ from lhmsb.adapters.amem_qualification import (
     validate_amem_source,
 )
 from lhmsb.qualification.context import PublicHistoryUnit
+from lhmsb.qualification.schema import AMemProfile, PolicyProfile
 
 
 @dataclass
@@ -208,3 +209,70 @@ def test_amem_writer_budget_has_offline_reasoning_headroom(
     assert _amem_writer_max_output_tokens() == 2048
     monkeypatch.setenv("LHMSB_AMEM_WRITER_MAX_OUTPUT_TOKENS", "3072")
     assert _amem_writer_max_output_tokens() == 3072
+
+
+def test_live_constructor_uses_dependency_complete_placeholder_before_writer_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class LiveFakeAMem(FakeAMem):
+        def __init__(
+            self,
+            model_name: str,
+            llm_backend: str,
+            llm_model: str,
+            api_key: str | None = None,
+        ) -> None:
+            calls.append(
+                {
+                    "model_name": model_name,
+                    "llm_backend": llm_backend,
+                    "llm_model": llm_model,
+                    "api_key": api_key,
+                }
+            )
+            super().__init__()
+
+    module = SimpleNamespace(
+        __name__="agentic_memory.memory_system",
+        __source_commit__="ceffb860f0712bbae97b184d440df62bc910ca8d",
+        AgenticMemorySystem=LiveFakeAMem,
+    )
+    writer = object()
+    monkeypatch.setattr(amem_module, "DeepSeekJSONBridge", lambda **_kwargs: writer)
+    policy = PolicyProfile(
+        profile_id="deepseek_v4_pro_writer",
+        provider="deepseek",
+        model_id="deepseek-v4-pro",
+        route_id="deepseek_direct",
+        api_key_env="DEEPSEEK_API_KEY",
+        endpoint="https://api.deepseek.com",
+        endpoint_override_env=None,
+        request_api="chat_completions",
+        timeout_seconds=30.0,
+        max_retries=1,
+        format_repair_attempts=0,
+    )
+
+    adapter = AMemQualificationAdapter.create_live(
+        AMemProfile(profile_id="amem_controlled"),
+        policy=policy,
+        api_key="writer-key",
+        embedding_runtime=FakeEmbedding(),
+        namespace="episode-1",
+        episode_id="episode-1",
+        storage_path="/not-supported-by-pinned-source",
+        module=module,
+    )
+
+    assert calls == [
+        {
+            "model_name": "BAAI/bge-m3",
+            "llm_backend": "openai",
+            "llm_model": "deepseek-v4-pro",
+            "api_key": "writer-key",
+        }
+    ]
+    assert adapter.backend.llm_controller.llm is writer
+    adapter.close()
