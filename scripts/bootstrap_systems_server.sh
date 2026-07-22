@@ -208,7 +208,8 @@ uv pip compile --generate-hashes --python-version 3.11 \
   --output-file "${DATA_ROOT}/locks/core-requirements.txt"
 download_hash_locked_wheels core
 uv pip compile --generate-hashes --python-version 3.11 \
-  "${REPO_ROOT}/pyproject.toml" --output-file "${DATA_ROOT}/locks/mem0-requirements.txt"
+  "${REPO_ROOT}/pyproject.toml" --extra mem0 \
+  --output-file "${DATA_ROOT}/locks/mem0-requirements.txt"
 download_hash_locked_wheels mem0
 uv pip compile --generate-hashes --python-version 3.11 \
   "${DATA_ROOT}/sources/amem/pyproject.toml" \

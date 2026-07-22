@@ -426,6 +426,7 @@ def test_bootstrap_locks_official_memos_tree_and_reader_extras() -> None:
     bootstrap = (ROOT / "scripts" / "bootstrap_systems_server.sh").read_text(encoding="utf-8")
     verifier = (ROOT / "scripts" / "verify_system_runtime.sh").read_text(encoding="utf-8")
 
+    assert '"${REPO_ROOT}/pyproject.toml" --extra mem0' in bootstrap
     assert '"${DATA_ROOT}/sources/amem/pyproject.toml"' in bootstrap
     assert "--extra tree-mem --extra mem-reader" in bootstrap
     assert '"${DATA_ROOT}/sources/memos/pyproject.toml"' in bootstrap
