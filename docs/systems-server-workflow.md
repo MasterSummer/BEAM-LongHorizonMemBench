@@ -24,8 +24,8 @@ fall back between models inside one run.
 Install native Qdrant, Neo4j Community, Java 17, and the CUDA TEI binary on the
 host. Download the BGE-M3 and BGE-reranker-v2-m3 snapshots into the configured
 model directories. The canonical deployment needs two visible, distinct NVIDIA
-GPUs selected in the operator environment; on the current shared host, GPU 0
-is assigned to embeddings and GPU 2 to reranking. Set `LHMSB_REQUIRE_A100=1`
+GPUs selected in the operator environment; on the current zyd host, GPU 0 is
+assigned to embeddings and GPU 1 to reranking. Set `LHMSB_REQUIRE_A100=1`
 only when reproducing a legacy A100-only deployment. Copy the repository and
 create a mode-0600 operator file:
 
@@ -84,10 +84,15 @@ scripts/run_systems_qualification.sh --dry-run --data-root /tmp/lhmsb
 Run the five-scenario calibration before the confirmatory matrix:
 
 ```bash
-export LHMSB_SYSTEM_DATASET=/data/lhmsb/datasets/software_v9_calibration
+export LHMSB_DATA_ROOT="${LHMSB_DATA_ROOT:-/home/zyd/lhmsb-native-data}"
+export LHMSB_ENV_FILE="${LHMSB_ENV_FILE:-${LHMSB_DATA_ROOT}/env/operator.env}"
+set -a
+source "${LHMSB_ENV_FILE}"
+set +a
+export LHMSB_SYSTEM_DATASET="${LHMSB_DATA_ROOT}/datasets/software_v9_calibration"
 scripts/run_systems_qualification.sh \
-  --data-root /home/root123/lhmsb-native-data \
-  --env-file /home/root123/lhmsb-native-data/env/operator.env \
+  --data-root "${LHMSB_DATA_ROOT}" \
+  --env-file "${LHMSB_ENV_FILE}" \
   --run-name systems-gpt56-shengsuanyun-calibration-v10 \
   --episode-limit 5 --keep-going
 ```
@@ -137,11 +142,11 @@ sbatch --array=0-349%16 --dependency="afterok:${PREP_JOB}" \
   --export=ALL,LHMSB_RUN_NAME=gpt-only-shengsuanyun-v10 \
   deploy/slurm/systems_evaluate_task.sbatch
 "${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
-  aggregate-systems --run-dir /data/lhmsb/runs/systems/gpt-only-shengsuanyun-v10 \
-  --out /data/lhmsb/runs/systems/gpt-only-shengsuanyun-v10/report
+  aggregate-systems --run-dir "${LHMSB_DATA_ROOT}/runs/systems/gpt-only-shengsuanyun-v10" \
+  --out "${LHMSB_DATA_ROOT}/runs/systems/gpt-only-shengsuanyun-v10/report"
 "${LHMSB_DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification \
-  validate-systems --report /data/lhmsb/runs/systems/gpt-only-shengsuanyun-v10/report \
-  --json /data/lhmsb/runs/systems/gpt-only-shengsuanyun-v10/validation.json
+  validate-systems --report "${LHMSB_DATA_ROOT}/runs/systems/gpt-only-shengsuanyun-v10/report" \
+  --json "${LHMSB_DATA_ROOT}/runs/systems/gpt-only-shengsuanyun-v10/validation.json"
 ```
 
 The preparation job requests two generic NVIDIA GPUs, assigns one to embedding
