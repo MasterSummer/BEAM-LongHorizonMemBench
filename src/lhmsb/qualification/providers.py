@@ -259,6 +259,13 @@ class HttpPolicyClient:
                     "function": {"name": "submit_action"},
                 },
             }
+        # ShengSuanYun exposes the Responses route but currently models
+        # ``tool_choice`` as a string in its gateway schema.  With exactly one
+        # tool, ``required`` preserves the same forced-tool semantics as the
+        # standard OpenAI named-function object used by direct routes.
+        tool_choice: object = {"type": "function", "name": "submit_action"}
+        if self.profile.route_id == "shengsuanyun":
+            tool_choice = "required"
         return {
             "model": self.profile.model_id,
             "instructions": system,
@@ -273,7 +280,7 @@ class HttpPolicyClient:
                     "strict": True,
                 }
             ],
-            "tool_choice": {"type": "function", "name": "submit_action"},
+            "tool_choice": tool_choice,
         }
 
     def _post(self, body: dict[str, object]) -> tuple[dict[str, object], int]:

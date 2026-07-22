@@ -122,6 +122,7 @@ def test_shengsuanyun_versioned_route_uses_exact_responses_path_and_model() -> N
         assert request.url.path == "/api/v1/responses"
         assert request.headers["authorization"] == "Bearer test-key"
         assert body["model"] == "openai/gpt-5.6-sol"
+        assert body["tool_choice"] == "required"
         return httpx.Response(
             200,
             json={
