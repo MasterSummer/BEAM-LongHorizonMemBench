@@ -969,7 +969,11 @@ def _load_contract(
     )
     if preparations and manifest.get("run_identity") != preparations[0].run_identity:
         raise MultisystemCliError("preparation task run identity mismatch")
-    return manifest, config, specs, preparations, templates
+    # The frozen dataset may contain more physical episodes than this run
+    # selected with ``--episode-limit``.  All downstream workers and report
+    # aggregation must operate on the immutable run selection, not silently
+    # reintroduce unselected episodes into the design audit or scorecards.
+    return manifest, config, selected_specs, preparations, templates
 
 
 def _load_tasks(run_directory: Path) -> tuple[EvaluationTask, ...]:
