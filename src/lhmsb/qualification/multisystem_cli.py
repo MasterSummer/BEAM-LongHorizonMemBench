@@ -137,6 +137,11 @@ def _atomic_jsonl(path: Path, values: Sequence[Mapping[str, object]]) -> None:
     _atomic_write(path, body)
 
 
+def _json_normalize(value: object) -> object:
+    """Normalize in-memory tuples to the canonical JSON representation."""
+    return json.loads(_canonical_bytes(value).decode("utf-8"))
+
+
 def _read_json(path: Path) -> dict[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -880,8 +885,13 @@ def _load_contract(
     if not design_audit_path.is_file():
         raise MultisystemCliError("missing immutable experiment design audit")
     persisted_design_audit = _read_json(design_audit_path)
-    recomputed_design_audit = compute_experiment_design_audit(
-        {spec.plan.episode_id: spec for spec in selected_specs}
+    recomputed_design_audit = cast(
+        dict[str, object],
+        _json_normalize(
+            compute_experiment_design_audit(
+                {spec.plan.episode_id: spec for spec in selected_specs}
+            )
+        ),
     )
     if persisted_design_audit != recomputed_design_audit:
         raise MultisystemCliError(

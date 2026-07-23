@@ -523,6 +523,10 @@ def test_workers_recompute_the_policy_free_design_audit(
         allow_dirty=True,
         n_sessions=4,
     )
+    # A persisted JSON audit contains lists where the in-memory audit uses
+    # tuples.  The worker must compare their canonical JSON meaning before
+    # testing tamper resistance.
+    multisystem_cli._load_contract(run)
     audit_path = run / "experiment_design_audit.json"
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
     audit["audit_status"] = "invalid"
