@@ -14,6 +14,35 @@ from pathlib import Path
 from typing import Any
 
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
+from lhmsb.longhorizon.constructs import profile_sceu
+from lhmsb.longhorizon.task_span import profile_task_span
+from lhmsb.qualification.analysis_phase import (
+    parse_analysis_phase,
+    parse_analysis_timing,
+)
+from lhmsb.qualification.config import canonical_hash
+from lhmsb.qualification.contribution_evidence import (
+    build_contribution_evidence,
+    contribution_evidence_markdown,
+)
+from lhmsb.qualification.design_audit import (
+    compute_experiment_design_audit,
+    experiment_design_audit_markdown,
+)
+from lhmsb.qualification.fault_profile import (
+    compute_fault_profile_divergence,
+    fault_profile_divergence_markdown,
+)
+from lhmsb.qualification.horizon_panel import (
+    HORIZON_PRIMARY_ESTIMANDS,
+    HORIZON_SECONDARY_ESTIMANDS,
+    compute_horizon_panel_contrasts,
+    horizon_panel_scorecard,
+)
+from lhmsb.qualification.longitudinal import (
+    compute_drift_trajectory_report,
+    drift_trajectory_markdown,
+)
 from lhmsb.qualification.metrics import (
     MultisystemMetricInput,
     StateCheckpointMetricInput,
@@ -21,10 +50,16 @@ from lhmsb.qualification.metrics import (
     _artifact_attributions,
     _is_memory_count_contrast,
     _is_memory_count_load_contrast,
+    compute_failure_attribution_scorecard,
+    compute_long_horizon_control_contrasts,
+    compute_long_horizon_scorecard,
+    compute_matched_construct_contrasts,
+    compute_matched_construct_scorecard,
     compute_multisystem_metrics,
     compute_multisystem_metrics_by_cell,
     compute_multisystem_scorecard,
     compute_qualification_metrics,
+    decision_attribution_rows,
     multisystem_observations_from_results,
     multisystem_state_checkpoints_from_artifacts,
 )
@@ -46,10 +81,14 @@ from lhmsb.qualification.runner import (
 )
 from lhmsb.qualification.statistics import (
     compute_episode_cluster_statistics,
+    compute_horizon_panel_statistics,
+    compute_matched_group_statistics,
+    horizon_panel_statistics_markdown,
+    matched_group_statistics_markdown,
     statistics_markdown,
 )
 
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 7
 _CANONICAL_DRIFT_CATEGORIES = (
     "constraint_loss",
     "plan_deviation",
@@ -78,6 +117,29 @@ REQUIRED_REPORT_ARTIFACTS: tuple[str, ...] = (
     "storage_scorecard.md",
     "memory_count_scorecard.csv",
     "memory_count_scorecard.md",
+    "failure_attribution_scorecard.csv",
+    "failure_attribution_scorecard.md",
+    "decision_attribution.jsonl",
+    "fault_profile_divergence.json",
+    "fault_profile_divergence.md",
+    "long_horizon_scorecard.csv",
+    "long_horizon_scorecard.md",
+    "long_horizon_control_contrasts.csv",
+    "long_horizon_control_contrasts.md",
+    "long_horizon_constructs.jsonl",
+    "task_span.jsonl",
+    "matched_construct_contrasts.jsonl",
+    "matched_construct_scorecard.csv",
+    "matched_construct_scorecard.md",
+    "matched_construct_statistics.json",
+    "matched_construct_statistics.md",
+    "horizon_panel_contrasts.jsonl",
+    "horizon_panel_scorecard.csv",
+    "horizon_panel_scorecard.md",
+    "horizon_panel_statistics.json",
+    "horizon_panel_statistics.md",
+    "drift_trajectories.json",
+    "drift_trajectories.md",
     "statistics.json",
     "statistics.md",
     "heuristic_baselines.json",
@@ -86,6 +148,10 @@ REQUIRED_REPORT_ARTIFACTS: tuple[str, ...] = (
     "drift_calibration.md",
     "measurement_gates.json",
     "measurement_gates.md",
+    "experiment_design_audit.json",
+    "experiment_design_audit.md",
+    "contribution_evidence.json",
+    "contribution_evidence.md",
     "limitations.md",
     "validation.json",
 )
@@ -114,6 +180,7 @@ _SCORECARD_FIELDS = (
     "mean_visible_memory_count",
     "mean_live_memory_count",
     "causal_memory_use_rate",
+    "unique_causal_effect_rate",
     "beneficial_intervention_rate",
     "harmful_intervention_rate",
     "unstable_intervention_rate",
@@ -124,26 +191,41 @@ _SCORECARD_FIELDS = (
     "constraint_loss_eligible_n",
     "targeted_constraint_loss_rate",
     "observed_constraint_loss_rate",
+    "canonical_constraint_loss_violation_rate",
     "current_plan_deviation_rate",
     "plan_deviation_eligible_n",
     "targeted_plan_deviation_rate",
     "observed_plan_deviation_rate",
+    "canonical_plan_deviation_violation_rate",
     "stale_state_action_rate",
     "stale_state_eligible_n",
     "targeted_stale_state_rate",
     "observed_stale_state_rate",
+    "canonical_stale_state_violation_rate",
     "local_over_global_rate",
     "local_over_global_eligible_n",
     "targeted_local_over_global_rate",
     "observed_local_over_global_rate",
+    "canonical_local_over_global_violation_rate",
     "aggregate_drift_rate",
     "aggregate_drift_eligible_n",
     "targeted_aggregate_drift_rate",
     "observed_aggregate_drift_rate",
+    "canonical_drift_violation_rate",
     "off_target_drift_rate",
     "off_target_drift_n",
     "memory_count_contrast_rate",
     "memory_count_behavior_change_rate",
+)
+_HORIZON_PANEL_SCORECARD_FIELDS = (
+    "policy_profile_id",
+    "condition",
+    "readout",
+    "analysis_unit",
+    "n_horizon_panels",
+    "n_complete_horizon_panels",
+    *tuple(f"mean_{estimand}" for estimand in HORIZON_PRIMARY_ESTIMANDS),
+    *tuple(f"mean_{estimand}" for estimand in HORIZON_SECONDARY_ESTIMANDS),
 )
 _STORAGE_SCORECARD_FIELDS = (
     "policy_profile_id",
@@ -177,6 +259,119 @@ _MEMORY_COUNT_SCORECARD_FIELDS = (
     "mean_baseline_visible_memory_count",
     "mean_intervention_visible_memory_count",
 )
+_FAILURE_ATTRIBUTION_SCORECARD_FIELDS = (
+    "policy_profile_id",
+    "condition",
+    "readout",
+    "storage_evidence_mode",
+    "n_sceu",
+    "memory_reliant_n",
+    "attribution_applicable_n",
+    "no_memory_channel_n",
+    "not_memory_reliant_n",
+    "memory_required_state_count",
+    "memory_required_storage_recall",
+    "stored_to_retrieved_yield",
+    "retrieved_to_visible_yield",
+    "visible_required_probe_coverage",
+    "probed_required_causal_use_rate",
+    "storage_evidence_unavailable_n",
+    "storage_evidence_unavailable_rate",
+    "storage_failure_n",
+    "storage_failure_rate",
+    "retrieval_failure_n",
+    "retrieval_failure_rate",
+    "exposure_failure_n",
+    "exposure_failure_rate",
+    "utilization_failure_n",
+    "utilization_failure_rate",
+    "visible_without_detected_unique_causal_effect_n",
+    "visible_without_detected_unique_causal_effect_rate",
+    # Legacy columns remain readable when merging completed reports.
+    "visible_without_detected_use_n",
+    "visible_without_detected_use_rate",
+    "visible_causally_influential_but_wrong_n",
+    "visible_causally_influential_but_wrong_rate",
+    "visible_use_evidence_incomplete_n",
+    "visible_use_evidence_incomplete_rate",
+    "behavior_success_causal_n",
+    "behavior_success_causal_rate",
+    "behavior_success_without_detected_unique_causal_effect_n",
+    "behavior_success_without_detected_unique_causal_effect_rate",
+    # Legacy columns remain readable when merging completed reports.
+    "behavior_success_without_detected_use_n",
+    "behavior_success_without_detected_use_rate",
+    "behavior_success_unprobed_n",
+    "behavior_success_unprobed_rate",
+)
+_LONG_HORIZON_SCORECARD_FIELDS = (
+    "policy_profile_id",
+    "condition",
+    "readout",
+    "construct_kind",
+    "horizon_band",
+    "n_sceu",
+    "n_episodes",
+    "mean_handoff_count",
+    "mean_oldest_required_state_age",
+    "mean_latest_decision_event_distance",
+    "mean_dependency_depth",
+    "mean_relevant_transition_count",
+    "mean_effective_task_step_count",
+    "mean_max_task_dependency_depth",
+    "mean_causally_linked_task_step_fraction",
+    "mean_memory_reliant_state_count",
+    "mean_behavior_score",
+    "behavior_correct_rate",
+    "targeted_drift_rate",
+    "targeted_drift_violation_rate",
+    "drift_eligible_n",
+    "observed_drift_rate",
+    "canonical_drift_violation_rate",
+)
+_LONG_HORIZON_CONTROL_CONTRAST_FIELDS = (
+    "policy_profile_id",
+    "condition",
+    "readout",
+    "construct_kind",
+    "horizon_band",
+    "n_matched_decisions",
+    "n_episodes",
+    "mean_behavior_gain_beyond_workspace",
+    "mean_behavior_gap_to_oracle",
+    "oracle_gap_closed",
+    "workspace_behavior_correct_rate",
+    "system_behavior_correct_rate",
+    "oracle_behavior_correct_rate",
+    "drift_matched_decisions",
+    "targeted_drift_risk_difference_vs_workspace",
+    "targeted_drift_risk_difference_vs_oracle",
+)
+_MATCHED_CONSTRUCT_SCORECARD_FIELDS = (
+    "policy_profile_id",
+    "condition",
+    "readout",
+    "n_counterfactual_groups",
+    "n_complete_groups",
+    "n_current_v1_offline_groups",
+    "n_current_v2_offline_groups",
+    "n_authorized_cloud_groups",
+    "all_terminal_archetypes_covered",
+    "mean_static_behavior_score",
+    "mean_evolution_behavior_score",
+    "mean_hierarchical_conflict_behavior_score",
+    "mean_state_evolution_penalty_vs_static",
+    "mean_hierarchical_conflict_penalty_vs_static",
+    "mean_static_gain_beyond_workspace",
+    "mean_evolution_gain_beyond_workspace",
+    "mean_hierarchical_conflict_gain_beyond_workspace",
+    "mean_state_evolution_penalty_excess_over_workspace",
+    "mean_hierarchical_conflict_penalty_excess_over_workspace",
+    "mean_state_evolution_drift_violation_excess_vs_static",
+    "mean_hierarchical_conflict_drift_violation_excess_vs_static",
+    "evolution_attribution_stage_change_rate",
+    "hierarchical_conflict_attribution_stage_change_rate",
+)
 
 
 @dataclass(frozen=True)
@@ -204,6 +399,12 @@ def write_qualification_report(
     prefix_artifacts: Mapping[str, object] | None = None,
 ) -> ReportArtifacts:
     """Write the complete deterministic report and hash every non-manifest file."""
+    analysis_phase = parse_analysis_phase(
+        (run_metadata or {}).get("analysis_phase", "development")
+    )
+    analysis_timing = parse_analysis_timing(
+        (run_metadata or {}).get("analysis_timing", "pre_specified")
+    )
     output_directory.mkdir(parents=True, exist_ok=True)
     rows = _flatten_rows(
         matrix,
@@ -215,6 +416,16 @@ def write_qualification_report(
             output_directory / name,
             _jsonl_bytes(rows[name]),
         )
+    construct_rows = _long_horizon_construct_rows(matrix, specs)
+    _atomic_write(
+        output_directory / "long_horizon_constructs.jsonl",
+        _jsonl_bytes(construct_rows),
+    )
+    task_span_rows = _task_span_rows(matrix, specs)
+    _atomic_write(
+        output_directory / "task_span.jsonl",
+        _jsonl_bytes(task_span_rows),
+    )
 
     evaluation_matrix = any(not hasattr(task, "writes") for task in matrix.task_results)
     if evaluation_matrix:
@@ -278,13 +489,122 @@ def write_qualification_report(
         ),
     )
     expected_task_count = _expected_task_count(run_metadata, len(matrix.task_results))
-    summary_payload = _summary(
-        matrix,
-        rows,
-        specs=specs,
-        expected_task_count=expected_task_count,
+    failure_attribution_rows = list(
+        compute_failure_attribution_scorecard(episode_observations)
     )
+    decision_rows = decision_attribution_rows(episode_observations)
+    fault_profile_divergence = compute_fault_profile_divergence(decision_rows)
+    _atomic_write(
+        output_directory / "decision_attribution.jsonl",
+        _jsonl_bytes(decision_rows),
+    )
+    long_horizon_rows = list(compute_long_horizon_scorecard(episode_observations))
+    long_horizon_contrasts = list(
+        compute_long_horizon_control_contrasts(episode_observations)
+    )
+    matched_construct_contrasts = list(
+        compute_matched_construct_contrasts(episode_observations)
+    )
+    matched_construct_scorecard = list(
+        compute_matched_construct_scorecard(episode_observations)
+    )
+    horizon_release = any(
+        observation.horizon_panel_id for observation in episode_observations
+    )
+    matched_construct_statistics = (
+        {
+            "schema_version": 2,
+            "status": "suppressed_within_panel_triplets",
+            "analysis_unit": "horizon_panel",
+            "estimates": [],
+            "reason": (
+                "The three horizon-level construct triplets within one panel are "
+                "dependent repeated conditions. Use horizon_panel_statistics.json; "
+                "do not treat them as three counterfactual-group samples."
+            ),
+        }
+        if horizon_release
+        else compute_matched_group_statistics(episode_observations)
+    )
+    horizon_panel_contrasts = list(
+        compute_horizon_panel_contrasts(episode_observations)
+    )
+    horizon_panel_scorecard_rows = list(
+        horizon_panel_scorecard(episode_observations)
+    )
+    horizon_panel_statistics = compute_horizon_panel_statistics(
+        episode_observations
+    )
+    drift_trajectory_payload = compute_drift_trajectory_report(
+        episode_observations
+    )
+    drift_trajectory_rows = drift_trajectory_payload.get("trajectories")
+    n_drift_trajectories = (
+        len(drift_trajectory_rows)
+        if isinstance(drift_trajectory_rows, Sequence)
+        and not isinstance(drift_trajectory_rows, (str, bytes))
+        else 0
+    )
+    summary_payload = {
+        **_summary(
+            matrix,
+            rows,
+            specs=specs,
+            expected_task_count=expected_task_count,
+        ),
+        "n_long_horizon_construct_profiles": len(construct_rows),
+        "n_failure_attribution_cells": len(failure_attribution_rows),
+        "n_decision_attribution_rows": len(decision_rows),
+        "n_fault_profile_aligned_pairs": _as_int(
+            fault_profile_divergence["n_aligned_decision_pairs"]
+        ),
+        "n_fault_profile_outcome_equivalent_pairs": _as_int(
+            fault_profile_divergence["n_outcome_equivalent_pairs"]
+        ),
+        "n_long_horizon_scorecard_cells": len(long_horizon_rows),
+        "n_long_horizon_control_contrasts": len(long_horizon_contrasts),
+        "n_task_span_profiles": len(task_span_rows),
+        "trajectory_interaction_mode_counts": dict(
+            sorted(
+                Counter(
+                    str(row.get("interaction_mode", "missing"))
+                    for row in task_span_rows
+                ).items()
+            )
+        ),
+        "n_online_long_horizon_agent_execution_profiles": sum(
+            row.get("online_long_horizon_agent_execution_supported") is True
+            for row in task_span_rows
+        ),
+        "n_matched_construct_contrasts": len(
+            matched_construct_contrasts
+        ),
+        "n_matched_construct_scorecard_cells": len(
+            matched_construct_scorecard
+        ),
+        "n_horizon_panel_contrasts": len(horizon_panel_contrasts),
+        "n_horizon_panel_scorecard_cells": len(
+            horizon_panel_scorecard_rows
+        ),
+        "n_drift_trajectories": n_drift_trajectories,
+        "analysis_phase": analysis_phase,
+        "analysis_timing": analysis_timing,
+    }
     memory_count_scorecard_rows = _memory_count_scorecard_rows(rows["interventions.jsonl"])
+    design_audit_payload = compute_experiment_design_audit(specs)
+    design_audit_hash = canonical_hash(design_audit_payload)
+    planned_design_audit_hash = (
+        None
+        if run_metadata is None
+        else run_metadata.get("experiment_design_audit_hash")
+    )
+    if (
+        planned_design_audit_hash is not None
+        and planned_design_audit_hash != design_audit_hash
+    ):
+        raise ValueError(
+            "report experiment design audit differs from the immutable run plan"
+        )
     heuristic_payload = compute_heuristic_baselines(specs)
     drift_calibration_payload = compute_drift_action_calibration(specs)
     measurement_payload = compute_measurement_gates(
@@ -294,6 +614,17 @@ def write_qualification_report(
         heuristic_baselines=heuristic_payload,
         drift_calibration=drift_calibration_payload,
         expected_task_count=expected_task_count,
+        observations=episode_observations,
+    )
+    contribution_evidence_payload = build_contribution_evidence(
+        summary=summary_payload,
+        measurement_gates=measurement_payload,
+        matched_statistics=matched_construct_statistics,
+        drift_trajectories=drift_trajectory_payload,
+        decision_attribution_rows=decision_rows,
+        fault_profile_divergence=fault_profile_divergence,
+        experiment_design_audit=design_audit_payload,
+        horizon_statistics=horizon_panel_statistics,
     )
     _atomic_write(
         output_directory / "summary.json",
@@ -343,15 +674,183 @@ def write_qualification_report(
             ),
         ).encode("utf-8"),
     )
-    episode_groups = {
-        episode_id: str(dict(spec.plan.metadata).get("semantic_scenario", "unknown"))
-        for episode_id, spec in specs.items()
-    }
-    statistics_payload = compute_episode_cluster_statistics(
-        observations,
-        episode_groups=episode_groups,
-        episode_group_name="semantic_scenario",
+    _atomic_write(
+        output_directory / "failure_attribution_scorecard.csv",
+        _table_csv(
+            failure_attribution_rows,
+            _FAILURE_ATTRIBUTION_SCORECARD_FIELDS,
+        ).encode("utf-8"),
     )
+    _atomic_write(
+        output_directory / "failure_attribution_scorecard.md",
+        _table_markdown(
+            failure_attribution_rows,
+            _FAILURE_ATTRIBUTION_SCORECARD_FIELDS,
+            title="Decision-aligned memory failure attribution",
+            note=(
+                "Each row preserves one policy/backend/readout cell. Stage yields are "
+                "conditional: retrieval is scored only for stored required state, "
+                "exposure only for retrieved state, and use only for visible state "
+                "covered by a stable counterfactual probe."
+            ),
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "fault_profile_divergence.json",
+        _json_bytes(fault_profile_divergence),
+    )
+    _atomic_write(
+        output_directory / "fault_profile_divergence.md",
+        fault_profile_divergence_markdown(
+            fault_profile_divergence
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "long_horizon_scorecard.csv",
+        _table_csv(
+            long_horizon_rows,
+            _LONG_HORIZON_SCORECARD_FIELDS,
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "long_horizon_scorecard.md",
+        _table_markdown(
+            long_horizon_rows,
+            _LONG_HORIZON_SCORECARD_FIELDS,
+            title="Long-horizon construct scorecard",
+            note=(
+                "Horizon is represented by session handoffs, required-state age, "
+                "dependency depth, and state-transition load rather than token count."
+            ),
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "long_horizon_control_contrasts.csv",
+        _table_csv(
+            long_horizon_contrasts,
+            _LONG_HORIZON_CONTROL_CONTRAST_FIELDS,
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "long_horizon_control_contrasts.md",
+        _table_markdown(
+            long_horizon_contrasts,
+            _LONG_HORIZON_CONTROL_CONTRAST_FIELDS,
+            title="Same-decision long-horizon control contrasts",
+            note=(
+                "Every system row is paired with workspace-only and "
+                "oracle-current-state at the identical episode and continuation."
+            ),
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "matched_construct_contrasts.jsonl",
+        _jsonl_bytes(matched_construct_contrasts),
+    )
+    _atomic_write(
+        output_directory / "matched_construct_scorecard.csv",
+        _table_csv(
+            matched_construct_scorecard,
+            _MATCHED_CONSTRUCT_SCORECARD_FIELDS,
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "matched_construct_scorecard.md",
+        _table_markdown(
+            matched_construct_scorecard,
+            _MATCHED_CONSTRUCT_SCORECARD_FIELDS,
+            title="Counterfactually matched long-horizon construct scorecard",
+            note=(
+                "Each group holds the checkpoint, continuation request, action "
+                "catalog, gold action, opaque option mapping, and prefix/workspace "
+                "shape fixed while changing only static history, state evolution, "
+                "or hierarchical conflict. Positive penalties mean worse behavior "
+                "than the matched static history. Drift columns are endpoint "
+                "violation excesses, not longitudinal drift onset. The "
+                "penalty-excess-over-workspace columns are difference-in-differences "
+                "that remove the matched workspace-only construct penalty."
+            ),
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "matched_construct_statistics.json",
+        _json_bytes(matched_construct_statistics),
+    )
+    _atomic_write(
+        output_directory / "matched_construct_statistics.md",
+        matched_group_statistics_markdown(
+            matched_construct_statistics
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "horizon_panel_contrasts.jsonl",
+        _jsonl_bytes(horizon_panel_contrasts),
+    )
+    _atomic_write(
+        output_directory / "horizon_panel_scorecard.csv",
+        _table_csv(
+            horizon_panel_scorecard_rows,
+            _HORIZON_PANEL_SCORECARD_FIELDS,
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "horizon_panel_scorecard.md",
+        _table_markdown(
+            horizon_panel_scorecard_rows,
+            _HORIZON_PANEL_SCORECARD_FIELDS,
+            title="Same-decision horizon-dose scorecard",
+            note=(
+                "Each complete panel holds the terminal decision fixed while "
+                "jointly increasing effective transitions, dependency depth, and "
+                "session handoffs. Nine physical members contribute one panel, "
+                "and the result is not interpreted as a pure handoff effect."
+            ),
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "horizon_panel_statistics.json",
+        _json_bytes(horizon_panel_statistics),
+    )
+    _atomic_write(
+        output_directory / "horizon_panel_statistics.md",
+        horizon_panel_statistics_markdown(
+            horizon_panel_statistics
+        ).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "drift_trajectories.json",
+        _json_bytes(drift_trajectory_payload),
+    )
+    _atomic_write(
+        output_directory / "drift_trajectories.md",
+        drift_trajectory_markdown(drift_trajectory_payload).encode("utf-8"),
+    )
+    if summary_payload["primary_analysis_unit"] == "episode":
+        episode_groups = {
+            episode_id: str(
+                dict(spec.plan.metadata).get("semantic_scenario", "unknown")
+            )
+            for episode_id, spec in specs.items()
+        }
+        statistics_payload = compute_episode_cluster_statistics(
+            observations,
+            episode_groups=episode_groups,
+            episode_group_name="semantic_scenario",
+        )
+    else:
+        statistics_payload = {
+            "schema_version": 1,
+            "status": "suppressed_dependent_physical_members",
+            "analysis_unit": summary_payload["primary_analysis_unit"],
+            "n_unique_episodes": len(specs),
+            "cells": [],
+            "paired_comparisons": [],
+            "reason": (
+                "Generic episode-clustered inference is suppressed because "
+                "counterfactual physical members are dependent repeated conditions. "
+                "Use the matched-construct or horizon-panel statistics artifact."
+            ),
+        }
     _atomic_write(
         output_directory / "statistics.json",
         _json_bytes(statistics_payload),
@@ -383,6 +882,24 @@ def write_qualification_report(
     _atomic_write(
         output_directory / "measurement_gates.md",
         measurement_gates_markdown(measurement_payload).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "experiment_design_audit.json",
+        _json_bytes(design_audit_payload),
+    )
+    _atomic_write(
+        output_directory / "experiment_design_audit.md",
+        experiment_design_audit_markdown(design_audit_payload).encode("utf-8"),
+    )
+    _atomic_write(
+        output_directory / "contribution_evidence.json",
+        _json_bytes(contribution_evidence_payload),
+    )
+    _atomic_write(
+        output_directory / "contribution_evidence.md",
+        contribution_evidence_markdown(
+            contribution_evidence_payload
+        ).encode("utf-8"),
     )
     _atomic_write(
         output_directory / "limitations.md",
@@ -417,14 +934,46 @@ def write_qualification_report(
         (name, _sha256_file(output_directory / name)) for name in sorted(artifact_names)
     )
     metadata = dict(run_metadata or {})
+    metadata.setdefault("analysis_phase", analysis_phase)
+    metadata.setdefault("analysis_timing", analysis_timing)
+    metadata.setdefault("experiment_design_audit_hash", design_audit_hash)
+    metadata.setdefault(
+        "experiment_design_audit_status",
+        design_audit_payload["audit_status"],
+    )
+    metadata.setdefault(
+        "balanced_mechanism_design_ready",
+        design_audit_payload["balanced_mechanism_design_ready"],
+    )
     for reserved in (
         "schema_version",
+        "policy_trace_schema_version",
         "run_identity",
         "artifact_hashes",
     ):
         metadata.pop(reserved, None)
+    routed_policy_fields = (
+        "provider",
+        "model_id",
+        "route_id",
+        "endpoint_identity",
+        "request_hash",
+        "response_hash",
+        "policy_request_hash",
+    )
+    policy_calls = rows["policy_calls.jsonl"]
+    policy_trace_schema_version = (
+        2
+        if policy_calls
+        and all(
+            all(isinstance(row.get(field), str) and row[field] for field in routed_policy_fields)
+            for row in policy_calls
+        )
+        else 1
+    )
     manifest = {
         "schema_version": REPORT_SCHEMA_VERSION,
+        "policy_trace_schema_version": policy_trace_schema_version,
         **metadata,
         "run_identity": matrix.run_identity,
         "artifact_hashes": dict(artifact_hashes),
@@ -436,6 +985,98 @@ def write_qualification_report(
         artifact_hashes=artifact_hashes,
         manifest_sha256=_sha256_file(manifest_path),
     )
+
+
+def _long_horizon_construct_rows(
+    matrix: QualificationMatrixResult,
+    specs: Mapping[str, SoftwareMem0VerticalSpec],
+) -> list[dict[str, object]]:
+    """Materialize one evaluator-side construct profile per evaluated SCEU."""
+    evaluated = {
+        str(getattr(task, "episode_id", "")) for task in matrix.task_results
+    }
+    output: list[dict[str, object]] = []
+    for episode_id in sorted(evaluated):
+        spec = specs.get(episode_id)
+        if spec is None:
+            continue
+        metadata = dict(spec.plan.metadata)
+        task_span = profile_task_span(spec.plan)
+        for sceu in spec.plan.sceu_units:
+            output.append(
+                {
+                    **profile_sceu(spec.plan, sceu).to_dict(),
+                    "semantic_scenario": metadata.get(
+                        "semantic_scenario", "unknown"
+                    ),
+                    "phase_signature": metadata.get("phase_signature", "unknown"),
+                    "recoverability_variant": metadata.get(
+                        "recoverability_variant", "unknown"
+                    ),
+                    "counterfactual_group_id": metadata.get(
+                        "counterfactual_group_id", ""
+                    ),
+                    "counterfactual_variant": metadata.get(
+                        "counterfactual_variant", ""
+                    ),
+                    "counterfactual_terminal_archetype": metadata.get(
+                        "terminal_archetype", ""
+                    ),
+                    "is_counterfactual_target": (
+                        sceu.opportunity_id
+                        == metadata.get(
+                            "counterfactual_target_opportunity_id",
+                            "",
+                        )
+                    ),
+                    "effective_task_step_count": (
+                        task_span.effective_step_count
+                    ),
+                    "max_task_dependency_depth": (
+                        task_span.max_dependency_depth
+                    ),
+                    "causally_linked_task_step_fraction": (
+                        task_span.causally_linked_step_fraction
+                    ),
+                }
+            )
+    return output
+
+
+def _task_span_rows(
+    matrix: QualificationMatrixResult,
+    specs: Mapping[str, SoftwareMem0VerticalSpec],
+) -> list[dict[str, object]]:
+    """Materialize one auditable effective-step profile per evaluated episode."""
+
+    evaluated = {
+        str(getattr(task, "episode_id", "")) for task in matrix.task_results
+    }
+    output: list[dict[str, object]] = []
+    for episode_id in sorted(evaluated):
+        spec = specs.get(episode_id)
+        if spec is None:
+            continue
+        metadata = spec.plan.metadata_dict
+        output.append(
+            {
+                **profile_task_span(spec.plan).to_dict(),
+                "construct_mode": metadata.get("construct_mode", "mixed"),
+                "counterfactual_group_id": metadata.get(
+                    "counterfactual_group_id",
+                    "",
+                ),
+                "counterfactual_variant": metadata.get(
+                    "counterfactual_variant",
+                    "",
+                ),
+                "counterfactual_terminal_archetype": metadata.get(
+                    "terminal_archetype",
+                    "",
+                ),
+            }
+        )
+    return output
 
 
 def _write_episode_reports(
@@ -461,6 +1102,20 @@ def _write_episode_reports(
         metrics = compute_multisystem_metrics(episode_rows)
         metrics_by_cell = compute_multisystem_metrics_by_cell(episode_rows)
         scorecard = list(compute_multisystem_scorecard(episode_rows))
+        failure_attribution = list(
+            compute_failure_attribution_scorecard(episode_rows)
+        )
+        long_horizon_scorecard = list(
+            compute_long_horizon_scorecard(episode_rows)
+        )
+        long_horizon_contrasts = list(
+            compute_long_horizon_control_contrasts(episode_rows)
+        )
+        drift_trajectories = compute_drift_trajectory_report(episode_rows)
+        decision_attributions = decision_attribution_rows(episode_rows)
+        fault_profile_divergence = compute_fault_profile_divergence(
+            decision_attributions
+        )
         statuses = tuple(row.status for row in episode_rows)
         summary = {
             "schema_version": REPORT_SCHEMA_VERSION,
@@ -488,6 +1143,57 @@ def _write_episode_reports(
             ),
             "scorecard.csv": _scorecard_csv(scorecard).encode("utf-8"),
             "scorecard.md": _scorecard_markdown(scorecard).encode("utf-8"),
+            "failure_attribution_scorecard.csv": _table_csv(
+                failure_attribution,
+                _FAILURE_ATTRIBUTION_SCORECARD_FIELDS,
+            ).encode("utf-8"),
+            "failure_attribution_scorecard.md": _table_markdown(
+                failure_attribution,
+                _FAILURE_ATTRIBUTION_SCORECARD_FIELDS,
+                title="Decision-aligned memory failure attribution",
+                note=(
+                    "Single-episode descriptive funnel; inference remains at the "
+                    "aggregate episode level."
+                ),
+            ).encode("utf-8"),
+            "decision_attribution.jsonl": _jsonl_bytes(
+                decision_attributions
+            ),
+            "fault_profile_divergence.json": _json_bytes(
+                fault_profile_divergence
+            ),
+            "fault_profile_divergence.md": fault_profile_divergence_markdown(
+                fault_profile_divergence
+            ).encode("utf-8"),
+            "long_horizon_scorecard.csv": _table_csv(
+                long_horizon_scorecard,
+                _LONG_HORIZON_SCORECARD_FIELDS,
+            ).encode("utf-8"),
+            "long_horizon_scorecard.md": _table_markdown(
+                long_horizon_scorecard,
+                _LONG_HORIZON_SCORECARD_FIELDS,
+                title="Long-horizon construct scorecard",
+                note=(
+                    "Single-episode descriptive breakdown by construct and horizon."
+                ),
+            ).encode("utf-8"),
+            "long_horizon_control_contrasts.csv": _table_csv(
+                long_horizon_contrasts,
+                _LONG_HORIZON_CONTROL_CONTRAST_FIELDS,
+            ).encode("utf-8"),
+            "long_horizon_control_contrasts.md": _table_markdown(
+                long_horizon_contrasts,
+                _LONG_HORIZON_CONTROL_CONTRAST_FIELDS,
+                title="Same-decision long-horizon control contrasts",
+                note=(
+                    "Single-episode paired comparisons against workspace-only "
+                    "and oracle-current-state."
+                ),
+            ).encode("utf-8"),
+            "drift_trajectories.json": _json_bytes(drift_trajectories),
+            "drift_trajectories.md": drift_trajectory_markdown(
+                drift_trajectories
+            ).encode("utf-8"),
             "summary.json": _json_bytes(summary),
         }
         for name, payload in payloads.items():
@@ -550,6 +1256,9 @@ def _limitations_markdown(
             for spec in evaluated_specs
         }
     )
+    evaluated_session_counts = sorted(
+        {spec.plan.n_sessions for spec in evaluated_specs}
+    )
     profiles = sorted(
         {str(getattr(task, "policy_profile_id", "unknown")) for task in matrix.task_results}
     )
@@ -559,6 +1268,12 @@ def _limitations_markdown(
             for task in matrix.task_results
             for condition in getattr(task, "condition_results", ())
         }
+    )
+    task_span_profiles = tuple(
+        profile_task_span(spec.plan) for spec in evaluated_specs
+    )
+    interaction_mode_counts = Counter(
+        profile.interaction_mode for profile in task_span_profiles
     )
     raw_gates = measurement_gates.get("gates", ())
     gates = (
@@ -585,10 +1300,14 @@ def _limitations_markdown(
         f"({', '.join(frozen_scenarios) or 'none'}).",
         f"- Evaluated phase schedules: {len(evaluated_schedules)} "
         f"({', '.join(evaluated_schedules) or 'none'}).",
+        "- Sessions per evaluated trajectory: "
+        f"{', '.join(str(value) for value in evaluated_session_counts) or 'none'}.",
         f"- Frozen-dataset phase schedules: {len(frozen_schedules)} "
         f"({', '.join(frozen_schedules) or 'none'}).",
         f"- Policy profiles: {', '.join(profiles) or 'none'}.",
         f"- Conditions: {', '.join(conditions) or 'none'}.",
+        "- Trajectory interaction modes: "
+        f"{dict(sorted(interaction_mode_counts.items()))!s}.",
         "- Policy-free fixed-action and opaque-option baselines use the full frozen "
         "dataset, not only the evaluated subset.",
         "- Generated trajectory/schedule variants are not independent semantic task templates; "
@@ -596,15 +1315,25 @@ def _limitations_markdown(
         "",
         "## Interpretation constraints",
         "",
+        "- This release evaluates critical continuation decisions sampled from replayable "
+        "persistent-task trajectories. Unless a task-span row is explicitly marked "
+        "`online_long_horizon_agent_execution`, it does not claim that the tested policy "
+        "executed hundreds or thousands of mutually dependent steps online. Current "
+        "long-horizon claims are restricted to delayed task-state control after audited "
+        "handoffs, state transitions, dependency depth, and workspace changes.",
         "- Lifecycle provenance (native event versus inventory-inferred change) and semantic "
         "state attribution are separate axes. Ambiguous semantic attribution earns no positive "
         "storage coverage.",
         "- Behaviorally used memory is a conservative lower bound from repeat-stable, "
         "state-targeted replacement interventions. Failure to identify a memory as used does "
-        "not prove that it had no influence.",
-        "- Targeted drift rates use preregistered category-specific opportunities. Observed "
-        "rates additionally report every canonical drift flag, and off-target drift is "
-        "reported separately rather than silently discarded.",
+        "not prove that it had no influence: redundant or compensable use may produce no "
+        "unique action-level effect.",
+        "- Targeted drift-compatible violation rates use preregistered category-specific "
+        "opportunities. Longitudinal drift onset additionally requires prior adherence at "
+        "an earlier distinct eligible checkpoint; first-observation errors are violations, "
+        "not observed drift. Off-target violations are reported separately.",
+        "- Matched static/evolution/conflict endpoint effects use counterfactual group as the "
+        "analysis unit. Their drift fields are violation excesses, not longitudinal onset.",
         "- Memory-count effects use matched within-opportunity contrasts and must not be "
         "interpreted as checkpoint-length scaling.",
         "- Controlled/common-readout and native-readout comparisons answer different questions "
@@ -1320,6 +2049,60 @@ def _summary(
     evaluated_episode_ids = sorted(
         {str(getattr(task, "episode_id", "")) for task in matrix.task_results}
     )
+    evaluated_specs = tuple(
+        specs[episode_id]
+        for episode_id in evaluated_episode_ids
+        if episode_id in specs
+    )
+    evaluated_group_ids = tuple(
+        sorted(
+            {
+                spec.plan.metadata_dict.get("counterfactual_group_id", "")
+                for spec in evaluated_specs
+                if spec.plan.metadata_dict.get("counterfactual_group_id", "")
+            }
+        )
+    )
+    frozen_group_ids = tuple(
+        sorted(
+            {
+                spec.plan.metadata_dict.get("counterfactual_group_id", "")
+                for spec in specs.values()
+                if spec.plan.metadata_dict.get("counterfactual_group_id", "")
+            }
+        )
+    )
+    evaluated_panel_ids = tuple(
+        sorted(
+            {
+                spec.plan.metadata_dict.get("horizon_panel_id", "")
+                for spec in evaluated_specs
+                if spec.plan.metadata_dict.get("horizon_panel_id", "")
+            }
+        )
+    )
+    frozen_panel_ids = tuple(
+        sorted(
+            {
+                spec.plan.metadata_dict.get("horizon_panel_id", "")
+                for spec in specs.values()
+                if spec.plan.metadata_dict.get("horizon_panel_id", "")
+            }
+        )
+    )
+    fully_grouped = bool(evaluated_specs) and all(
+        spec.plan.metadata_dict.get("counterfactual_group_id", "")
+        for spec in evaluated_specs
+    )
+    fully_panelled = bool(evaluated_specs) and all(
+        spec.plan.metadata_dict.get("horizon_panel_id", "")
+        for spec in evaluated_specs
+    )
+    primary_analysis_unit = (
+        "horizon_panel"
+        if fully_panelled
+        else ("counterfactual_group" if fully_grouped else "episode")
+    )
     observed_task_count = len(matrix.task_results)
     planned_task_count = (
         observed_task_count if expected_task_count is None else expected_task_count
@@ -1335,6 +2118,29 @@ def _summary(
         "n_missing_task_results": planned_task_count - observed_task_count,
         "n_evaluated_episodes": len(evaluated_episode_ids),
         "n_frozen_dataset_episodes": len(specs),
+        "construct_mode": (
+            "horizon_panels"
+            if fully_panelled
+            else ("matched_triplets" if fully_grouped else "mixed")
+        ),
+        "primary_analysis_unit": primary_analysis_unit,
+        "n_physical_episodes": len(evaluated_episode_ids),
+        "n_frozen_physical_episodes": len(specs),
+        "n_counterfactual_groups": len(evaluated_group_ids),
+        "n_frozen_counterfactual_groups": len(frozen_group_ids),
+        "n_horizon_panels": len(evaluated_panel_ids),
+        "n_frozen_horizon_panels": len(frozen_panel_ids),
+        "n_statistical_units": (
+            len(evaluated_panel_ids)
+            if primary_analysis_unit == "horizon_panel"
+            else (
+                len(evaluated_group_ids)
+                if primary_analysis_unit == "counterfactual_group"
+                else len(evaluated_episode_ids)
+            )
+        ),
+        "counterfactual_group_ids": list(evaluated_group_ids),
+        "horizon_panel_ids": list(evaluated_panel_ids),
         "evaluated_episode_ids": evaluated_episode_ids,
         "task_status_counts": dict(sorted(statuses.items())),
         "condition_status_counts": dict(sorted(condition_statuses.items())),
@@ -1601,7 +2407,7 @@ def _scorecard_rows(
             targeted = set(_CANONICAL_DRIFT_CATEGORIES) if eligible is None else set(eligible)
             return bool(targeted.intersection(row.normalized_drift_flags))
 
-        def has_observed_drift(row: SCEURunResult) -> bool:
+        def has_canonical_drift_violation(row: SCEURunResult) -> bool:
             return bool(set(_CANONICAL_DRIFT_CATEGORIES).intersection(row.normalized_drift_flags))
 
         def has_off_target_drift(row: SCEURunResult) -> bool:
@@ -1657,7 +2463,27 @@ def _scorecard_rows(
                     sum(1 for row in rows if _live_memory_count_from_row(row) is not None),
                 ),
                 "causal_memory_use_rate": _ratio_value(
-                    sum(label in {"beneficial", "harmful"} for label in causal),
+                    sum(
+                        label
+                        in {
+                            "beneficial",
+                            "harmful",
+                            "causal_direction_ambiguous",
+                        }
+                        for label in causal
+                    ),
+                    len(causal),
+                ),
+                "unique_causal_effect_rate": _ratio_value(
+                    sum(
+                        label
+                        in {
+                            "beneficial",
+                            "harmful",
+                            "causal_direction_ambiguous",
+                        }
+                        for label in causal
+                    ),
                     len(causal),
                 ),
                 "beneficial_intervention_rate": _ratio_value(
@@ -1693,18 +2519,30 @@ def _scorecard_rows(
                 "constraint_loss_eligible_n": len(eligible_by_flag["constraint_loss"]),
                 "targeted_constraint_loss_rate": targeted_rates["constraint_loss"],
                 "observed_constraint_loss_rate": observed_rates["constraint_loss"],
+                "canonical_constraint_loss_violation_rate": observed_rates[
+                    "constraint_loss"
+                ],
                 "current_plan_deviation_rate": targeted_rates["plan_deviation"],
                 "plan_deviation_eligible_n": len(eligible_by_flag["plan_deviation"]),
                 "targeted_plan_deviation_rate": targeted_rates["plan_deviation"],
                 "observed_plan_deviation_rate": observed_rates["plan_deviation"],
+                "canonical_plan_deviation_violation_rate": observed_rates[
+                    "plan_deviation"
+                ],
                 "stale_state_action_rate": targeted_rates["stale_state"],
                 "stale_state_eligible_n": len(eligible_by_flag["stale_state"]),
                 "targeted_stale_state_rate": targeted_rates["stale_state"],
                 "observed_stale_state_rate": observed_rates["stale_state"],
+                "canonical_stale_state_violation_rate": observed_rates[
+                    "stale_state"
+                ],
                 "local_over_global_rate": targeted_rates["local_over_global"],
                 "local_over_global_eligible_n": len(eligible_by_flag["local_over_global"]),
                 "targeted_local_over_global_rate": targeted_rates["local_over_global"],
                 "observed_local_over_global_rate": observed_rates["local_over_global"],
+                "canonical_local_over_global_violation_rate": observed_rates[
+                    "local_over_global"
+                ],
                 "aggregate_drift_rate": _ratio_value(
                     sum(has_targeted_drift(row) for row in aggregate_eligible),
                     len(aggregate_eligible),
@@ -1715,7 +2553,11 @@ def _scorecard_rows(
                     len(aggregate_eligible),
                 ),
                 "observed_aggregate_drift_rate": _ratio_value(
-                    sum(has_observed_drift(row) for row in rows),
+                    sum(has_canonical_drift_violation(row) for row in rows),
+                    len(rows),
+                ),
+                "canonical_drift_violation_rate": _ratio_value(
+                    sum(has_canonical_drift_violation(row) for row in rows),
                     len(rows),
                 ),
                 "off_target_drift_rate": _ratio_value(

@@ -34,7 +34,9 @@ from lhmsb.longhorizon.schema import SCEU, ActionSpec, SessionSurface, StateUnit
 from lhmsb.qualification.config import NO_PREFIX_ARTIFACT, canonical_hash
 from lhmsb.qualification.context import build_public_history_units, render_full_context
 from lhmsb.qualification.drift import (
+    DRIFT_LINEAGE_EVIDENCE_MODE,
     drift_eligible_categories,
+    drift_lineage_pairs,
     normalized_action_drift,
 )
 from lhmsb.qualification.memory_runtime import (
@@ -61,15 +63,17 @@ from lhmsb.qualification.schema import (
     ReadoutKind,
 )
 
-_SYSTEM_PROMPT = (
-    "Continue the software project using only the supplied current-session surface, "
-    "workspace, and optional context. Select exactly one opaque implementation option."
+_TASK_STATE_CONTROL_RULES = (
+    "A later valid replacement or revocation supersedes an earlier plan. A "
+    "project-owner constraint governs a local-operator plan unless a current "
+    "project-owner decision explicitly grants an exception for the continuation's "
+    "scope; a scoped exception must not be generalized outside that scope."
 )
 
-_ORACLE_AUTHORITY_RULE = (
-    "Authority resolution (evaluator-provided): a project-owner constraint governs a "
-    "local-operator plan unless a current project-owner decision explicitly grants a "
-    "scoped exception."
+_SYSTEM_PROMPT = (
+    "Continue the software project using only the supplied current-session surface, "
+    "workspace, and optional context. Apply these stable task-governance rules: "
+    f"{_TASK_STATE_CONTROL_RULES} Select exactly one opaque implementation option."
 )
 
 
@@ -236,6 +240,8 @@ class EvaluationSCEUResult:
     selected_memory_ids: tuple[str, ...] = ()
     behaviorally_used_memory_ids: tuple[str, ...] = ()
     drift_eligible_categories: tuple[str, ...] | None = None
+    drift_lineage_pairs: tuple[tuple[str, str], ...] = ()
+    drift_lineage_evidence_mode: str = "unavailable"
     current_state_signature: str = ""
 
     @property
@@ -280,6 +286,8 @@ class EvaluationSCEUResult:
                 if self.drift_eligible_categories is None
                 else list(self.drift_eligible_categories)
             ),
+            "drift_lineage_pairs": [list(item) for item in self.drift_lineage_pairs],
+            "drift_lineage_evidence_mode": self.drift_lineage_evidence_mode,
             "current_state_signature": self.current_state_signature,
         }
 
@@ -472,6 +480,7 @@ def evaluate_task(
                 actions,
                 count_add_levels=profile.visible_memory_count_add_levels,
                 count_opportunity_ids=profile.visible_memory_count_opportunity_ids,
+                count_enabled=profile.enable_memory_count_interventions,
                 enabled=not _is_control(task.condition),
             )
             primary = baselines[0]
@@ -524,6 +533,8 @@ def evaluate_task(
                         spec,
                         sceu,
                     ),
+                    drift_lineage_pairs=drift_lineage_pairs(spec, sceu),
+                    drift_lineage_evidence_mode=DRIFT_LINEAGE_EVIDENCE_MODE,
                     current_state_signature=_current_state_signature(
                         spec,
                         sceu.checkpoint_session,
@@ -850,6 +861,7 @@ def _interventions(
     *,
     count_add_levels: Sequence[int],
     count_opportunity_ids: Sequence[str],
+    count_enabled: bool,
     enabled: bool,
 ) -> tuple[EvaluationIntervention, ...]:
     if not enabled:
@@ -1076,7 +1088,7 @@ def _interventions(
     # while checkpoint, workspace, target-state evidence, and policy remain
     # fixed.  This is a causal visible-object load test; endogenous native
     # store size is reported separately and is not given a causal reading.
-    if sceu.opportunity_id in set(count_opportunity_ids):
+    if count_enabled and sceu.opportunity_id in set(count_opportunity_ids):
         for add_count in count_add_levels:
             added = tuple(
                 _count_control_candidate(
@@ -1465,7 +1477,6 @@ def _oracle_context(
     return (
         "Current project state (evaluator-provided):\n"
         + "\n".join(f"- {line}" for line in lines)
-        + f"\n{_ORACLE_AUTHORITY_RULE}"
     )
 
 

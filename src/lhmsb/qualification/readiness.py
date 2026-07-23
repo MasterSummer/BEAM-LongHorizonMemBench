@@ -6,15 +6,27 @@ import math
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 
+from lhmsb.families.software.matched_constructs import (
+    audit_matched_construct_triplet,
+)
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.families.software.vertical_checker import (
     BehaviorResult,
     assess_software_action,
 )
+from lhmsb.longhorizon.constructs import profile_sceu
+from lhmsb.longhorizon.task_span import (
+    profile_task_span,
+)
 from lhmsb.qualification.drift import (
     CANONICAL_DRIFT_CATEGORIES,
     drift_eligible_categories,
     normalized_action_drift,
+)
+from lhmsb.qualification.longitudinal import compute_drift_trajectory_report
+from lhmsb.qualification.metrics import (
+    MultisystemMetricInput,
+    compute_matched_construct_contrasts,
 )
 
 BASELINE_STABILITY_MIN = 0.90
@@ -28,7 +40,16 @@ SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN = 0.90
 FLAT_CAUSAL_PROBE_COVERAGE_MIN = 0.50
 _ONE_SIDED_95_Z = 1.6448536269514722
 _MEMORY_CONDITIONS = frozenset({"flat_retrieval", "mem0", "amem", "memos"})
+_LONGITUDINAL_CONTROL_CONDITIONS = (
+    "oracle_current_state",
+    "full_context",
+)
 _DRIFT_CATEGORIES = CANONICAL_DRIFT_CATEGORIES
+_MATCHED_CONTROL_VARIANTS = (
+    "static",
+    "evolution",
+    "hierarchical_conflict",
+)
 
 
 def compute_heuristic_baselines(
@@ -257,6 +278,7 @@ def compute_measurement_gates(
     heuristic_baselines: Mapping[str, object],
     drift_calibration: Mapping[str, object] | None = None,
     expected_task_count: int | None = None,
+    observations: Sequence[MultisystemMetricInput] = (),
 ) -> dict[str, object]:
     """Evaluate preregistered scientific gates without changing run results."""
     tasks = tuple(getattr(matrix, "task_results", ()))
@@ -308,6 +330,572 @@ def compute_measurement_gates(
     lifecycle = summary.get("storage_provenance")
     semantic = summary.get("semantic_attribution")
     gates: list[dict[str, object]] = []
+
+    evaluated_episode_ids = {
+        str(getattr(task, "episode_id", "")) for task in tasks
+    }
+    construct_profiles = tuple(
+        profile_sceu(spec.plan, sceu)
+        for episode_id, spec in sorted(specs.items())
+        if episode_id in evaluated_episode_ids
+        for sceu in spec.plan.sceu_units
+    )
+    expected_construct_profiles = sum(
+        len(spec.plan.sceu_units)
+        for episode_id, spec in specs.items()
+        if episode_id in evaluated_episode_ids
+    )
+    _gate_ratio(
+        gates,
+        "long_horizon_construct_profile_completeness",
+        len(construct_profiles),
+        expected_construct_profiles,
+        minimum=1.0,
+        description=(
+            "Every evaluated continuation has an explicit handoff, dependency, "
+            "transition, and workspace-recoverability profile."
+        ),
+    )
+    future_overlap = {
+        f"{profile.episode_id}|{profile.sceu_id}": sorted(
+            set(profile.current_required_state_ids).intersection(
+                profile.future_referenced_state_ids
+            )
+        )
+        for profile in construct_profiles
+        if set(profile.current_required_state_ids).intersection(
+            profile.future_referenced_state_ids
+        )
+    }
+    _gate_boolean(
+        gates,
+        "current_state_future_leakage",
+        not future_overlap,
+        applicable=bool(construct_profiles),
+        description=(
+            "No future state is counted as currently required at an early decision."
+        ),
+        detail={"overlap_by_sceu": future_overlap},
+    )
+    missing_action_state = {
+        f"{profile.episode_id}|{profile.sceu_id}": list(
+            profile.missing_current_action_relevant_state_ids
+        )
+        for profile in construct_profiles
+        if profile.missing_current_action_relevant_state_ids
+    }
+    _gate_boolean(
+        gates,
+        "current_action_state_contract_completeness",
+        not missing_action_state,
+        applicable=bool(construct_profiles),
+        description=(
+            "Every current state atom that can make an offered executable "
+            "action valid or invalid is included in the SCEU required-state "
+            "closure; oracle controls therefore receive a sufficient state "
+            "contract."
+        ),
+        detail={"missing_by_sceu": missing_action_state},
+    )
+    construct_counts = Counter(
+        profile.construct_kind for profile in construct_profiles
+    )
+    required_constructs = {
+        "static_recall",
+        "state_evolution",
+        "hierarchical_conflict",
+    }
+    _gate_boolean(
+        gates,
+        "long_horizon_construct_coverage",
+        required_constructs.issubset(construct_counts),
+        applicable=bool(construct_profiles),
+        description=(
+            "The evaluated release includes static, evolving-state, and "
+            "hierarchical-conflict decisions under one task contract."
+        ),
+        detail=dict(sorted(construct_counts.items())),
+    )
+
+    evaluated_specs = tuple(
+        spec
+        for episode_id, spec in sorted(specs.items())
+        if episode_id in evaluated_episode_ids
+    )
+    evaluated_horizon_panel_ids = {
+        spec.plan.metadata_dict.get("horizon_panel_id", "")
+        for spec in evaluated_specs
+        if spec.plan.metadata_dict.get("horizon_panel_id", "")
+    }
+    horizon_release = bool(evaluated_horizon_panel_ids) and all(
+        spec.plan.metadata_dict.get("horizon_panel_id", "")
+        for spec in evaluated_specs
+    )
+    task_span_profiles = tuple(
+        profile_task_span(spec.plan)
+        for spec in evaluated_specs
+        if spec.plan.task_steps
+    )
+    threshold_task_span_profiles = tuple(
+        profile_task_span(spec.plan)
+        for spec in evaluated_specs
+        if spec.plan.task_steps
+        and (
+            not horizon_release
+            or spec.plan.metadata_dict.get("horizon_level", "") == "long"
+        )
+    )
+    _gate_ratio(
+        gates,
+        "task_span_provenance_completeness",
+        len(task_span_profiles),
+        sum(bool(spec.plan.task_steps) for spec in evaluated_specs),
+        minimum=1.0,
+        description=(
+            "Every episode claiming an effective task span exposes step-level "
+            "execution mode, dependency, session, state, and workspace provenance."
+        ),
+    )
+    _gate_ratio(
+        gates,
+        "effective_long_horizon_step_threshold",
+        sum(
+            profile.meets_long_horizon_step_threshold
+            for profile in threshold_task_span_profiles
+        ),
+        len(threshold_task_span_profiles),
+        minimum=1.0,
+        description=(
+            "Each long-dose terminal decision has at least 200 effective causal "
+            "ancestors whose semantic effects pass the anti-padding audit; "
+            "short and medium members are comparison doses, and token count is "
+            "not used as the horizon variable."
+        ),
+    )
+    _gate_ratio(
+        gates,
+        "task_step_causal_linkage",
+        sum(
+            profile.causally_linked_step_fraction is not None
+            and profile.causally_linked_step_fraction >= 0.99
+            for profile in task_span_profiles
+        ),
+        len(task_span_profiles),
+        minimum=1.0,
+        description=(
+            "At least 99% of effective steps in every long-horizon trace are roots "
+            "or have an explicit dependency on an earlier effective step."
+        ),
+    )
+    _gate_ratio(
+        gates,
+        "task_step_effect_chain_integrity",
+        sum(profile.effect_chain_verified for profile in task_span_profiles),
+        len(task_span_profiles),
+        minimum=1.0,
+        description=(
+            "Every claimed effective step has a verified operation digest and "
+            "the exact effect digests of its causal predecessors."
+        ),
+    )
+    _gate_ratio(
+        gates,
+        "task_step_anti_padding_integrity",
+        sum(profile.anti_padding_verified for profile in task_span_profiles),
+        len(task_span_profiles),
+        minimum=1.0,
+        description=(
+            "Every counted effective step produces a unique semantic task "
+            "effect, and every pre-decision effect is consumed by a later step "
+            "or scored continuation."
+        ),
+    )
+
+    counterfactual_groups: dict[str, list[SoftwareMem0VerticalSpec]] = (
+        defaultdict(list)
+    )
+    for spec in evaluated_specs:
+        group_id = spec.plan.metadata_dict.get("counterfactual_group_id", "")
+        if group_id:
+            counterfactual_groups[group_id].append(spec)
+    matched_release = bool(counterfactual_groups)
+    matched_audits = tuple(
+        audit_matched_construct_triplet(tuple(counterfactual_groups[group_id]))
+        for group_id in sorted(counterfactual_groups)
+    )
+    matched_balance_applicable = (
+        bool(counterfactual_groups)
+        and (
+            len(evaluated_horizon_panel_ids) >= 3
+            if horizon_release
+            else len(matched_audits) >= 3
+        )
+    )
+    _gate_boolean(
+        gates,
+        "matched_construct_structural_invariance",
+        bool(matched_audits) and all(audit.ok for audit in matched_audits),
+        applicable=bool(counterfactual_groups),
+        description=(
+            "Every counterfactual triplet fixes the terminal decision, opaque "
+            "options, and prefix/workspace shape while manipulating only the "
+            "long-horizon construct."
+        ),
+        detail={audit.group_id: audit.to_dict() for audit in matched_audits},
+    )
+    _gate_boolean(
+        gates,
+        "matched_gold_action_balance",
+        {
+            action_id
+            for audit in matched_audits
+            for action_id in audit.gold_action_ids
+        }
+        == {"safe_v2_offline", "stale_v1", "cloud_shortcut"},
+        applicable=matched_balance_applicable,
+        description=(
+            "At least three matched groups cover all three terminal gold actions, "
+            "so no default-safe action can solve the construct comparison."
+        ),
+    )
+    recoverability_by_group = {
+        group_id: {
+            spec.plan.metadata_dict.get("recoverability_variant", "")
+            for spec in group_specs
+        }
+        for group_id, group_specs in counterfactual_groups.items()
+    }
+    _gate_boolean(
+        gates,
+        "matched_workspace_recoverability_balance",
+        {
+            next(iter(values))
+            for values in recoverability_by_group.values()
+            if len(values) == 1
+        }
+        == {"explicit", "derivable", "absent"}
+        and all(len(values) == 1 for values in recoverability_by_group.values()),
+        applicable=matched_balance_applicable,
+        description=(
+            "At least three matched groups cover explicit, derivable, and absent "
+            "workspace recoverability, with one consistent variant per triplet."
+        ),
+        detail={
+            group_id: sorted(values)
+            for group_id, values in sorted(recoverability_by_group.items())
+        },
+    )
+    matched_contrasts = compute_matched_construct_contrasts(observations)
+    expected_matched_decisions = {
+        (
+            spec.plan.metadata_dict.get("counterfactual_group_id", ""),
+            spec.plan.metadata_dict.get(
+                "counterfactual_target_opportunity_id",
+                "",
+            ),
+        )
+        for spec in evaluated_specs
+        if spec.plan.metadata_dict.get("counterfactual_group_id", "")
+        and spec.plan.metadata_dict.get(
+            "counterfactual_target_opportunity_id",
+            "",
+        )
+    }
+    evaluated_policy_profile_ids = {
+        str(getattr(task, "policy_profile_id", "unknown"))
+        for task in tasks
+    }
+    _gate_boolean(
+        gates,
+        "matched_construct_outcome_completeness",
+        bool(matched_contrasts)
+        and all(row.get("complete") is True for row in matched_contrasts),
+        applicable=bool(counterfactual_groups),
+        description=(
+            "Every reported policy/backend/readout counterfactual cell contains "
+            "static, state-evolution, and hierarchical-conflict outcomes."
+        ),
+        detail={"n_contrasts": len(matched_contrasts)},
+    )
+    workspace_adjusted_fields = (
+        "state_evolution_penalty_excess_over_workspace",
+        "hierarchical_conflict_penalty_excess_over_workspace",
+    )
+    _gate_boolean(
+        gates,
+        "matched_workspace_adjustment_available",
+        bool(matched_contrasts)
+        and all(
+            row.get("workspace_matched_control_available") is True
+            and all(
+                isinstance(row.get(field), int | float)
+                and not isinstance(row.get(field), bool)
+                for field in workspace_adjusted_fields
+            )
+            for row in matched_contrasts
+        ),
+        applicable=bool(counterfactual_groups),
+        description=(
+            "Every matched construct cell has a same-policy workspace-only "
+            "triplet and finite difference-in-differences, so a changed "
+            "workspace surface is not attributed to the memory channel."
+        ),
+        detail={
+            "required_fields": list(workspace_adjusted_fields),
+            "n_contrasts": len(matched_contrasts),
+        },
+    )
+    for condition, gate_id, description in (
+        (
+            "oracle_current_state",
+            "matched_oracle_terminal_contract_solvability",
+            (
+                "For every evaluated policy, oracle current state solves the "
+                "same terminal decision across static, state-evolution, and "
+                "hierarchical-conflict histories."
+            ),
+        ),
+        (
+            "full_context",
+            "matched_full_context_terminal_contract_solvability",
+            (
+                "For every evaluated policy, complete public history supports "
+                "the same terminal decision across static, state-evolution, "
+                "and hierarchical-conflict histories; otherwise a memory "
+                "failure is confounded with history interpretation."
+            ),
+        ),
+    ):
+        control_detail = _matched_control_solvability_detail(
+            matched_contrasts,
+            condition=condition,
+            expected_decisions=expected_matched_decisions,
+            expected_policy_profile_ids=evaluated_policy_profile_ids,
+        )
+        _gate_boolean(
+            gates,
+            gate_id,
+            bool(control_detail["all_cells_pass"]),
+            applicable=matched_release,
+            description=description,
+            detail=control_detail,
+        )
+
+    drift_trajectory_payload = compute_drift_trajectory_report(observations)
+    raw_drift_trajectories = drift_trajectory_payload.get("trajectories", ())
+    drift_trajectories = tuple(
+        row
+        for row in raw_drift_trajectories
+        if isinstance(row, Mapping)
+    ) if isinstance(raw_drift_trajectories, Sequence) else ()
+    repeated_any_by_category = Counter(
+        str(row.get("drift_category", ""))
+        for row in drift_trajectories
+        if isinstance(
+            (checkpoint_count := row.get("eligible_checkpoint_count")),
+            int,
+        )
+        and not isinstance(checkpoint_count, bool)
+        and checkpoint_count >= 2
+    )
+    repeated_by_category = Counter(
+        str(row.get("drift_category", ""))
+        for row in drift_trajectories
+        if bool(row.get("lineage_backed"))
+        and isinstance(
+            (checkpoint_count := row.get("eligible_checkpoint_count")),
+            int,
+        )
+        and not isinstance(checkpoint_count, bool)
+        and checkpoint_count >= 2
+    )
+    anchored_by_category = Counter(
+        str(row.get("drift_category", ""))
+        for row in drift_trajectories
+        if bool(row.get("lineage_backed"))
+        and bool(row.get("drift_evaluable"))
+    )
+    category_only_by_category = Counter(
+        str(row.get("drift_category", ""))
+        for row in drift_trajectories
+        if not bool(row.get("lineage_backed"))
+        and isinstance(
+            (checkpoint_count := row.get("eligible_checkpoint_count")),
+            int,
+        )
+        and not isinstance(checkpoint_count, bool)
+        and checkpoint_count >= 2
+    )
+    longitudinal_applicable = bool(repeated_any_by_category)
+    _gate_boolean(
+        gates,
+        "longitudinal_drift_state_lineage_coverage",
+        all(
+            repeated_by_category[category] > 0
+            and category_only_by_category[category] == 0
+            for category in _DRIFT_CATEGORIES
+        ),
+        applicable=longitudinal_applicable,
+        description=(
+            "Every repeated-checkpoint trajectory used for a longitudinal claim "
+            "is anchored to an explicit or evaluator-derived state lineage; "
+            "category-only legacy trajectories remain descriptive only."
+        ),
+        detail={
+            category: {
+                "repeated_lineage_backed": repeated_by_category[category],
+                "repeated_category_only": category_only_by_category[category],
+            }
+            for category in _DRIFT_CATEGORIES
+        },
+    )
+    _gate_boolean(
+        gates,
+        "longitudinal_drift_repeated_checkpoint_coverage",
+        all(repeated_by_category[category] > 0 for category in _DRIFT_CATEGORIES),
+        applicable=longitudinal_applicable,
+        description=(
+            "Every claimed drift category is observed at two or more distinct "
+            "eligible checkpoints within at least one episode/cell."
+        ),
+        detail={
+            category: repeated_by_category[category]
+            for category in _DRIFT_CATEGORIES
+        },
+    )
+    _gate_boolean(
+        gates,
+        "longitudinal_drift_adherence_anchor_coverage",
+        all(anchored_by_category[category] > 0 for category in _DRIFT_CATEGORIES),
+        applicable=longitudinal_applicable,
+        description=(
+            "Every claimed drift category has at least one trajectory with prior "
+            "adherence and a later eligible checkpoint, so onset is identifiable."
+        ),
+        detail={
+            category: anchored_by_category[category]
+            for category in _DRIFT_CATEGORIES
+        },
+    )
+    control_coverage: dict[str, dict[str, int]] = {
+        condition: {
+            category: sum(
+                str(row.get("condition", "")) == condition
+                and str(row.get("drift_category", "")) == category
+                and bool(row.get("lineage_backed"))
+                and bool(row.get("drift_evaluable"))
+                for row in drift_trajectories
+            )
+            for category in _DRIFT_CATEGORIES
+        }
+        for condition in _LONGITUDINAL_CONTROL_CONDITIONS
+    }
+    control_drift: dict[str, dict[str, int]] = {
+        condition: {
+            category: sum(
+                str(row.get("condition", "")) == condition
+                and str(row.get("drift_category", "")) == category
+                and bool(row.get("lineage_backed"))
+                and bool(row.get("drift_evaluable"))
+                and bool(row.get("event_observed"))
+                for row in drift_trajectories
+            )
+            for category in _DRIFT_CATEGORIES
+        }
+        for condition in _LONGITUDINAL_CONTROL_CONDITIONS
+    }
+    _gate_boolean(
+        gates,
+        "longitudinal_drift_control_cleanliness",
+        all(
+            control_coverage[condition][category] > 0
+            and control_drift[condition][category] == 0
+            for condition in _LONGITUDINAL_CONTROL_CONDITIONS
+            for category in _DRIFT_CATEGORIES
+        ),
+        applicable=longitudinal_applicable,
+        description=(
+            "Oracle-current-state and full-context controls both cover every "
+            "state-lineage drift category and show no adherence-to-violation "
+            "transition; otherwise the observed drift is not memory-specific."
+        ),
+        detail={
+            "evaluable_trajectory_count": control_coverage,
+            "observed_drift_count": control_drift,
+        },
+    )
+
+    memory_observations = tuple(
+        row
+        for row in observations
+        if str(getattr(row, "condition", "")) in _MEMORY_CONDITIONS
+        and str(getattr(row, "readout", "none")) != "none"
+    )
+    attributable = tuple(
+        row
+        for row in memory_observations
+        if bool(getattr(row, "memory_reliant_state_ids", ()))
+    )
+    attribution_stages = tuple(
+        row.decision_attribution().stage
+        for row in attributable
+    )
+    supported_stages = {
+        "storage_evidence_unavailable",
+        "storage_failure",
+        "retrieval_failure",
+        "exposure_failure",
+        "utilization_failure",
+        "behavior_success_causal",
+        "behavior_success_without_detected_unique_causal_effect",
+        # Completed schema-v1 reports can still be audited.
+        "behavior_success_without_detected_use",
+        "behavior_success_unprobed",
+    }
+    _gate_ratio(
+        gates,
+        "decision_failure_attribution_completeness",
+        sum(stage in supported_stages for stage in attribution_stages),
+        len(attributable),
+        minimum=1.0,
+        description=(
+            "Every memory-reliant decision has one explicit earliest failure or "
+            "success stage on the stored-to-used chain."
+        ),
+    )
+    _gate_ratio(
+        gates,
+        "decision_storage_evidence_availability",
+        sum(stage != "storage_evidence_unavailable" for stage in attribution_stages),
+        len(attributable),
+        minimum=1.0,
+        description=(
+            "Every memory-reliant decision has native/exact or inventory-inferred "
+            "storage evidence before a storage failure is attributed."
+        ),
+    )
+    causal_evidence_violations = {
+        str(getattr(row, "result_id", "")): sorted(
+            set(getattr(row, "behaviorally_used_state_ids", ())).difference(
+                getattr(row, "behaviorally_probed_state_ids", ())
+            )
+        )
+        for row in memory_observations
+        if set(getattr(row, "behaviorally_used_state_ids", ())).difference(
+            getattr(row, "behaviorally_probed_state_ids", ())
+        )
+    }
+    _gate_boolean(
+        gates,
+        "causal_use_evidence_consistency",
+        not causal_evidence_violations,
+        applicable=bool(memory_observations),
+        description=(
+            "A state is labelled behaviorally used only when a registered "
+            "counterfactual probe targeted that state."
+        ),
+        detail={"violations_by_result": causal_evidence_violations},
+    )
 
     completed = sum(
         str(getattr(task, "status", "")) == "complete"
@@ -516,7 +1104,11 @@ def compute_measurement_gates(
     _gate_scalar(
         gates,
         "action_dominance",
-        best_accuracy,
+        (
+            best_accuracy
+            if not counterfactual_groups or matched_balance_applicable
+            else None
+        ),
         maximum=MAX_ALWAYS_ACTION_ACCURACY,
         description="No fixed action solves more than the preregistered share.",
     )
@@ -524,7 +1116,11 @@ def compute_measurement_gates(
     _gate_scalar(
         gates,
         "option_dominance",
-        best_option_accuracy,
+        (
+            best_option_accuracy
+            if not counterfactual_groups or matched_balance_applicable
+            else None
+        ),
         maximum=MAX_ALWAYS_OPTION_ACCURACY,
         description="No fixed opaque option position solves the benchmark.",
     )
@@ -559,17 +1155,27 @@ def compute_measurement_gates(
         gates,
         "drift_action_calibration",
         calibration.get("all_categories_calibrated") is True
-        and calibration.get("all_represented_scenarios_calibrated") is True,
+        and (
+            matched_release
+            or calibration.get("all_represented_scenarios_calibrated") is True
+        ),
         applicable=bool(specs),
         description=(
             "Every drift construct has checker-positive and checker-negative actions, "
             "including an invalid positive and no gold-valid false positive, within "
-            "every represented semantic scenario."
+            "the declared release unit. Standard trajectories require this within "
+            "every semantic scenario; matched triplets require it across the balanced "
+            "counterfactual release because terminal archetypes are rotated by group."
         ),
         detail={
             "all_categories_calibrated": calibration.get("all_categories_calibrated"),
             "all_represented_scenarios_calibrated": calibration.get(
                 "all_represented_scenarios_calibrated"
+            ),
+            "calibration_unit": (
+                "matched_counterfactual_release"
+                if matched_release
+                else "semantic_scenario"
             ),
         },
     )
@@ -580,16 +1186,48 @@ def compute_measurement_gates(
         "workspace_oracle_action_separation",
         bool(divergence_by_episode)
         and min(divergence_by_episode.values()) >= MIN_CONTROL_ACTION_DIVERGENCES_PER_EPISODE,
-        applicable=bool(divergence_by_episode),
+        applicable=bool(divergence_by_episode) and not matched_release,
         description="Workspace-only and oracle require distinct behavior within every episode.",
         detail=dict(sorted(divergence_by_episode.items())),
+    )
+    matched_divergence = _matched_control_action_divergence(
+        divergence_by_episode,
+        specs,
+    )
+    raw_absent_group_divergence = matched_divergence[
+        "absent_group_divergence"
+    ]
+    absent_group_divergence = (
+        raw_absent_group_divergence
+        if isinstance(raw_absent_group_divergence, Mapping)
+        else {}
+    )
+    _gate_boolean(
+        gates,
+        "matched_workspace_oracle_action_separation",
+        bool(absent_group_divergence)
+        and all(
+            isinstance(count, int) and count >= 1
+            for count in absent_group_divergence.values()
+        ),
+        applicable=matched_release and bool(divergence_by_episode),
+        description=(
+            "Every workspace-absent counterfactual group contains at least one "
+            "terminal decision on which workspace-only and oracle choose different "
+            "actions. The triplet, rather than a one-decision physical member, is "
+            "the unit for this gate."
+        ),
+        detail=matched_divergence,
     )
     drift_separation = _control_drift_separation(condition_records)
     _gate_boolean(
         gates,
         "workspace_oracle_drift_separation",
         all(drift_separation[category] > 0 for category in _DRIFT_CATEGORIES),
-        applicable=bool(drift_separation.get("matched_pairs", 0)),
+        applicable=(
+            bool(drift_separation.get("matched_pairs", 0))
+            and not matched_release
+        ),
         description=(
             "Workspace-only produces every canonical behavioral-drift construct at "
             "least once while the matched oracle continuation does not."
@@ -661,6 +1299,7 @@ def compute_measurement_gates(
             "min_control_action_divergences_per_episode": (
                 MIN_CONTROL_ACTION_DIVERGENCES_PER_EPISODE
             ),
+            "min_control_action_divergences_per_absent_counterfactual_group": 1,
             "semantic_attribution_resolvability_min": (SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN),
             "flat_causal_probe_coverage_min": FLAT_CAUSAL_PROBE_COVERAGE_MIN,
         },
@@ -778,9 +1417,51 @@ def _control_action_divergence(
         for opportunity_id in opportunities:
             workspace = selected.get((episode_id, "workspace_only", opportunity_id))
             oracle = selected.get((episode_id, "oracle_current_state", opportunity_id))
-            if workspace is not None and oracle is not None and workspace != oracle:
+            if workspace is None or oracle is None:
+                continue
+            by_episode.setdefault(episode_id, 0)
+            if workspace != oracle:
                 by_episode[episode_id] += 1
     return dict(by_episode)
+
+
+def _matched_control_action_divergence(
+    divergence_by_episode: Mapping[str, int],
+    specs: Mapping[str, SoftwareMem0VerticalSpec],
+) -> dict[str, object]:
+    group_divergence: Counter[str] = Counter()
+    recoverability_by_group: dict[str, set[str]] = defaultdict(set)
+    for episode_id, spec in specs.items():
+        metadata = spec.plan.metadata_dict
+        group_id = metadata.get("counterfactual_group_id", "")
+        if not group_id:
+            continue
+        group_divergence[group_id] += divergence_by_episode.get(episode_id, 0)
+        recoverability_by_group[group_id].add(
+            metadata.get("recoverability_variant", "")
+        )
+    absent_groups = tuple(
+        sorted(
+            group_id
+            for group_id, variants in recoverability_by_group.items()
+            if variants == {"absent"}
+        )
+    )
+    return {
+        "group_divergence": {
+            group_id: group_divergence[group_id]
+            for group_id in sorted(recoverability_by_group)
+        },
+        "recoverability_by_group": {
+            group_id: sorted(variants)
+            for group_id, variants in sorted(recoverability_by_group.items())
+        },
+        "absent_groups": list(absent_groups),
+        "absent_group_divergence": {
+            group_id: group_divergence[group_id]
+            for group_id in absent_groups
+        },
+    }
 
 
 def _control_drift_separation(
@@ -823,6 +1504,124 @@ def _grouped_accuracy(
         total[group] += 1
         correct[group] += bool(is_correct)
     return {group: _rate_detail(correct[group], total[group]) for group in sorted(total)}
+
+
+def _matched_control_solvability_detail(
+    contrasts: Sequence[Mapping[str, object]],
+    *,
+    condition: str,
+    expected_decisions: set[tuple[str, str]],
+    expected_policy_profile_ids: set[str],
+) -> dict[str, object]:
+    """Audit a matched full-information control separately for each policy.
+
+    Pooling policies could let one capable policy hide another policy that
+    cannot interpret even the oracle state or complete public history.  Such a
+    cell cannot support a memory-channel attribution, so each policy must cover
+    every frozen group/decision and meet the threshold in all three history
+    variants.
+    """
+
+    rows = tuple(
+        row for row in contrasts if str(row.get("condition", "")) == condition
+    )
+    rows_by_policy: dict[str, list[Mapping[str, object]]] = defaultdict(list)
+    for row in rows:
+        rows_by_policy[str(row.get("policy_profile_id", "unknown"))].append(row)
+
+    policy_ids = sorted(expected_policy_profile_ids or rows_by_policy)
+    cells: dict[str, dict[str, object]] = {}
+    for policy_profile_id in policy_ids:
+        policy_rows = rows_by_policy.get(policy_profile_id, [])
+        observed_decisions = {
+            (
+                str(row.get("counterfactual_group_id", "")),
+                str(row.get("opportunity_id", "")),
+            )
+            for row in policy_rows
+        }
+        readouts = sorted({str(row.get("readout", "")) for row in policy_rows})
+        variant_rates: dict[str, float | None] = {}
+        for variant in _MATCHED_CONTROL_VARIANTS:
+            field = (
+                "hierarchical_conflict_correct_rate"
+                if variant == "hierarchical_conflict"
+                else f"{variant}_correct_rate"
+            )
+            values = tuple(
+                float(value)
+                for row in policy_rows
+                if isinstance((value := row.get(field)), int | float)
+                and not isinstance(value, bool)
+            )
+            variant_rates[variant] = (
+                None
+                if len(values) != len(policy_rows) or not values
+                else sum(values) / len(values)
+            )
+        complete = (
+            bool(policy_rows)
+            and all(row.get("complete") is True for row in policy_rows)
+            and observed_decisions == expected_decisions
+            and len(policy_rows) == len(expected_decisions)
+            and readouts == ["none"]
+        )
+        variant_thresholds_pass = all(
+            rate is not None and rate >= ORACLE_GROUP_ACCURACY_MIN
+            for rate in variant_rates.values()
+        )
+        cell_pass = complete and variant_thresholds_pass
+        cells[policy_profile_id] = {
+            "status": "pass" if cell_pass else "fail",
+            "n_expected_decisions": len(expected_decisions),
+            "n_observed_decisions": len(observed_decisions),
+            "missing_decisions": [
+                list(key) for key in sorted(expected_decisions - observed_decisions)
+            ],
+            "unexpected_decisions": [
+                list(key) for key in sorted(observed_decisions - expected_decisions)
+            ],
+            "readouts": readouts,
+            "all_rows_complete": bool(policy_rows)
+            and all(row.get("complete") is True for row in policy_rows),
+            "variant_correct_rates": variant_rates,
+            "minimum_variant_correct_rate": ORACLE_GROUP_ACCURACY_MIN,
+            "state_evolution_correctness_penalty_vs_static": (
+                _optional_rate_difference(
+                    variant_rates["static"],
+                    variant_rates["evolution"],
+                )
+            ),
+            "hierarchical_conflict_correctness_penalty_vs_static": (
+                _optional_rate_difference(
+                    variant_rates["static"],
+                    variant_rates["hierarchical_conflict"],
+                )
+            ),
+        }
+
+    return {
+        "condition": condition,
+        "threshold": ORACLE_GROUP_ACCURACY_MIN,
+        "n_expected_policies": len(policy_ids),
+        "n_observed_rows": len(rows),
+        "expected_decisions": [list(key) for key in sorted(expected_decisions)],
+        "missing_policy_profile_ids": sorted(
+            set(policy_ids) - set(rows_by_policy)
+        ),
+        "all_cells_pass": bool(cells)
+        and all(cell["status"] == "pass" for cell in cells.values()),
+        "cells": cells,
+    }
+
+
+def _optional_rate_difference(
+    minuend: float | None,
+    subtrahend: float | None,
+) -> float | None:
+    if minuend is None or subtrahend is None:
+        return None
+    return minuend - subtrahend
 
 
 def _rate_detail(numerator: int, denominator: int) -> dict[str, int | float]:

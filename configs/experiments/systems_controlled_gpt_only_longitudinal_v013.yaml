@@ -1,0 +1,42 @@
+schema_version: 2
+experiment_id: systems_controlled_gpt_only_longitudinal_v013
+dataset_release: software-longitudinal-trajectories-v0.13.0
+data_root_env: LHMSB_DATA_ROOT
+systems_lock: ../systems-v2.lock.yaml
+policy_profiles:
+  - ../models/gpt-5.6-sol-shengsuanyun.yaml
+writer_profile: ../models/deepseek-v4-pro-writer.yaml
+embedding_profile: ../models/bge-m3.yaml
+reranker_profile: ../models/bge-reranker-v2-m3.yaml
+system_profiles:
+  flat_retrieval: ../systems/flat/controlled.yaml
+  mem0: ../systems/mem0/controlled.yaml
+  amem: ../systems/amem/controlled.yaml
+  memos: ../systems/memos/tree-controlled.yaml
+conditions:
+  - workspace_only
+  - full_context
+  - oracle_current_state
+  - flat_retrieval
+  - mem0
+  - amem
+  - memos
+candidate_k: 20
+visible_k: 5
+full_context_max_chars: 100000
+sampling:
+  temperature: 0.0
+  max_output_tokens: 512
+  baseline_repeats: 2
+  intervention_repeats: 2
+  provider_seed: null
+  format_repair_attempts: 1
+  visible_memory_count_add_levels: [1, 5, 20]
+  visible_memory_count_opportunity_ids:
+    - opp-premature-v2
+    - opp-stale-v1
+    - opp-local-valid
+    - opp-global-local-conflict
+required_secret_env:
+  - SHENGSUANYUN_API_KEY
+  - DEEPSEEK_API_KEY

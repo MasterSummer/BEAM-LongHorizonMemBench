@@ -1490,7 +1490,7 @@ def _normalized_drift(
                 violated_state_ids=behavior.violated_state_ids,
                 drift_flags=behavior.drift_flags,
             ),
-            used_state_ids=action.satisfies_state_ids,
+            action_expressed_state_ids=action.satisfies_state_ids,
             active_constraint_ids=tuple(
                 state_id
                 for state_id, state in current.items()

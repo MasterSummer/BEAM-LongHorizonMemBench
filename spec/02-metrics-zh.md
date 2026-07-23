@@ -5,6 +5,104 @@
 > 和维度7（通过 Memory ROI 的 Token/资源效率）。维度1、5、6、8、9 推迟到
 > 扩展点存根（见第5节）。
 
+## 0. 当前 long-horizon qualification 的主测量合同
+
+后续章节保留早期 v1 的通用记分卡定义；当前 Software long-horizon 论文不以
+Memory ROI 或检索 recall 作为 headline。主科学对象是：在 workspace 与 task
+memory 两条持久通道并存时，系统能否跨越长因果依赖链，维持当前权威任务状态，
+并让该状态继续控制下一步可执行行为。
+
+### 0.0 Long-horizon span 与 interaction tier
+
+Long-horizon 不以 token 数计量。每条轨迹报告 effective transition、handoff、
+dependency depth、state/event distance，以及 `policy_evaluated`、
+`frozen_replay`、`environment_generated` 的独立计数。进一步报告：
+
+- `minimum_decision_causal_span` / `maximum_decision_causal_span`；
+- `semantic_effect_coverage`；
+- `consumed_prefix_effect_fraction`；
+- `anti_padding_verified`；
+- `policy_conditioned_future_step_count`；
+- `policy_steps_with_downstream_effect_count`；
+- `policy_dependent_decision_count`；
+- `policy_dependency_coverage`；
+- `interaction_mode`；
+- `online_long_horizon_agent_execution_supported`。
+
+当前 matched/horizon release 的 interaction mode 是
+`replay_backed_critical_decision`。因此 long-horizon 估计量表示审计过的长程
+因果前缀对关键状态决策的影响，不能写成被测 policy 在线完成了完整轨迹。
+≥200 门槛使用被评分决策的 effective causal ancestors；每个计数步骤必须产生
+唯一 semantic effect 并消费声明前驱效果。Episode 总长度、digest-only 链、
+重复 observation 和未进入决策因果祖先的尾部步骤均不能满足门槛。
+
+### 0.1 C1：同决策、workspace-adjusted 的状态控制
+
+每个 counterfactual group 固定 terminal request、current-state semantics、
+action catalog、gold action、opaque option map、workspace semantics、package 和
+hidden checker，只改变上游历史为 `static`、`evolution` 或
+`hierarchical_conflict`。对 memory condition `m`、history `h` 和 matched
+static `s`：
+
+```text
+G(m,h) = Y(m,h) - Y(workspace,h)
+identified_construct_effect(m,h) = G(m,h) - G(m,s)
+```
+
+主报告同时给出 short/medium/long 的 joint horizon-dose amplification，但不得
+把 transition、dependency depth 和 handoff 同时变化的结果解释为 pure handoff
+effect。
+
+`oracle_current_state` 是 terminal solvability control；`full_context` 是
+history availability/interpretability control。两者必须对每个 policy、每个
+matched group、三个 history variant 分别通过。Oracle 失败时不能声称任务可解；
+full-context 失败时不能把完整历史解释困难归因为 memory selection。
+每个 SCEU 还必须将所有会使候选 action 有效或无效的当前 state 纳入 required
+closure；replace/revoke、authority 与 scope precedence 是所有 condition 共享
+的任务语义，而不是 oracle-only 提示。
+
+### 0.2 C2：goal-relative longitudinal drift
+
+Headline 不是单点错误率，而是从“先遵守、后违背”识别出的行为漂移。四类
+programmatic violation 为 `constraint_loss`、`plan_deviation`、`stale_state`
+和 `local_over_global`。单点 violation 与 adherence-anchored onset、survival、
+persistence、recovery 必须分开；没有同一 state-lineage prior-adherence anchor
+的 trajectory 不进入 longitudinal drift 分母。Category-only legacy trajectory
+只能描述；oracle-current-state/full-context 在同 lineage 上发生 onset 时，不得
+将该类别解释为 memory-specific drift。
+
+### 0.3 C3：同一决策的可观测故障链
+
+对 workspace 中不显式可恢复、但当前 action 必需的状态，重建：
+
+```text
+stored -> backend-retrieved -> model-visible
+       -> intervention evidence -> checked behavior
+```
+
+最早有证据支持的失败分别为 storage、retrieval、exposure 或 utilization。
+Storage provenance 不可观察时输出 `storage_evidence_unavailable`，不能当作
+storage failure。Visible 也不等于 used；只有 repeat-stable、state-targeted
+intervention 才提供 detected unique causal-effect lower bound。无 effect 不能证明
+unused，因为其他 memory object 或 workspace 可能冗余地提供相同状态。
+只要 repeat-stable intervention 改变 action 或 checker，就记为检测到 unique
+causal effect；`beneficial`、`harmful` 与 `causal_direction_ambiguous` 描述的是
+方向，不改变“存在可观测因果影响”的判断。旧字段 `behaviorally_used` 仅保留为
+该 lower bound 的兼容名称。
+
+为证明最终准确率会掩盖机制差异，定义 outcome-equivalent fault-profile
+divergence。令 `OE` 为相同 policy、readout、episode、SCEU、opportunity、
+checkpoint、current-state contract、selected action 和 correctness 的
+memory-condition pairs，`F` 为 earliest stage 加 utilization subtype：
+
+```text
+D_OE = sum[(F_a != F_b) for (a,b) in OE] / |OE|
+```
+
+`D_OE > 0` 表示相同 checked outcome 隐藏了不同 observed repair target。Pair
+仅是同一决策内的 dependent descriptive comparison，不是新的独立样本；
+`D_OE = 0` 也不能据此宣称系统等价。
+
 ---
 
 ## 1. Memory ROI — 核心指标
@@ -137,89 +235,87 @@ ROI(C) = undefined-lowcost（而非 +inf）
 
 ## 2. 目标漂移与行为稳定性（维度3）
 
-目标漂移衡量记忆系统是否帮助智能体在长时间跨度上保持行为一致性。漂移通过**程序化不变量**测量，而非 LLM 评分标准。稀疏判定器（见 `spec/01-overview.md`）仅处理程序化无法判定的小部分情况。
+目标漂移衡量当前权威任务状态对行为的控制是否随长期轨迹而退化。判定依据是版本化状态和可执行 action checker，而不是 LLM judge。
 
 ### 2.1 定义
 
-每个 episode 携带一组**不变量**：活跃目标和约束，具有有效性窗口 `[t_start, t_end)` 和显式的替代事件。任务族模块提供这些——见 `spec/04-datasets.md`。
+每个 episode 携带具有 authority、scope、version 和 validity window 的目标、约束、计划与决策。每个 continuation opportunity 预注册其 drift-eligible categories，未进入某类别风险集的决策不进入该类别分母。
 
-**三种违规类别**（每种都是漂移）：
+四类 canonical drift-compatible violation 为：
 
-1. **陈旧事实使用**（漂移 — 类别 A）：智能体在步骤 `t > F.retracted_at` 之后使用或引用事实 `F`。该事实曾有效但已被撤回或替代。
+1. `constraint_loss`：仍然有效的全局约束不再控制行为；
+2. `plan_deviation`：动作偏离当前有效计划，包括过早采用未来版本；
+3. `stale_state`：已撤销、替换或失效的旧状态重新控制行为；
+4. `local_over_global`：局部子目标、低权威决策或 scoped exception 错误覆盖全局目标或高权威约束。
 
-2. **约束违规**（漂移 — 类别 B）：智能体在步骤 `t` 违反仍然活跃的约束 `C`，其中 `t ∈ C.validity_window` 且没有替代事件解除 `C`。
+必须区分：
 
-3. **行为反转**（漂移 — 类别 C）：智能体在步骤 `t` 反转先前的决定或声明，而在反转和先前声明之间没有触发世界事件（注入、变更、撤回）。
+- **drift-compatible violation**：某个 eligible action 触发上述程序化错误类别；
+- **observed longitudinal drift**：同一 episode、policy、condition、readout、类别和 state lineage 中，先在较早的 distinct checkpoint 观察到 adherence，随后该 lineage 才出现 violation。
 
-**非漂移**：在有效的替代或撤回世界事件之后改变结论、行为或声明的事实。这是正确的适应，不得被惩罚。
+第一次被观察时已经错误的行为只能记作 violation，不能声称发生了纵向 drift。有效状态更新后的正确行为变化属于 adaptation，不记作 violation 或 drift。
 
 ### 2.2 公式
 
-对于每个 episode，在对齐探针集合 `P` 上计数违规：
+对 episode `e`、实验 cell `s`、类别 `c`、state lineage `l` 和 distinct
+checkpoint `t`，定义：
 
 ```
-drift_count(category, e, s) = 智能体答案构成该类别违规的对齐探针数量
+E(e,s,c,l,t) = 该 checkpoint 对类别 c 的 lineage l eligible
+V(e,s,c,l,t) = eligible 且 action checker 检测到类别 c 对 lineage l 的 violation
 
-drift_weighted(e, s) = w_A × drift_count(A) + w_B × drift_count(B) + w_C × drift_count(C)
+violation_rate(c) = Σ V(e,s,c,l,t) / Σ E(e,s,c,l,t)
 
-drift_index(c, e, s) = drift_weighted(e, s) / (|P_A| × w_A + |P_B| × w_B + |P_C| × w_C)
+D(e,s,c,l,t) = V(e,s,c,l,t) 且存在 t' < t，
+               E(e,s,c,l,t')=1 且 V(e,s,c,l,t')=0
 ```
 
-其中 `|P_X|` 是类别 X 的探针数量，默认权重为 `w_A = 1.0, w_B = 1.5, w_C = 1.0`。权重可配置；`w_B` 更高，因为约束违规是最严重的漂移形式（在没有许可的情况下违反活跃规则）。
+只有同一 lineage 存在 prior-adherence anchor 且之后还有 eligible checkpoint
+的 trajectory 才是 `drift_evaluable`。observed drift incidence 的分母只包含
+这些 trajectory；没有 anchor 的 trajectory 保留在 violation 报告中，但不以
+0 填入 drift 分母。
 
-`drift_index ∈ [0, 1]`，其中 0 = 无漂移（完美稳定），1 = 在每个对齐探针上都漂移。
+每个 episode/cell/category 输出：
 
-每 episode 漂移报告还发出：
-- 每类别的违规计数
-- 违规的探针 ID
-- 判定器回退比例（由于程序化检测不可行而需要判定器的探针比例）
+- violation incidence 和 first-violation session；
+- 是否有 adherence anchor、是否 drift-evaluable；
+- first observed-drift session；
+- distinct-checkpoint persistence；
+- valid-update / fresh-reminder recovery；
+- adherence-anchored drift-free survival。
+
+episode 是统计单位，SCEU 和 lineage 只是 episode 内重复观测。matched
+static/evolution/conflict 只有一个共同终点时，可以报告
+`drift-compatible violation excess`，但不能将该单点差值称为 longitudinal
+drift onset。
 
 ### 2.3 边界情况策略
 
 | 情况 | 策略 |
 |------|------|
-| **有效适应**（事件 → 变化） | 不计为漂移。漂移检测器必须验证：是否有一个世界事件在智能体先前的立场之后且在变化后的立场之前发生？如果是 → 非漂移。 |
-| **模糊探针**（程序化检查器无法判断） | 标记为 `judge-needed`。稀疏判定器评估；判定器比例单独报告且有上限（≤ 漂移探针的 20%）。如果判定器比例超出上限，该 episode 被标记为人工审计。 |
-| **无对齐探针** | drift_index = `N/A`（此 episode 没有测量漂移的探针）。 |
-| **撤回链**（F 在 t1 撤回，在 t2 重新注入） | 该事实从 t2 起有效。在 t3 > t2 使用它不算陈旧事实使用。漂移检测器追踪有效性窗口，而非二元撤回/未撤回。 |
-| **带有隐式事件的行为反转** | 如果智能体的变化被明确地以早期事件为理由（即使理由有延迟），检查器应接受为有效适应。只有无理由的反转才算漂移。 |
+| 有效 update 后改变动作 | 正确 adaptation，不处罚；以 checkpoint 的 current authoritative state 为准。 |
+| 首次 eligible checkpoint 已违规 | 记作 violation；没有 prior adherence，不记 observed drift。 |
+| 同一 checkpoint 多个 probe | 合并成一个时间点，不能制造 persistence 或 onset。 |
+| 不同 state lineage 的 adherence 与 violation | 分成不同 trajectory；前者不能为后者提供 onset anchor。 |
+| 同一 SCEU/category 对应多个 focal lineage | 数据生成时拆成多个 SCEU；报告拒绝将一个 category flag 广播到多个 lineage。 |
+| 只有 category、没有 lineage 的旧记录 | 保留为 descriptive violation/trajectory，不进入 C2 evidence-ready 结果。 |
+| oracle/full-context 在同 lineage 也发生 drift | 标记 control contamination；不得声称该类别是 memory-specific effect。 |
+| 类别不 eligible | 不进入该类别分母。 |
+| 没有后续 eligible checkpoint | 可以记录 adherence/violation，但不进入 longitudinal survival risk set。 |
+| revoke 后 reopen | 按 validity window 重放；reopen 后正确使用不算 stale state。 |
+| matched triplet 单一终点 | 报告 violation excess；纵向 onset 只来自具有多个 checkpoint 的 trajectory release。 |
 
 ### 2.4 计算示例
 
-10 个探针的 episode：4 个陈旧事实（类别 A），3 个约束（B），3 个行为（C）。
-
-**场景 1 — 干净运行（无漂移）：**
-
-| 探针 | 类别 | 智能体动作 | 世界上下文 | 判定 |
-|------|------|----------|-----------|------|
-| p1 | A | 在步骤 2 使用事实 F | F 有效期至步骤 5 | 无违规 |
-| p2 | A | 在步骤 6 使用事实 G | G 在步骤 3 撤回 | **漂移 — 陈旧事实使用** |
-| p3 | B | 在步骤 4 遵守约束 C | C 活跃，无替代 | 无违规 |
-| p4 | B | 在步骤 8 违反约束 C | C 在步骤 7 被解除 | **非漂移**（有效适应） |
-| p5 | C | 在步骤 5 反转决定 | 先前和步骤 5 之间无事件 | **漂移 — 行为反转** |
-
-假设所有其他探针（p6-p10）通过无违规。结果：
-- 陈旧事实违规：1（p2）
-- 约束违规：0
-- 行为反转：1（p5）
+某个 `stale_state` trajectory 有三个 distinct eligible checkpoints：
 
 ```
-drift_weighted = 1.0 × 1 + 1.5 × 0 + 1.0 × 1 = 2.0
-denominator    = 4 × 1.0 + 3 × 1.5 + 3 × 1.0 = 4.0 + 4.5 + 3.0 = 11.5
-drift_index    = 2.0 / 11.5 = 0.174
+t=2: 使用当前 v1，V=0，建立 adherence anchor
+t=8: v2 已生效但仍使用 v1，V=1，observed drift onset=8
+t=12: fresh reminder 后使用 v2，V=0，recovered=true
 ```
 
-**场景 2 — 有效适应不被惩罚：**
-
-同一个 episode。智能体在步骤 3 遵守约束 C。在步骤 7，一个事件解除 C。
-在步骤 9，智能体的行为与之前的 C 相反。漂移检查器验证：
-步骤 7 的事件发生在步骤 9 的变化之前 → 有效适应 → 非漂移。
-
-```
-drift_index = 0.0  （无实际违规）
-```
-
-这是关键的误报防线：智能体正确地适应了世界变化，不得被惩罚。
+若 t=2 已错误使用尚未生效的 v2，则该点是 `plan_deviation` violation；只有在之后先观察到正确 adherence、再发生新的 violation 时，才能得到 observed drift onset。
 
 ---
 

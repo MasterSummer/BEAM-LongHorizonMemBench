@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tarfile
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -11,9 +12,17 @@ from lhmsb.datasets.cli import main
 from lhmsb.datasets.mem0_stateful_pipeline import (
     MEM0_STATEFUL_GENERATOR_VERSION,
     MEM0_STATEFUL_GENERATOR_VERSION_V3,
-    MEM0_STATEFUL_GENERATOR_VERSION_V9,
+    MEM0_STATEFUL_GENERATOR_VERSION_V10,
+    MEM0_STATEFUL_GENERATOR_VERSION_V11,
+    MEM0_STATEFUL_GENERATOR_VERSION_V12,
+    MEM0_STATEFUL_GENERATOR_VERSION_V13,
     MEM0_STATEFUL_RELEASE_ID_V3,
-    MEM0_STATEFUL_RELEASE_ID_V9,
+    MEM0_STATEFUL_RELEASE_ID_V10,
+    MEM0_STATEFUL_RELEASE_ID_V11,
+    MEM0_STATEFUL_RELEASE_ID_V12,
+    MEM0_STATEFUL_RELEASE_ID_V13,
+    MEM0_STATEFUL_SCHEMA_VERSION_V12,
+    MEM0_STATEFUL_SCHEMA_VERSION_V13,
     Mem0StatefulDatasetError,
     build_mem0_release_archive,
     freeze_mem0_stateful,
@@ -45,6 +54,7 @@ def test_generate_separates_public_and_evaluator_trees(tmp_path: Path) -> None:
     assert (stage / "evaluator" / "episodes.jsonl").is_file()
     assert (stage / "evaluator" / "state_units.jsonl").is_file()
     assert (stage / "evaluator" / "fact_signatures.jsonl").is_file()
+    assert (stage / "evaluator" / "long_horizon_constructs.jsonl").is_file()
     assert (stage / "evaluator" / "continuation_mappings.jsonl").is_file()
     signatures = [
         json.loads(line)
@@ -66,6 +76,19 @@ def test_generate_separates_public_and_evaluator_trees(tmp_path: Path) -> None:
     c1 = next(item for item in signatures if item["state_id"] == "C1")
     assert c1["source_sessions"] == [0]
     assert c1["source_event_ids"] == ["e-01-offline"]
+    constructs = [
+        json.loads(line)
+        for line in (stage / "evaluator" / "long_horizon_constructs.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(constructs) == len(generated[0].spec.plan.sceu_units)
+    assert all(
+        not set(item["current_required_state_ids"]).intersection(
+            item["future_referenced_state_ids"]
+        )
+        for item in constructs
+    )
     public_text = "\n".join(path.read_text(encoding="utf-8") for path in _public_json_files(stage))
     for forbidden in (
         "source_event_ids",
@@ -103,7 +126,302 @@ def test_full_horizon_smoke_uses_v03_release_contract(tmp_path: Path) -> None:
     assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V3
 
 
-def test_fifty_episode_release_passes_all_audits_and_uses_v09(tmp_path: Path) -> None:
+def test_matched_construct_release_freezes_task_span_and_regenerates(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    frozen = tmp_path / "frozen"
+    generated = generate_mem0_stateful_to_staging(
+        stage,
+        seeds=[42],
+        n_episodes=1,
+        n_sessions=16,
+        construct_mode="matched_triplets",
+        steps_per_session=16,
+    )
+    manifest = freeze_mem0_stateful(stage, frozen)
+
+    assert len(generated) == 3
+    assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V11
+    assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V11
+    assert manifest.construct_mode == "matched_triplets"
+    assert manifest.n_counterfactual_groups == 1
+    assert manifest.steps_per_session == 16
+    assert (frozen / "evaluator" / "task_steps.jsonl").is_file()
+    spans = [
+        json.loads(line)
+        for line in (frozen / "evaluator" / "task_span.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(spans) == 3
+    assert all(item["effective_step_count"] >= 200 for item in spans)
+    assert all(item["maximum_decision_causal_span"] >= 200 for item in spans)
+    assert all(item["anti_padding_verified"] is True for item in spans)
+    assert all(item["effect_chain_verified"] is True for item in spans)
+    assert all(
+        item["interaction_mode"] == "replay_backed_critical_decision"
+        for item in spans
+    )
+    assert all(
+        item["online_long_horizon_agent_execution_supported"] is False
+        for item in spans
+    )
+    matched = [
+        json.loads(line)
+        for line in (
+            frozen / "evaluator" / "matched_construct_audits.jsonl"
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(matched) == 1
+    assert matched[0]["ok"] is True
+    assert matched[0]["all_targets_at_final_session"] is True
+    assert matched[0]["minimum_target_handoff_count"] == 15
+    audit = json.loads(
+        (frozen / "evaluator" / "dataset_audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["n_counterfactual_groups"] == 1
+    assert audit["checks"]["matched_construct_triplets_invariant"]
+    assert audit["checks"][
+        "all_matched_episodes_have_effective_long_horizon_span"
+    ]
+    assert audit["checks"]["all_matched_task_effect_chains_verified"]
+    assert audit["checks"][
+        "all_declared_task_spans_pass_anti_padding_audit"
+    ]
+    assert audit["checks"][
+        "all_sceu_current_action_state_contract_complete"
+    ]
+    assert audit["long_horizon_profile_summary"][
+        "missing_action_state_contract_count"
+    ] == 0
+    assert audit["task_span_summary"][
+        "minimum_maximum_decision_causal_span"
+    ] >= 200
+    assert audit["task_span_summary"][
+        "n_anti_padding_audits_verified"
+    ] == 3
+    assert audit["task_span_summary"]["claim_scope"] == (
+        "replay_backed_critical_decision"
+    )
+    assert audit["task_span_summary"][
+        "n_online_long_horizon_agent_execution_profiles"
+    ] == 0
+    assert audit["check_applicability"]["matched_gold_actions_balanced"] is False
+    assert verify_mem0_stateful(frozen).ok
+    assert regen_check_mem0_stateful(frozen).ok
+
+
+def test_three_matched_groups_balance_action_and_option_shortcuts(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    generated = generate_mem0_stateful_to_staging(
+        stage,
+        seeds=[42, 43, 44],
+        n_episodes=1,
+        n_sessions=16,
+        construct_mode="matched_triplets",
+        steps_per_session=16,
+    )
+
+    assert len(generated) == 9
+    audit = json.loads(
+        (stage / "evaluator" / "dataset_audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["check_applicability"]["matched_gold_actions_balanced"]
+    assert audit["checks"]["matched_gold_actions_balanced"]
+    assert audit["checks"]["max_always_action_accuracy_le_0_50"]
+    assert audit["checks"]["max_always_option_accuracy_le_0_40"]
+    assert audit["terminal_archetype_counts"] == {
+        "authorized_cloud": 3,
+        "current_v1_offline": 3,
+        "current_v2_offline": 3,
+    }
+    baselines = audit["policy_free_baselines"]
+    assert baselines["best_always_action_accuracy"] == pytest.approx(1 / 3)
+    assert baselines["best_always_option_accuracy"] == pytest.approx(1 / 3)
+
+
+def test_horizon_panel_release_freezes_verifies_and_regenerates(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    frozen = tmp_path / "frozen"
+    generated = generate_mem0_stateful_to_staging(
+        stage,
+        seeds=[42],
+        n_episodes=1,
+        n_sessions=16,
+        construct_mode="horizon_panels",
+        steps_per_session=16,
+        horizon_sessions=(4, 8, 16),
+    )
+    manifest = freeze_mem0_stateful(stage, frozen)
+
+    assert len(generated) == 9
+    assert manifest.schema_version == MEM0_STATEFUL_SCHEMA_VERSION_V12
+    assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V12
+    assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V12
+    assert manifest.construct_mode == "horizon_panels"
+    assert manifest.n_episodes == 9
+    assert manifest.n_sessions == 16
+    assert manifest.horizon_sessions == (4, 8, 16)
+    assert manifest.n_horizon_panels == 1
+    assert manifest.n_counterfactual_groups == 3
+    assert {
+        str(item["horizon_level"]) for item in manifest.episodes
+    } == {"short", "medium", "long"}
+    spans = [
+        json.loads(line)
+        for line in (frozen / "evaluator" / "task_span.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert Counter(item["effective_step_count"] for item in spans) == {
+        65: 3,
+        129: 3,
+        257: 3,
+    }
+    assert Counter(item["maximum_decision_causal_span"] for item in spans) == {
+        64: 3,
+        128: 3,
+        256: 3,
+    }
+    assert all(item["anti_padding_verified"] is True for item in spans)
+    assert Counter(item["interaction_mode"] for item in spans) == {
+        "replay_backed_critical_decision": 9,
+    }
+    panel_audits = [
+        json.loads(line)
+        for line in (
+            frozen / "evaluator" / "horizon_panel_audits.jsonl"
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(panel_audits) == 1
+    assert panel_audits[0]["ok"] is True
+    assert panel_audits[0]["levels"] == ["short", "medium", "long"]
+    audit = json.loads(
+        (frozen / "evaluator" / "dataset_audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["n_horizon_panels"] == 1
+    assert audit["n_counterfactual_groups"] == 3
+    assert audit["horizon_level_counts"] == {
+        "long": 3,
+        "medium": 3,
+        "short": 3,
+    }
+    assert audit["checks"]["horizon_panels_same_decision_invariant"]
+    assert audit["checks"]["horizon_levels_complete"]
+    assert audit["checks"][
+        "only_long_horizon_dose_meets_effective_step_threshold"
+    ]
+    assert audit["checks"][
+        "all_horizon_panel_task_effect_chains_verified"
+    ]
+    assert audit["checks"][
+        "all_declared_task_spans_pass_anti_padding_audit"
+    ]
+    assert audit["check_applicability"][
+        "matched_gold_actions_balanced"
+    ] is False
+    assert verify_mem0_stateful(frozen).ok
+    assert regen_check_mem0_stateful(frozen).ok
+
+
+def test_longitudinal_release_freezes_c2_c3_contract_and_regenerates(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    frozen = tmp_path / "frozen"
+    generated = generate_mem0_stateful_to_staging(
+        stage,
+        seeds=[42],
+        n_episodes=1,
+        n_sessions=16,
+        construct_mode="longitudinal_trajectories",
+        steps_per_session=16,
+    )
+    manifest = freeze_mem0_stateful(stage, frozen)
+
+    assert len(generated) == 1
+    assert manifest.schema_version == MEM0_STATEFUL_SCHEMA_VERSION_V13
+    assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V13
+    assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V13
+    assert manifest.construct_mode == "longitudinal_trajectories"
+    assert manifest.n_episodes == 1
+    assert manifest.n_sessions == 16
+    assert manifest.steps_per_session == 16
+    assert len(generated[0].spec.plan.opportunities) == 13
+    audit = json.loads(
+        (frozen / "evaluator" / "dataset_audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["checks"][
+        "max_always_action_accuracy_le_0_60_longitudinal"
+    ]
+    assert audit["checks"][
+        "all_longitudinal_episodes_have_effective_long_horizon_span"
+    ]
+    assert audit["checks"][
+        "all_longitudinal_task_effect_chains_verified"
+    ]
+    assert audit["checks"]["longitudinal_c2_c3_design_identifiable"]
+    assert audit["checks"]["memory_reliant_decisions_present"]
+    assert audit["check_applicability"]["memory_reliant_decisions_present"]
+    assert audit["policy_free_baselines"][
+        "best_always_action_accuracy"
+    ] == pytest.approx(7 / 13)
+    contribution = audit["contribution_design_audit"]
+    assert contribution["scope"] == "longitudinal_trajectory"
+    assert contribution["run_ready"] is True
+    assert contribution["failed_check_ids"] == []
+    assert audit["task_span_summary"]["maximum_decision_causal_span"] == 256
+    assert audit["task_span_summary"]["claim_scope"] == (
+        "replay_backed_critical_decision"
+    )
+    assert verify_mem0_stateful(frozen).ok
+    assert regen_check_mem0_stateful(frozen).ok
+
+
+def test_three_horizon_panels_balance_terminal_shortcuts(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    generated = generate_mem0_stateful_to_staging(
+        stage,
+        seeds=[42, 43, 44],
+        n_episodes=1,
+        n_sessions=16,
+        construct_mode="horizon_panels",
+    )
+
+    assert len(generated) == 27
+    audit = json.loads(
+        (stage / "evaluator" / "dataset_audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["n_horizon_panels"] == 3
+    assert audit["n_counterfactual_groups"] == 9
+    assert audit["check_applicability"]["matched_gold_actions_balanced"]
+    assert audit["checks"]["matched_gold_actions_balanced"]
+    assert audit["checks"]["max_always_action_accuracy_le_0_50"]
+    assert audit["checks"]["max_always_option_accuracy_le_0_40"]
+
+
+def test_fifty_episode_release_passes_all_audits_and_uses_v10(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
     frozen = tmp_path / "frozen"
     generated = generate_mem0_stateful_to_staging(
@@ -116,8 +434,8 @@ def test_fifty_episode_release_passes_all_audits_and_uses_v09(tmp_path: Path) ->
     assert len(generated) == 50
     assert len({item.plan_hash for item in generated}) == 50
     assert len({item.surface_hash for item in generated}) == 50
-    assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V9
-    assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V9
+    assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V10
+    assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V10
     audit = json.loads(
         (frozen / "evaluator" / "dataset_audit.json").read_text(encoding="utf-8")
     )
@@ -130,6 +448,15 @@ def test_fifty_episode_release_passes_all_audits_and_uses_v09(tmp_path: Path) ->
         "derivable": 16,
         "explicit": 17,
     }
+    assert {
+        "static_recall",
+        "state_evolution",
+        "hierarchical_conflict",
+    }.issubset(audit["construct_kind_counts"])
+    assert audit["horizon_band_counts"]["long"] > 0
+    assert audit["long_horizon_profile_summary"][
+        "future_requirement_overlap_count"
+    ] == 0
     assert all(audit["checks"].values())
     assert (
         audit["policy_free_baselines"]["best_always_action_accuracy"]
@@ -143,9 +470,9 @@ def test_fifty_episode_release_passes_all_audits_and_uses_v09(tmp_path: Path) ->
     assert regen_check_mem0_stateful(frozen).ok
 
 
-def test_v09_audit_rejects_misbalanced_seed_expansion(tmp_path: Path) -> None:
+def test_formal_audit_rejects_misbalanced_seed_expansion(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
-    with pytest.raises(Mem0StatefulDatasetError, match="formal v0.9 dataset audit"):
+    with pytest.raises(Mem0StatefulDatasetError, match="formal dataset audit"):
         generate_mem0_stateful_to_staging(
             stage,
             seeds=[42],

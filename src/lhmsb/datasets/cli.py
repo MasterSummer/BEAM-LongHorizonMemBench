@@ -216,6 +216,37 @@ def _build_parser() -> argparse.ArgumentParser:
     mem0_stateful_gen.add_argument("--seeds", required=True, nargs="+", type=int)
     mem0_stateful_gen.add_argument("--n-episodes", type=int, default=1)
     mem0_stateful_gen.add_argument("--n-sessions", type=int, default=16)
+    mem0_stateful_gen.add_argument(
+        "--construct-mode",
+        choices=(
+            "mixed",
+            "matched_triplets",
+            "horizon_panels",
+            "longitudinal_trajectories",
+        ),
+        default="mixed",
+        help=(
+            "mixed main release, matched_triplets mechanism release (three "
+            "physical episodes per requested episode), or horizon_panels "
+            "diagnostic release (nine physical episodes per requested panel), "
+            "or longitudinal_trajectories with complete same-lineage recovery "
+            "windows"
+        ),
+    )
+    mem0_stateful_gen.add_argument(
+        "--horizon-sessions",
+        nargs=3,
+        type=int,
+        default=(4, 8, 16),
+        metavar=("SHORT", "MEDIUM", "LONG"),
+        help="three increasing session doses for horizon_panels mode",
+    )
+    mem0_stateful_gen.add_argument(
+        "--steps-per-session",
+        type=int,
+        default=16,
+        help="minimum auditable prefix steps per session in matched mode",
+    )
     mem0_stateful_gen.add_argument("--out", required=True, type=Path)
 
     mem0_stateful_freeze = sub.add_parser(
@@ -484,6 +515,9 @@ def _cmd_generate_mem0_stateful(args: argparse.Namespace) -> int:
             seeds=args.seeds,
             n_episodes=args.n_episodes,
             n_sessions=args.n_sessions,
+            construct_mode=args.construct_mode,
+            steps_per_session=args.steps_per_session,
+            horizon_sessions=args.horizon_sessions,
         )
     except _GENERATION_ERRORS as exc:
         print(f"generate-mem0-stateful FAILED: {type(exc).__name__}: {exc}")

@@ -9,13 +9,14 @@ DATA_ROOT="${LHMSB_DATA_ROOT:-/data/lhmsb}"
 ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
 RUN_NAME="${LHMSB_RUN_NAME:-systems-qualification}"
 DATASET="${LHMSB_SYSTEM_DATASET:-}"
-CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only_aaai.yaml"
+CONFIG="${LHMSB_SYSTEM_CONFIG:-${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only_aaai.yaml}"
 DRY_RUN=0
 FORCE=0
 KEEP_GOING=0
 ALLOW_DIRTY=0
 PREPARE_ONLY=0
 EPISODE_LIMIT=""
+ANALYSIS_PHASE="${LHMSB_ANALYSIS_PHASE:-development}"
 
 usage() {
   cat <<'EOF'
@@ -30,6 +31,7 @@ Options:
   --config PATH     schema-v2 experiment config
   --run-name NAME   run name (default: systems-qualification)
   --episode-limit N restrict the run to the first N frozen episodes
+  --analysis-phase P development, diagnostic, calibration, or confirmatory
   --force           replace a conflicting run identity
   --allow-dirty    allow a working tree with runtime-only untracked files
   --keep-going      continue independent tasks after a failed cell
@@ -55,6 +57,11 @@ while (($#)); do
       EPISODE_LIMIT="$2"
       shift 2
       ;;
+    --analysis-phase)
+      systems_require_value "$1" "${2:-}" || exit 2
+      ANALYSIS_PHASE="$2"
+      shift 2
+      ;;
     --force) FORCE=1; shift ;;
     --allow-dirty) ALLOW_DIRTY=1; shift ;;
     --keep-going) KEEP_GOING=1; shift ;;
@@ -65,7 +72,7 @@ while (($#)); do
   esac
 done
 
-DATASET="${DATASET:-${DATA_ROOT}/datasets/software_v9}"
+DATASET="${DATASET:-${DATA_ROOT}/datasets/software_v10}"
 
 RUN_DIR="${DATA_ROOT}/runs/systems/${RUN_NAME}"
 
@@ -117,7 +124,8 @@ for index, line in enumerate(open(sys.argv[1], encoding="utf-8")):
 if [[ "${DRY_RUN}" == "1" ]]; then
   systems_print_command "${SCRIPT_DIR}/verify_system_runtime.sh" --dry-run --data-root "${DATA_ROOT}"
   systems_print_command systems_start_all_services "${DATA_ROOT}"
-  PLAN=(plan-systems --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}")
+  PLAN=(plan-systems --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}" \
+    --analysis-phase "${ANALYSIS_PHASE}")
   [[ "${FORCE}" == "1" ]] && PLAN+=(--force)
   [[ "${ALLOW_DIRTY}" == "1" ]] && PLAN+=(--allow-dirty)
   [[ -n "${EPISODE_LIMIT}" ]] && PLAN+=(--episode-limit "${EPISODE_LIMIT}")
@@ -156,7 +164,8 @@ cleanup() {
 trap cleanup EXIT INT TERM USR1
 systems_write_runtime_env "${DATA_ROOT}"
 
-PLAN=(plan-systems --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}")
+PLAN=(plan-systems --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}" \
+  --analysis-phase "${ANALYSIS_PHASE}")
 [[ "${FORCE}" == "1" ]] && PLAN+=(--force)
 [[ "${ALLOW_DIRTY}" == "1" ]] && PLAN+=(--allow-dirty)
 [[ -n "${EPISODE_LIMIT}" ]] && PLAN+=(--episode-limit "${EPISODE_LIMIT}")

@@ -21,6 +21,8 @@ EffectDirection = Literal["beneficial", "harmful", "neutral", "ambiguous"]
 CausalUseLabel = Literal[
     "beneficial",
     "harmful",
+    "visible_without_detected_unique_causal_effect",
+    # Legacy value accepted while reading completed schema-v1 reports.
     "visible_not_causally_used",
     "causal_direction_ambiguous",
     "unstable_baseline",
@@ -62,7 +64,13 @@ class ContinuationOutcome:
 
 @dataclass(frozen=True)
 class CausalUseResult:
-    """Stable counterfactual classification for one visible memory object."""
+    """Stable counterfactual classification for one visible memory object.
+
+    ``behaviorally_used`` is a legacy field name. It means that a repeat-stable
+    intervention detected a unique causal effect on the selected action or
+    checker result. It does not claim access to the model's internal reasoning,
+    and ``False`` does not exclude redundant or compensated use.
+    """
 
     memory_id: str
     intervention_kind: InterventionKind
@@ -135,7 +143,7 @@ def classify_causal_use(
             memory_id=memory_id,
             intervention_kind=intervention_kind,
             memory_role=memory_role,
-            label="visible_not_causally_used",
+            label="visible_without_detected_unique_causal_effect",
             effect_direction="neutral",
             behaviorally_used=False,
             baseline_stable=True,
@@ -170,7 +178,11 @@ def classify_causal_use(
         memory_role=memory_role,
         label=label,
         effect_direction=direction,
-        behaviorally_used=label in {"beneficial", "harmful"},
+        # Directional ambiguity does not erase a repeat-stable causal effect.
+        # Beneficial/harmful labels answer whether the effect agrees with the
+        # evaluator-side memory role; this field only records whether the
+        # intervention changed observable behavior at all.
+        behaviorally_used=action_changed or checker_changed,
         baseline_stable=True,
         intervention_stable=True,
         action_changed=action_changed,

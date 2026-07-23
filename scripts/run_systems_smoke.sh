@@ -9,7 +9,7 @@ DATA_ROOT="${LHMSB_DATA_ROOT:-/data/lhmsb}"
 ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
 RUN_NAME="${LHMSB_SMOKE_RUN_NAME:-systems-smoke}"
 DATASET="${LHMSB_SYSTEM_DATASET:-}"
-CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only_aaai.yaml"
+CONFIG="${LHMSB_SYSTEM_CONFIG:-${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only_aaai.yaml}"
 DRY_RUN=0
 
 usage() {
@@ -42,14 +42,15 @@ while (($#)); do
   esac
 done
 
-DATASET="${DATASET:-${DATA_ROOT}/datasets/software_v9}"
+DATASET="${DATASET:-${DATA_ROOT}/datasets/software_v10}"
 
 RUN_DIR="${DATA_ROOT}/runs/systems/${RUN_NAME}"
 if [[ "${DRY_RUN}" == "1" ]]; then
   systems_print_command "${SCRIPT_DIR}/verify_system_runtime.sh" --dry-run --data-root "${DATA_ROOT}"
   systems_print_command systems_start_all_services "${DATA_ROOT}"
   systems_print_command "${DATA_ROOT}/venvs/core/bin/python" -m lhmsb.qualification plan-systems \
-    --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}" --episode-limit 1
+    --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}" --episode-limit 1 \
+    --analysis-phase diagnostic
   for pair in "core 0" "mem0 1" "amem 2" "memos 3"; do
     read -r environment task_index <<<"${pair}"
     systems_print_command "${DATA_ROOT}/venvs/${environment}/bin/python" -m lhmsb.qualification \
@@ -84,7 +85,8 @@ trap cleanup EXIT INT TERM
 systems_write_runtime_env "${DATA_ROOT}"
 
 systems_run_cli "${DATA_ROOT}" core plan-systems --dataset "${DATASET}" \
-  --config "${CONFIG}" --out "${RUN_DIR}" --episode-limit 1
+  --config "${CONFIG}" --out "${RUN_DIR}" --episode-limit 1 \
+  --analysis-phase diagnostic
 for pair in "core 0" "mem0 1" "amem 2" "memos 3"; do
   read -r environment task_index <<<"${pair}"
   systems_run_cli "${DATA_ROOT}" "${environment}" prepare-task \

@@ -24,7 +24,7 @@ CONTROLLED_ZEN_CONFIG = (
     ROOT / "configs" / "experiments" / "mem0_controlled_zen.yaml"
 )
 README = ROOT / "README.md"
-SERVER_WORKFLOW = ROOT / "docs" / "mem0-server-workflow.md"
+SERVER_WORKFLOW = ROOT / "docs" / "systems-server-workflow.md"
 
 
 def _copied_config(
@@ -549,11 +549,22 @@ def test_only_mem0_is_enabled_in_system_lock() -> None:
         assert deferred not in lock.lower()
 
 
-def test_docs_declare_mem0_as_the_only_active_qualification_system() -> None:
+def test_docs_declare_the_active_multisystem_qualification_matrix() -> None:
     readme = README.read_text(encoding="utf-8")
     workflow = SERVER_WORKFLOW.read_text(encoding="utf-8")
+    normalized_readme = " ".join(readme.split())
+    normalized_workflow = " ".join(workflow.split())
 
-    assert "Current active qualification: Mem0 only" in readme
+    for condition in (
+        "Workspace-only",
+        "Full-context",
+        "Oracle-current-state",
+        "Flat retrieval",
+        "Mem0",
+        "A-MEM",
+        "MemOS",
+    ):
+        assert condition in normalized_readme
+        assert condition in normalized_workflow
     assert "Legacy v1 adapter coverage (not active)" in readme
-    assert "下一 memory system 待定" in workflow
-    assert "依次为 Letta、Graphiti、Hindsight、MemOS" not in workflow
+    assert "Current active qualification: Mem0 only" not in readme

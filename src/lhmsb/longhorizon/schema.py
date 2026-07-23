@@ -7,6 +7,8 @@ workspace-controlled Software slice.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Literal, cast
@@ -44,6 +46,20 @@ ContinuationScope = Literal[
     "governed_execution",
     "isolated_profiler",
 ]
+TaskStepKind = Literal[
+    "handoff",
+    "inspect",
+    "edit",
+    "test",
+    "record",
+    "state_transition",
+    "continuation_decision",
+]
+TaskStepExecutionMode = Literal[
+    "policy_evaluated",
+    "frozen_replay",
+    "environment_generated",
+]
 
 _STATE_KINDS = {
     "global_goal",
@@ -77,6 +93,20 @@ _CONTROL_KINDS = {
 _CONTINUATION_SCOPES = {
     "governed_execution",
     "isolated_profiler",
+}
+_TASK_STEP_KINDS = {
+    "handoff",
+    "inspect",
+    "edit",
+    "test",
+    "record",
+    "state_transition",
+    "continuation_decision",
+}
+_TASK_STEP_EXECUTION_MODES = {
+    "policy_evaluated",
+    "frozen_replay",
+    "environment_generated",
 }
 
 
@@ -380,9 +410,7 @@ class ContinuationOpportunity:
         if self.control_kind not in _CONTROL_KINDS:
             raise ValueError(f"unknown control kind: {self.control_kind!r}")
         if self.continuation_scope not in _CONTINUATION_SCOPES:
-            raise ValueError(
-                f"unknown continuation scope: {self.continuation_scope!r}"
-            )
+            raise ValueError(f"unknown continuation scope: {self.continuation_scope!r}")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> ContinuationOpportunity:
@@ -456,6 +484,106 @@ class SessionSurface:
 
 
 @dataclass(frozen=True)
+class TaskStep:
+    """One causally linked agent/environment transition in the task trace.
+
+    Task steps are evaluator-side provenance. A step may also contribute a
+    public session observation, but evaluator state IDs and dependency IDs are
+    never rendered directly to the policy.
+    """
+
+    step_id: str
+    ordinal: int
+    session: int
+    kind: TaskStepKind
+    execution_mode: TaskStepExecutionMode
+    summary: str
+    dependency_step_ids: tuple[str, ...] = ()
+    reads_state_ids: tuple[str, ...] = ()
+    writes_state_ids: tuple[str, ...] = ()
+    workspace_paths: tuple[str, ...] = ()
+    consumes_effect_ids: tuple[str, ...] = ()
+    produces_effect_ids: tuple[str, ...] = ()
+    dependency_effect_digests: tuple[str, ...] = ()
+    effect_digest: str = ""
+    visible_in_session: bool = True
+    effective: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.step_id:
+            raise ValueError("task step_id must be non-empty")
+        if self.ordinal < 0:
+            raise ValueError("task step ordinal must be >= 0")
+        if self.session < 0:
+            raise ValueError("task step session must be >= 0")
+        if self.kind not in _TASK_STEP_KINDS:
+            raise ValueError(f"unknown task step kind: {self.kind!r}")
+        if self.execution_mode not in _TASK_STEP_EXECUTION_MODES:
+            raise ValueError(f"unknown task step execution mode: {self.execution_mode!r}")
+        if self.visible_in_session and not self.summary.strip():
+            raise ValueError("visible task steps require a non-empty summary")
+        if self.effective and not (
+            self.dependency_step_ids
+            or self.reads_state_ids
+            or self.writes_state_ids
+            or self.workspace_paths
+            or self.kind in {"handoff", "continuation_decision"}
+        ):
+            raise ValueError(
+                "effective task steps require a causal dependency, state, "
+                "workspace artifact, handoff, or continuation decision"
+            )
+        if len(self.dependency_effect_digests) != len(self.dependency_step_ids) and (
+            self.dependency_effect_digests or self.effect_digest
+        ):
+            raise ValueError("task step dependency effect digests must align with dependencies")
+        for digest in (*self.dependency_effect_digests, self.effect_digest):
+            if digest and (
+                len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError("task step effect digests must be SHA-256 hex")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> TaskStep:
+        return cls(
+            step_id=str(data["step_id"]),
+            ordinal=_as_int(data["ordinal"]),
+            session=_as_int(data["session"]),
+            kind=cast(TaskStepKind, str(data["kind"])),
+            execution_mode=cast(
+                TaskStepExecutionMode,
+                str(data["execution_mode"]),
+            ),
+            summary=str(data.get("summary", "")),
+            dependency_step_ids=_tuple_strings(data.get("dependency_step_ids")),
+            reads_state_ids=_tuple_strings(data.get("reads_state_ids")),
+            writes_state_ids=_tuple_strings(data.get("writes_state_ids")),
+            workspace_paths=_tuple_strings(data.get("workspace_paths")),
+            consumes_effect_ids=_tuple_strings(data.get("consumes_effect_ids")),
+            produces_effect_ids=_tuple_strings(data.get("produces_effect_ids")),
+            dependency_effect_digests=_tuple_strings(data.get("dependency_effect_digests")),
+            effect_digest=str(data.get("effect_digest", "")),
+            visible_in_session=bool(data.get("visible_in_session", True)),
+            effective=bool(data.get("effective", True)),
+        )
+
+
+def task_step_effect_digest(step: TaskStep) -> str:
+    """Hash one step's claimed operation and its predecessor effect digests."""
+
+    payload = asdict(step)
+    payload.pop("effect_digest", None)
+    canonical = json.dumps(
+        _jsonable(payload),
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
 class EpisodePlan:
     """Complete evaluator-side latent state plan for one episode."""
 
@@ -471,6 +599,7 @@ class EpisodePlan:
     opportunities: tuple[ContinuationOpportunity, ...] = ()
     sceu_units: tuple[SCEU, ...] = ()
     sessions: tuple[SessionSurface, ...] = ()
+    task_steps: tuple[TaskStep, ...] = ()
     metadata: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -484,10 +613,109 @@ class EpisodePlan:
         event_ids = [event.event_id for event in self.events]
         if len(event_ids) != len(set(event_ids)):
             raise ValueError("event IDs must be unique")
+        self._validate_task_steps(set(state_ids))
+
+    def _validate_task_steps(self, state_ids: set[str]) -> None:
+        if not self.task_steps:
+            return
+        step_ids = [step.step_id for step in self.task_steps]
+        if len(step_ids) != len(set(step_ids)):
+            raise ValueError("task step IDs must be unique")
+        ordinals = [step.ordinal for step in self.task_steps]
+        if ordinals != list(range(len(self.task_steps))):
+            raise ValueError("task step ordinals must be contiguous and ordered")
+        seen: set[str] = set()
+        effect_by_step: dict[str, str] = {}
+        produced_effects_by_step: dict[str, tuple[str, ...]] = {}
+        seen_produced_effects: set[str] = set()
+        uses_effect_provenance = any(
+            step.effect_digest or step.dependency_effect_digests for step in self.task_steps
+        )
+        uses_semantic_effect_provenance = any(
+            step.consumes_effect_ids or step.produces_effect_ids
+            for step in self.task_steps
+        )
+        prior_session = -1
+        workspace_by_session = {
+            snapshot.checkpoint_session: {artifact.path for artifact in snapshot.artifacts}
+            for snapshot in self.workspaces
+        }
+        for step in self.task_steps:
+            if step.session >= self.n_sessions:
+                raise ValueError("task step session is outside the episode")
+            if step.session < prior_session:
+                raise ValueError("task steps must be ordered by session")
+            prior_session = step.session
+            unknown_dependencies = set(step.dependency_step_ids).difference(seen)
+            if unknown_dependencies:
+                raise ValueError(
+                    "task step dependency must reference an earlier step: "
+                    f"{sorted(unknown_dependencies)}"
+                )
+            if uses_effect_provenance:
+                if not step.effect_digest:
+                    raise ValueError(
+                        "every task step requires an effect digest when effect "
+                        "provenance is enabled"
+                    )
+                expected_dependencies = tuple(
+                    effect_by_step[step_id] for step_id in step.dependency_step_ids
+                )
+                if step.dependency_effect_digests != expected_dependencies:
+                    raise ValueError(f"task step dependency effect digest mismatch: {step.step_id}")
+                if step.effect_digest != task_step_effect_digest(step):
+                    raise ValueError(f"task step effect digest mismatch: {step.step_id}")
+            if uses_semantic_effect_provenance:
+                if step.effective and not step.produces_effect_ids:
+                    raise ValueError(
+                        "every effective task step must produce a semantic task "
+                        f"effect: {step.step_id}"
+                    )
+                duplicate_effects = set(step.produces_effect_ids).intersection(
+                    seen_produced_effects
+                )
+                if duplicate_effects:
+                    raise ValueError(
+                        "task step produces a duplicate semantic effect: "
+                        f"{sorted(duplicate_effects)}"
+                    )
+                expected_consumed_effects = tuple(
+                    effect_id
+                    for dependency_id in step.dependency_step_ids
+                    for effect_id in produced_effects_by_step[dependency_id]
+                )
+                if step.consumes_effect_ids != expected_consumed_effects:
+                    raise ValueError(
+                        "task step semantic effects do not align with causal "
+                        f"dependencies: {step.step_id}"
+                    )
+            unknown_states = (set(step.reads_state_ids) | set(step.writes_state_ids)).difference(
+                state_ids
+            )
+            if unknown_states:
+                raise ValueError(f"task step references unknown state: {sorted(unknown_states)}")
+            known_paths = workspace_by_session.get(step.session)
+            if known_paths is not None:
+                unknown_paths = set(step.workspace_paths).difference(known_paths)
+                if unknown_paths:
+                    raise ValueError(
+                        "task step references an unavailable workspace artifact: "
+                        f"{sorted(unknown_paths)}"
+                    )
+            seen.add(step.step_id)
+            effect_by_step[step.step_id] = step.effect_digest
+            produced_effects_by_step[step.step_id] = step.produces_effect_ids
+            seen_produced_effects.update(step.produces_effect_ids)
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-compatible mapping with stable field names."""
-        return _jsonable(asdict(self))  # type: ignore[return-value]
+        payload = _jsonable(asdict(self))
+        if not self.task_steps and isinstance(payload, dict):
+            # Preserve canonical hashes for frozen v0.2--v0.10 plans. The field
+            # becomes part of the hash only for releases that actually declare
+            # a task-step trace.
+            payload.pop("task_steps", None)
+        return payload  # type: ignore[return-value]
 
     @property
     def metadata_dict(self) -> dict[str, str]:
@@ -519,6 +747,9 @@ class EpisodePlan:
             ),
             sessions=tuple(
                 SessionSurface.from_dict(item) for item in _mappings(data.get("sessions", []))
+            ),
+            task_steps=tuple(
+                TaskStep.from_dict(item) for item in _mappings(data.get("task_steps", []))
             ),
             metadata=_tuple_pairs(data.get("metadata")),
         )

@@ -216,8 +216,14 @@ def test_causal_use_drift_behavior_and_reliability_formulas() -> None:
                 behavior_score=0.25,
                 is_correct=False,
                 visible_memory_count=2,
-                causal_labels=("beneficial", "visible_not_causally_used"),
-                intervention_labels=("beneficial", "visible_not_causally_used"),
+                causal_labels=(
+                    "beneficial",
+                    "visible_without_detected_unique_causal_effect",
+                ),
+                intervention_labels=(
+                    "beneficial",
+                    "visible_without_detected_unique_causal_effect",
+                ),
                 leave_one_out_count=2,
                 leave_one_out_action_flips=1,
                 drift_flags=("constraint_loss", "plan_deviation"),
@@ -247,7 +253,11 @@ def test_causal_use_drift_behavior_and_reliability_formulas() -> None:
         ),
     )
     assert metrics["causal_memory_use_rate"].value == 0.5
+    assert metrics["unique_causal_effect_rate"].value == 0.5
     assert metrics["visible_but_not_causally_used_rate"].value == 0.5
+    assert metrics[
+        "visible_without_detected_unique_causal_effect_rate"
+    ].value == 0.5
     assert metrics["beneficial_intervention_rate"].value == 0.5
     assert metrics["harmful_intervention_rate"].value == 0.0
     assert metrics["ambiguous_intervention_rate"].value == 0.0

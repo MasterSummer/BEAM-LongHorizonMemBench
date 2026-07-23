@@ -662,6 +662,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "finalize-evaluation-plan",
             "evaluate-task",
             "run-evaluation-matrix",
+            "audit-completed-report",
+            "reanalyze-completed-report",
         }
     ):
         from lhmsb.qualification.multisystem_cli import (

@@ -23,6 +23,9 @@ class DriftEvidence:
     """Evaluator evidence for the four long-horizon behavioral drift modes."""
 
     outcome: ContinuationOutcome
+    action_expressed_state_ids: tuple[str, ...] = ()
+    # Backward-compatible input for pre-C3 callers. This describes state
+    # predicates expressed by an action, not memory-object causal use.
     used_state_ids: tuple[str, ...] = ()
     active_constraint_ids: tuple[str, ...] = ()
     current_plan_state_ids: tuple[str, ...] = ()
@@ -96,7 +99,9 @@ def classify_long_horizon_drift(
 ) -> LongHorizonDriftResult:
     """Resolve drift from state predicates plus checker-emitted evidence."""
     violated = set(evidence.outcome.violated_state_ids)
-    used = set(evidence.used_state_ids)
+    action_expressed = set(evidence.action_expressed_state_ids).union(
+        evidence.used_state_ids
+    )
     flags = set(evidence.outcome.drift_flags)
     constraint_loss = bool(
         violated.intersection(evidence.active_constraint_ids)
@@ -110,13 +115,15 @@ def classify_long_horizon_drift(
             "constraint_violation",
         ),
     )
-    stale_state = bool(used.intersection(evidence.stale_state_ids)) or _has_flag(
+    stale_state = bool(
+        action_expressed.intersection(evidence.stale_state_ids)
+    ) or _has_flag(
         flags,
         ("stale-state", "stale_state", "stale-fact", "stale_fact"),
     )
     plan_deviation = bool(
         violated.intersection(evidence.current_plan_state_ids)
-        or used.intersection(evidence.future_state_ids)
+        or action_expressed.intersection(evidence.future_state_ids)
     ) or _has_flag(
         flags,
         (

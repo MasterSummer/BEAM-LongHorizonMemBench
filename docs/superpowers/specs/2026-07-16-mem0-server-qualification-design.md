@@ -428,10 +428,15 @@ For each evaluator-eligible visible memory:
 5. require each intervention pair to agree before comparing selected action,
    checker score, violated state IDs, and drift flags.
 
-A memory is `behaviorally_used` only when the intervention changes an outcome
-consistently and the direction agrees with the state supported or contradicted
-by that memory. Otherwise it is `visible_not_causally_used`,
-`causal_direction_ambiguous`, or `intervention_unstable`.
+A memory's legacy `behaviorally_used` field is true when a repeat-stable
+intervention changes the selected action or checker outcome. This is a unique
+causal-effect lower bound, not direct access to internal model use. Agreement
+with the evaluator-side memory role separately determines `beneficial` or
+`harmful`; a stable change with unresolved direction is
+`causal_direction_ambiguous` but still causally influential. No stable change
+is labelled `visible_without_detected_unique_causal_effect`, which does not
+exclude redundant or compensated use. Unstable pairs remain
+`unstable_baseline` or `intervention_unstable` and support no causal claim.
 
 Interventions never mutate the underlying Mem0 store. They modify the
 model-visible readout only.

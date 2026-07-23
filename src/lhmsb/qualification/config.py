@@ -350,6 +350,10 @@ def _load_sampling(value: object) -> CausalSamplingProfile:
                 value.get("format_repair_attempts", 1),
                 "sampling.format_repair_attempts",
             ),
+            enable_memory_count_interventions=_boolean(
+                value.get("enable_memory_count_interventions", True),
+                "sampling.enable_memory_count_interventions",
+            ),
             visible_memory_count_add_levels=_integer_sequence(
                 value.get("visible_memory_count_add_levels", (1, 5, 20)),
                 "sampling.visible_memory_count_add_levels",

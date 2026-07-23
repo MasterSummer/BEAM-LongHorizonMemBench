@@ -275,10 +275,14 @@ def render_public_continuation(
     episode_id: str,
     semantic_seed: int,
     opportunity: ContinuationOpportunity,
+    permutation_key: str | None = None,
 ) -> tuple[PublicContinuation, EvaluatorContinuation]:
     """Neutralize and deterministically permute one latent action catalog."""
     ordered = list(opportunity.action_catalog)
-    seed_payload = f"{episode_id}|{opportunity.opportunity_id}|{semantic_seed}".encode()
+    shuffle_identity = episode_id if permutation_key is None else permutation_key
+    seed_payload = (
+        f"{shuffle_identity}|{opportunity.opportunity_id}|{semantic_seed}".encode()
+    )
     seed = int.from_bytes(hashlib.sha256(seed_payload).digest()[:8], "big")
     random.Random(seed).shuffle(ordered)
     options: list[PublicActionOption] = []

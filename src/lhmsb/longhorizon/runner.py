@@ -18,7 +18,12 @@ VerticalCondition = Literal["workspace_only", "oracle_current_state", "fake_nati
 
 @dataclass(frozen=True)
 class VerticalSCEUResult:
-    """One continuation result with the complete stored→visible→behavior chain."""
+    """One legacy-stub continuation result.
+
+    ``used_state_ids`` is an action/state-overlap heuristic retained for the
+    offline v1 stub. It is not intervention-grounded C3 causal-use evidence and
+    must not be reported as such by the formal qualification pipeline.
+    """
 
     sceu_id: str
     opportunity_id: str

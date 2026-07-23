@@ -687,7 +687,7 @@ class SoftwareMem0VerticalFamily:
             ContinuationOpportunity(
                 opportunity_id="opp-early",
                 checkpoint_session=early,
-                focal_state_ids=("G0", "P1"),
+                focal_state_ids=("G0", "C1", "P1"),
                 challenge_type="matched-branch",
                 request=common_request,
                 action_catalog=actions,
@@ -697,7 +697,7 @@ class SoftwareMem0VerticalFamily:
             ContinuationOpportunity(
                 opportunity_id="opp-premature-v2",
                 checkpoint_session=early,
-                focal_state_ids=("G0", "P1", "U1", "P2"),
+                focal_state_ids=("G0", "C1", "P1", "U1", "P2"),
                 challenge_type="premature-v2",
                 request=(
                     "Use only the branch explicitly identified as current in the "
@@ -865,15 +865,27 @@ class SoftwareMem0VerticalFamily:
             observations = [
                 "Continue the software project from the current workspace and session updates."
             ]
-            for event in sorted(plan.events, key=lambda item: (item.session, item.event_id)):
-                if event.session != session:
-                    continue
-                state = state_map[event.target_state_id]
-                text = cls._state_text(state)
-                if event.type in {"replace", "revoke", "invalidate"}:
-                    observations.append(f"Session update: an earlier item changed — {text}")
-                else:
-                    observations.append(f"Session update: {text}")
+            if plan.task_steps:
+                observations.extend(
+                    step.summary
+                    for step in plan.task_steps
+                    if step.session == session and step.visible_in_session
+                )
+            else:
+                for event in sorted(
+                    plan.events,
+                    key=lambda item: (item.session, item.event_id),
+                ):
+                    if event.session != session:
+                        continue
+                    state = state_map[event.target_state_id]
+                    text = cls._state_text(state)
+                    if event.type in {"replace", "revoke", "invalidate"}:
+                        observations.append(
+                            f"Session update: an earlier item changed — {text}"
+                        )
+                    else:
+                        observations.append(f"Session update: {text}")
             workspace = plan.workspaces[session]
             tool_results = cls._explicit_reads(workspace, session, phases, variant)
             public_workspace = replace(

@@ -1,6 +1,16 @@
-# 03 — Protocol & Methodology
+# 03 — Protocol & Methodology (legacy v1)
 
-This document defines the experimental protocol and statistical methodology for LongHorizonMemSysBench v1. It is the canonical reference for how episodes are run, compared, and analyzed. All implementation code (agent harness, experiment runner, statistical analysis) implements the rules declared here.
+> **Status:** preserved for the legacy `WorldEvent`/`Probe` benchmark only. It
+> is not the protocol for the active state-first Software qualification. The
+> active contribution and evidence contract is
+> [`docs/long-horizon-benchmark-contract.md`](../docs/long-horizon-benchmark-contract.md),
+> and the canonical server procedure is
+> [`docs/systems-server-workflow.md`](../docs/systems-server-workflow.md).
+
+This document defines the experimental protocol and statistical methodology for
+LongHorizonMemSysBench v1. It remains the reference for legacy episodes and
+adapters; its factual-probe and Memory ROI claims must not be carried into the
+active BEAM paper.
 
 ## 1. Counterfactual Replay Protocol
 

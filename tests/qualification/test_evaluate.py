@@ -26,7 +26,12 @@ from lhmsb.qualification.memory_runtime import (
 )
 from lhmsb.qualification.prepare import prepare_prefix
 from lhmsb.qualification.providers import PolicyResponse, PolicyUsage
-from lhmsb.qualification.schema import EvaluationTask, PreparationTask, ScoredCondition
+from lhmsb.qualification.schema import (
+    CausalSamplingProfile,
+    EvaluationTask,
+    PreparationTask,
+    ScoredCondition,
+)
 from lhmsb.qualification.storage import QualificationStorage
 from lhmsb.qualification.tei import RerankResult
 
@@ -90,8 +95,10 @@ def test_oracle_context_exposes_authority_and_scope_without_gold_ids() -> None:
     assert "C1" not in rendered
     assert "D1" not in rendered
     assert "P2" not in rendered
-    assert "project-owner constraint governs a local-operator plan" in rendered
-    assert "project-owner constraint governs a local-operator plan" not in _SYSTEM_PROMPT
+    assert "project-owner constraint governs a local-operator plan" not in rendered
+    assert "project-owner constraint governs a local-operator plan" in _SYSTEM_PROMPT
+    assert "later valid replacement or revocation supersedes" in _SYSTEM_PROMPT
+    assert "scoped exception must not be generalized" in _SYSTEM_PROMPT
 
 
 class _Runtime:
@@ -457,6 +464,62 @@ def test_flat_prefix_readout_is_reused_without_memory_runtime(tmp_path) -> None:
             )
 
 
+def test_matched_mechanism_sampling_keeps_causal_probes_without_count_load(
+    tmp_path,
+) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=4)
+    preparation_task_id = "prepare-flat-no-count"
+    payload = {
+        "stage": "prepare_prefix",
+        "task_index": 0,
+        "task_id": preparation_task_id,
+        "episode_id": spec.plan.episode_id,
+        "backend": "flat_retrieval",
+        "profile_id": "flat_controlled",
+        "run_identity": "1" * 64,
+        "config_hash": "2" * 64,
+    }
+    task = PreparationTask(
+        task_index=0,
+        task_id=preparation_task_id,
+        episode_id=spec.plan.episode_id,
+        backend="flat_retrieval",
+        profile_id="flat_controlled",
+        run_identity="1" * 64,
+        config_hash="2" * 64,
+        task_payload_hash=canonical_hash(payload),
+    )
+    artifact = prepare_prefix(
+        task,
+        spec,
+        _Runtime(spec),
+        _Reranker(),
+        QualificationStorage(tmp_path / "run", run_identity="1" * 64),
+    )
+
+    result = evaluate_task(
+        _task(
+            spec,
+            "flat_retrieval",
+            "common_rerank",
+            prefix_hash=artifact.artifact_hash,
+        ),
+        spec,
+        artifact,
+        _Policy(),
+        _Checker(),
+        sampling=CausalSamplingProfile(
+            enable_memory_count_interventions=False,
+        ),
+    )
+
+    interventions = tuple(
+        item for row in result.sceu_results for item in row.interventions
+    )
+    assert any(item.intervention_kind == "leave_one_out" for item in interventions)
+    assert all(item.intervention_kind != "count_add" for item in interventions)
+
+
 def test_drift_eligibility_and_invariant_state_pairs_are_explicit(tmp_path) -> None:
     spec = SoftwareMem0VerticalFamily.generate(42, n_sessions=16)
     preparation_task_id = "prepare-flat-drift"
@@ -515,6 +578,17 @@ def test_drift_eligibility_and_invariant_state_pairs_are_explicit(tmp_path) -> N
     assert by_opportunity["opp-local-valid"].drift_eligible_categories == (
         "plan_deviation",
         "stale_state",
+    )
+    assert by_opportunity["opp-premature-v2"].drift_lineage_pairs == (
+        ("plan_deviation", "plan_node:pipeline"),
+    )
+    assert by_opportunity["opp-local-only"].drift_lineage_pairs == (
+        ("constraint_loss", "constraint:C1"),
+        ("local_over_global", "constraint:C1"),
+    )
+    assert (
+        by_opportunity["opp-local-only"].drift_lineage_evidence_mode
+        == "derived_state_graph_v1"
     )
     assert (
         by_opportunity["opp-local-valid"].current_state_signature

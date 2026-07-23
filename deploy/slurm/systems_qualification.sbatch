@@ -28,7 +28,15 @@ MODE="${LHMSB_SLURM_MODE:-qualification}"
 RUN_NAME="${LHMSB_RUN_NAME:-systems-${SLURM_JOB_ID:-manual}}"
 DRY_RUN="${LHMSB_SLURM_DRY_RUN:-0}"
 EPISODE_LIMIT="${LHMSB_EPISODE_LIMIT:-}"
-RUN_ARGS=()
+ANALYSIS_PHASE="${LHMSB_ANALYSIS_PHASE:-development}"
+case "${ANALYSIS_PHASE}" in
+  development|diagnostic|calibration|confirmatory) ;;
+  *)
+    printf 'unknown LHMSB_ANALYSIS_PHASE: %s\n' "${ANALYSIS_PHASE}" >&2
+    exit 2
+    ;;
+esac
+RUN_ARGS=(--analysis-phase "${ANALYSIS_PHASE}")
 if [[ -n "${EPISODE_LIMIT}" ]]; then
   [[ "${EPISODE_LIMIT}" =~ ^[1-9][0-9]*$ ]] || {
     printf 'LHMSB_EPISODE_LIMIT must be a positive integer\n' >&2
@@ -70,7 +78,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   else
     systems_print_command "${SCRIPT_DIR}/run_systems_qualification.sh" --dry-run \
       --data-root "${DATA_ROOT}" --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" \
-      --keep-going
+      --keep-going "${RUN_ARGS[@]}"
   fi
   exit 0
 fi
@@ -91,5 +99,6 @@ elif [[ "${MODE}" == "prepare" ]]; then
     "${RUN_ARGS[@]}"
 else
   "${SCRIPT_DIR}/run_systems_qualification.sh" --data-root "${DATA_ROOT}" \
-    --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" --keep-going
+    --env-file "${ENV_FILE}" --run-name "${RUN_NAME}" --keep-going \
+    "${RUN_ARGS[@]}"
 fi

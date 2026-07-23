@@ -477,8 +477,11 @@ jq . "${RUN_DIR}/report/summary.json"
 - `visible_contamination`
 - `stale_retrieval_rate`
 - `retrieved_but_not_visible_rate`
-- `visible_but_not_causally_used_rate`
-- `causal_memory_use_rate`
+- `visible_without_detected_unique_causal_effect_rate`（旧报告中的
+  `visible_but_not_causally_used_rate` 仅作为兼容别名；无检测效应不等于未使用）
+- `unique_causal_effect_rate`（canonical；稳定 intervention 改变 action 或
+  checker 的比例）
+- `causal_memory_use_rate`（兼容别名）
 - `beneficial_intervention_rate`
 - `harmful_intervention_rate`
 - `ambiguous_intervention_rate`

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from lhmsb.longhorizon.replay import StateReplayError, plan_hash, replay_plan
@@ -8,9 +10,12 @@ from lhmsb.longhorizon.schema import (
     EpisodePlan,
     StateEvent,
     StateUnit,
+    TaskStep,
     WorkspaceArtifact,
     WorkspaceSnapshot,
+    task_step_effect_digest,
 )
+from lhmsb.longhorizon.task_span import build_software_task_steps
 
 
 def _plan() -> EpisodePlan:
@@ -97,9 +102,131 @@ def _plan() -> EpisodePlan:
 
 def test_episode_plan_round_trips_to_canonical_json() -> None:
     plan = _plan()
+    assert "task_steps" not in plan.to_dict()
     restored = EpisodePlan.from_dict(plan.to_dict())
     assert restored == plan
     assert plan_hash(restored) == plan_hash(plan)
+
+
+def test_episode_plan_round_trips_valid_causal_task_steps() -> None:
+    plan = _plan()
+    steps = (
+        TaskStep(
+            step_id="step-000",
+            ordinal=0,
+            session=0,
+            kind="inspect",
+            execution_mode="frozen_replay",
+            summary="Inspected the current project handoff.",
+            reads_state_ids=("G0",),
+            workspace_paths=("README.md",),
+        ),
+        TaskStep(
+            step_id="step-001",
+            ordinal=1,
+            session=1,
+            kind="handoff",
+            execution_mode="environment_generated",
+            summary="Resumed the dependent work in a fresh session.",
+            dependency_step_ids=("step-000",),
+        ),
+        TaskStep(
+            step_id="step-002",
+            ordinal=2,
+            session=2,
+            kind="continuation_decision",
+            execution_mode="policy_evaluated",
+            summary="",
+            dependency_step_ids=("step-001",),
+            reads_state_ids=("G0", "P1"),
+            visible_in_session=False,
+        ),
+    )
+    enriched = EpisodePlan.from_dict(
+        {**plan.to_dict(), "task_steps": [step.__dict__ for step in steps]}
+    )
+
+    assert enriched.task_steps == steps
+    assert EpisodePlan.from_dict(enriched.to_dict()) == enriched
+    assert "task_steps" in enriched.to_dict()
+
+
+def test_episode_plan_rejects_noncausal_or_forward_task_steps() -> None:
+    plan = _plan()
+    with pytest.raises(ValueError, match="causal"):
+        EpisodePlan.from_dict(
+            {
+                **plan.to_dict(),
+                "task_steps": [
+                    {
+                        "step_id": "padding",
+                        "ordinal": 0,
+                        "session": 0,
+                        "kind": "record",
+                        "execution_mode": "frozen_replay",
+                        "summary": "A filler line.",
+                    }
+                ],
+            }
+        )
+
+    with pytest.raises(ValueError, match="earlier step"):
+        EpisodePlan.from_dict(
+            {
+                **plan.to_dict(),
+                "task_steps": [
+                    {
+                        "step_id": "step-000",
+                        "ordinal": 0,
+                        "session": 0,
+                        "kind": "handoff",
+                        "execution_mode": "environment_generated",
+                        "summary": "Start.",
+                        "dependency_step_ids": ["step-001"],
+                    }
+                ],
+            }
+        )
+
+
+def test_episode_plan_rejects_tampered_task_effect_chain() -> None:
+    plan = _plan()
+    spec_steps = build_software_task_steps(plan, steps_per_session=2)
+    tampered = replace(
+        spec_steps[-1],
+        dependency_effect_digests=("0" * 64,),
+    )
+
+    with pytest.raises(ValueError, match="dependency effect digest mismatch"):
+        replace(plan, task_steps=(*spec_steps[:-1], tampered))
+
+
+def test_episode_plan_rejects_duplicate_semantic_effects() -> None:
+    plan = _plan()
+    steps = build_software_task_steps(plan, steps_per_session=2)
+    duplicate = replace(
+        steps[1],
+        produces_effect_ids=steps[0].produces_effect_ids,
+        effect_digest="",
+    )
+    duplicate = replace(duplicate, effect_digest=task_step_effect_digest(duplicate))
+
+    with pytest.raises(ValueError, match="duplicate semantic effect"):
+        replace(plan, task_steps=(steps[0], duplicate, *steps[2:]))
+
+
+def test_episode_plan_rejects_semantic_effect_dependency_mismatch() -> None:
+    plan = _plan()
+    steps = build_software_task_steps(plan, steps_per_session=2)
+    mismatched = replace(
+        steps[1],
+        consumes_effect_ids=(),
+        effect_digest="",
+    )
+    mismatched = replace(mismatched, effect_digest=task_step_effect_digest(mismatched))
+
+    with pytest.raises(ValueError, match="do not align with causal dependencies"):
+        replace(plan, task_steps=(steps[0], mismatched, *steps[2:]))
 
 
 def test_unknown_continuation_scope_is_rejected() -> None:

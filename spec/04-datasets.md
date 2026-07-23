@@ -1,7 +1,11 @@
-# 04 — Datasets & Task Families
+# 04 — Datasets & Task Families (legacy v1)
 
-> **Status**: canonical for v1. Tasks 7, 10, 11, and 20 implement against these
-> specifications.
+> **Status:** canonical only for legacy v1 `WorldEvent`/`Probe` families. The
+> active Software benchmark is generated state-first and evaluated with SCEUs;
+> see [`spec/01-overview.md`](01-overview.md) and
+> [`docs/long-horizon-benchmark-contract.md`](../docs/long-horizon-benchmark-contract.md).
+> The factual-recall tasks below are retained for compatibility and are not
+> evidence for the active BEAM contributions.
 
 ---
 

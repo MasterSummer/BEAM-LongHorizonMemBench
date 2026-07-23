@@ -11,7 +11,7 @@ REPO_ROOT="$(systems_repo_root)"
 DATA_ROOT="${LHMSB_DATA_ROOT:-/data/lhmsb}"
 ENV_FILE="${LHMSB_ENV_FILE:-${REPO_ROOT}/.env}"
 DATASET="${LHMSB_SYSTEM_DATASET:-}"
-CONFIG="${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only_aaai.yaml"
+CONFIG="${LHMSB_SYSTEM_CONFIG:-${REPO_ROOT}/configs/experiments/systems_controlled_gpt_only_aaai.yaml}"
 DRY_RUN=0
 ALLOW_DIRTY=0
 
@@ -45,7 +45,7 @@ while (($#)); do
   esac
 done
 
-DATASET="${DATASET:-${DATA_ROOT}/datasets/software_v9}"
+DATASET="${DATASET:-${DATA_ROOT}/datasets/software_v10}"
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   systems_print_command "${SCRIPT_DIR}/verify_system_runtime.sh" --dry-run --data-root "${DATA_ROOT}"

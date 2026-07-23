@@ -1,115 +1,341 @@
-# 01 — Overview, Scope, Contributions & Glossary
+# 01 — Overview, scope, contributions, and glossary
 
-## Problem Statement
+## Problem statement
 
-Modern AI agents operate over long horizons: a personal assistant tracks user preferences across months, a research agent assimilates and updates a growing body of evidence, a software-development agent maintains and revises a multi-file codebase through evolving requirements. Memory management systems promise to give these agents persistent, evolvable recall beyond their context window. Yet the field lacks a standardized benchmark that answers the central question in deploying such systems: **does the memory system improve task performance enough to justify its full cost?**
+Long-horizon tasks require an agent to pursue one persistent overall goal in a
+bounded environment while progress, decisions, intermediate results, and
+constraints remain causally relevant across hundreds to thousands of effective
+transitions and context resets. A workspace preserves some task state, while a
+task-level memory system must decide what else to write, update, retrieve, and
+expose when a later session resumes.
 
-Existing benchmarks fragment along partial axes. Retrieval quality (Dim 4) and temporal reasoning (Dim 5) are well-covered but saturated (22 benchmarks surveyed). Token/resource efficiency (Dim 7) and scalability (Dim 8) are commoditizing rapidly in 2026 with metrics like LongMemEval-V2 LAFS, LongMemCode $/query, and Cost-Accuracy-LTM CpSQ/AES/Pareto. No existing benchmark measures (a) whether a memory system stabilizes an agent's goal-directed behavior across long sessions, (b) the full lifecycle cost of using the memory system, not just query cost, or (c) how memory systems perform on procedural agentic tasks where the environment evolves through retractions and shifting requirements.
+BEAM requires goal persistence, a replayable pre-decision dependency chain,
+delayed state dependence after context reset, and separately measured
+workspace/memory channels. Session count, prompt length, and filler events do
+not independently establish a long horizon.
 
-LongHorizonMemSysBench (LHMSB) v1 closes these gaps by introducing **Memory ROI**, a cross-cutting headline metric that normalizes performance gain by total memory-system cost, measured via a counterfactual replay protocol over two procedurally-generated agentic task families.
+The evaluation problem is therefore not simply whether an agent can answer a
+question about a long history. It is whether the memory system maintains the
+**current and authoritative task state**, contributes information beyond the
+workspace, and changes the agent's next executable action in the right way.
 
-## v1 Scope: The Four-Dimension Core
+BEAM evaluates memory-supported state maintenance and behavioral control at
+critical continuation decisions sampled from replayable persistent-task
+trajectories. The definition targets hundreds to thousands of mutually
+dependent online Agent/environment steps; the current experiment is a
+controlled critical-decision sampling protocol within that target setting.
+The main v0.10 Software release does not claim that the tested continuation
+policy executes the full multi-hundred-step trajectory online. Its
+long-horizon claims are restricted to explicitly measured cross-session
+handoffs, state age, dependency depth, state transitions, authority/scope
+conflicts, and workspace recoverability. The supplementary v0.11 matched
+release records at least 256 effective frozen/environment prefix transitions
+per 16-session member. Its target decision is after the final prefix and 15
+handoffs, so post-decision work cannot count toward the horizon. The policy is
+still evaluated only at sparse continuation decisions.
 
-v1 implements the novel, defensible core of LHMSB across four dimensions, with Memory ROI as the unifying headline:
+Task length and evaluation density are distinct. Future releases may replay
+hundreds or thousands of meaningful environment/agent transitions while
+querying the policy only at selected critical decisions, but the manifest must
+separately report effective transitions, policy-controlled decisions, replayed
+segments, and generated segments. Padding events or repeated text do not count
+toward the horizon.
 
-| Dimension | v1 Status | Description |
-|-----------|-----------|-------------|
-| **Dim 2 — Goal-Directed Utilization** | **Implemented** | Does the agent use its memory to improve task completion? Scored via programmatic task completion rubrics + sparse judge. |
-| **Dim 3 — Goal Drift & Behavioral Stability** | **Implemented** | Does the agent's behavior remain stable across sessions? Measured via programmatic invariants: `drift_index` over aligned probes. |
-| **Dim 4 — Retrieval Quality** | **Implemented (supporting)** | Endogenous (agent-initiated) and oracle (fixed-query) retrieval metrics. Supports the other dims but is not the headline. |
-| **Dim 7 — Token/Resource Efficiency** | **Implemented** | Full-lifecycle cost instrumentation feeding the cost denominator of Memory ROI. |
+An effective v0.11 transition must produce one unique semantic task effect,
+consume the effects produced by its declared predecessors, and carry a
+reproducible digest. The plan loader verifies both the semantic dependency
+chain and the digest chain. The ≥200 threshold is applied to effective causal
+ancestors of a scored continuation, not to episode length, post-decision work,
+or a chain of unconsumed observations. Reports separately count
+`policy_evaluated`, `frozen_replay`, and `environment_generated` steps; these
+    categories may not be described interchangeably. The v0.13 longitudinal
+    release applies the same anti-padding contract to 256 public prefix steps
+    and 13 registered critical decisions (269 effective steps total).
 
-**Memory ROI** cross-cuts all four dimensions: `ROI = mean(normalized_gain) / mean(normalized_cost)` reported with bootstrap confidence intervals and Pareto analysis.
+Every report also derives a trajectory interaction tier. A
+`replay_backed_critical_decision` has an audited causal prefix but no declared
+policy-to-later-policy dependency. `sparse_closed_loop` requires at least one
+policy decision to affect a later effective step and a later policy decision.
+`online_long_horizon_agent_execution` additionally requires at least 200
+causally linked policy-evaluated steps. Current v0.11/v0.12/v0.13 releases are in the
+first tier. This prevents task-span evidence from being silently promoted to a
+stronger online-rollout claim.
 
-### Extension Points (Deferred Dimensions)
+## Scope of the active qualification
 
-The following dimensions are deferred to future versions. This spec documents their extension points so later work can plug in without architectural redesign. They are explicitly NOT part of the v1 evaluation scorecard or headline metric:
+The active GPT-only matrix contains:
 
-| Dimension | Deferred Status | Extension Point |
-|-----------|-----------------|-----------------|
-| **Dim 1 — Memory Evolution** | Deferred to v2 | Adapter `ReflectionCapability` mixin and `apply_decay` hooks exist; evolution scoring module can be added. |
-| **Dim 5 — Temporal Reasoning** | Deferred to v2 | Probe types for explicit temporal queries exist in the types contract. Saturated in prior art — v2 may add as secondary axis. |
-| **Dim 6 — Robustness** | Deferred to v2 | Adversarial probe generation hooks are stubbed in the simulator core. |
-| **Dim 8 — Scalability** | Deferred to v2 | Dataset size is a config parameter; scaling experiments are a separate v2 study. |
-| **Dim 9 — Abstraction** | Deferred to v2 | Conceptual-rollup probe types are defined in the schema; scoring module deferred. |
+- controls: `workspace_only`, `full_context`, and `oracle_current_state`;
+- retrieval baseline: `flat_retrieval`;
+- memory systems: `mem0`, `amem`, and `memos`;
+- readouts: native and common reranking where defined;
+- one fixed continuation/policy profile per experiment identity.
 
-v1 does NOT claim to be a "complete benchmark for all memory capabilities." It is the four-dimension novel core with a defensible headline metric and a clean architecture for extending to the full nine dimensions later.
+Memory systems write using their native lifecycle and representation. The
+benchmark owns the frozen task trajectory, public workspace, continuation
+request, opaque action catalog, executable checker, evaluator state graph, and
+counterfactual interventions. Controlled and native readouts answer different
+questions and are never pooled into one score.
 
-## Contributions & Positioning
+## Contributions
 
-### Three Novelty Claims
+### C1. Counterfactually controlled, workspace-aware long-horizon benchmark
 
-LHMSB v1 makes three claims of novelty against the prior-art landscape (22 benchmarks surveyed; 6 closest competitors cited below):
+Episodes are generated from latent `StateUnit` and `StateEvent` records before
+public surfaces are rendered. State can be replaced, revoked, invalidated,
+reopened, reprioritized, or scope-limited. The evaluation unit is a
+State-Conditioned Evaluation Unit (SCEU): one checkpoint, current dependency
+closure, workspace snapshot, opaque action catalog, and programmatically
+checked continuation.
 
-1. **Full-lifecycle Memory ROI.** All prior efficiency-aware benchmarks define cost narrowly around retrieval/query tokens (LongMemEval-V2 LAFS) or per-query dollar cost (LongMemCode $/query, Cost-Accuracy-LTM's CpSQ). LHMSB is the first to define cost across the memory system's *entire lifecycle*: ingest, index, store, retrieve, update, and reflection. The cost vector captures agent tokens, memory-internal LLM tokens, embedding tokens and calls, storage bytes, retrieval latency, and write/update/reflection latency. The scalarization to tokens-equivalent uses a declared, pinned conversion sheet so the denominator is auditable and reproducible. The numerator normalizes gain against a no-memory counterfactual, producing a single ROI number that answers "did paying for this memory system help, and by how much?"
+The workspace is a competing information channel rather than an accidental
+part of the memory condition. Primary system value is measured on exactly
+matched SCEUs as behavior gain beyond workspace-only and oracle-gap closure.
+Full context diagnoses whether failure comes from task difficulty or memory
+selection. Results are stratified by handoff, state age, event distance,
+dependency depth, transition count, construct kind, and workspace
+recoverability.
 
-2. **Standardized cross-system goal drift in agentic tasks.** Existing benchmarks measure retrieval drift (did stored facts shift?) or embedding decay. LHMSB is the first to operationalize *behavioral* goal drift across memory systems in a standardized way, using programmatic invariants: (a) using a retracted or superseded fact, (b) violating a still-active constraint with no superseding event, (c) behavioral flip without a triggering event. The `drift_index` is a weighted violation rate over aligned probe points, identical across all conditions, so drift can be compared directly across memory systems. A sparse LLM judge (`lordx64/Qwable-v1`, pinned by revision hash) handles only the non-programmatically-decidable cases.
+Every SCEU must also include every *current* state that can distinguish the
+validity of any offered action. Stable task-governance rules—replacement and
+revocation precedence, authority precedence, and scope non-generalization—are
+part of the task contract shown to every condition. Oracle receives current
+state facts, not privileged semantics. An incomplete current-action state
+closure or condition-specific governance rule fails the design audit before
+model calls, because otherwise an oracle/control error could be an evaluator
+contract defect rather than a memory failure.
 
-3. **Procedural agentic task-completion simulators.** The field's dominant paradigm is conversational QA: an agent answers isolated questions about a synthetic biography or document corpus (AMA-Bench, STALE, MemoryAgentBench). LHMSB introduces *procedural task-completion simulators*, where the agent must complete a goal over multiple sessions in an evolving evidence world. Two families ship in v1:
-   - **Research Project**: an autonomous research task over a synthetic evidence world with retractions (facts that are later superseded). The checker maps every claim to a synthetic fact, so grading is programmatic and deterministic.
-   - **Software Development**: an evolving specification with hidden requirements + a test suite. The task is a tiny synthetic Python package graded by deterministic `pytest`; no network access or package install during episodes.
+For the matched release, full context and oracle current state are not merely
+reference bars. Every evaluated policy must solve every frozen
+group/opportunity under all three history variants with each control. Oracle
+failure means the terminal task is not established as solvable; full-context
+failure means history interpretation is still a confound. Either failure
+blocks a memory-channel claim for that report.
 
-   Both families share a common simulator core. The evidence world is *fixed and exogenous*: identical `world_event_hash` per (episode_id, seed) across all conditions. Agent actions do not mutate the world in v1, enabling clean counterfactual comparison.
+For construct identification, v0.11 generates `static`, `evolution`, and
+`hierarchical_conflict` members with the same terminal request, checkpoint,
+actions, gold action, opaque option map, continuation scope, checker-relevant
+terminal predicates, and prefix/workspace shape. Across groups, terminal
+archetypes balance current-v1, current-v2, and valid scoped-exception gold
+actions, while their opaque option positions are balanced separately. The
+primary mechanism outcomes are the evolution and conflict penalties relative
+to matched static **after subtracting the corresponding workspace-only
+penalty**. Raw performance, correctness, and endpoint drift-violation
+differences relative to static are secondary; they cannot identify a
+memory-channel effect when the history manipulation also changes workspace
+recoverability.
 
-### Positioning vs Prior Art
+These roles, the counterfactual-group analysis unit, the workspace adjustment,
+effect direction, paired test, multiplicity scope, and endpoint-only drift
+boundary are frozen in `experiment_design_audit.analysis_contract` before any
+writer or continuation-policy call. The contract is content-addressed in the
+run identity and revalidated from report artifacts. It is an internal pre-call
+specification rather than a claim of external public preregistration.
 
-The following competitor benchmarks were identified in a 22-benchmark survey. Each is cited (arXiv ID where available) and briefly differentiated. No claim is made that these benchmarks are inadequate; they probe different, often complementary, aspects of memory systems.
+A supplementary v0.12 same-decision horizon panel uses 4, 8, and 16 sessions (65,
+129, and 257 effective transitions; 3, 7, and 15 handoffs). For each history
+construct it fixes the terminal current state, workspace semantics, action
+catalog, gold action, opaque option map, package, and hidden checker. The
+primary diagnostic is the change from short to long in the workspace-adjusted
+evolution/conflict penalty. This is a joint transition/handoff dose, not a pure
+handoff manipulation. Generation, freeze/regeneration, planning, panel-level
+statistics, and artifact validation are implemented; the policy/backend
+calibration remains a separate, not-yet-completed evidence stream. Each nine-
+member panel contributes one statistical unit, and physical-member inference is
+suppressed by the report contract.
 
-| Competitor | arXiv / Ref | What It Measures | LHMSB v1 Differentiation |
-|-----------|-------------|-----------------|--------------------------|
-| **Cost-Accuracy-LTM** | 2601.07978 | Cost-Accuracy Pareto frontiers (CpSQ/AES/Pareto) for long-term memory retrieval. | Cost-Accuracy-LTM measures retrieval cost; LHMSB measures full-lifecycle cost (ingest + store + update + reflect in addition to retrieval) and normalizes over task-completion gain, not retrieval accuracy. |
-| **LongMemCode** | — | Per-query dollar cost for code-memory retrieval. | LongMemCode targets code-retrieval cost per query; LHMSB targets agentic task completion with evolving requirements and a full lifecycle cost model. |
-| **YCBench** | — | Conversational QA over structured user contexts, including a business-strategy family. | YCBench's business-strategy family is deliberately excluded from LHMSB's task space to avoid overlap. LHMSB uses procedural simulators, not conversational QA. |
-| **AMA-Bench** | — | Conversational QA over a synthetic biography with memory operations. | AMA-Bench evaluates retrieval under single-session operations; LHMSB evaluates multi-session goal completion with retractions and drift measurement. |
-| **STALE** | 2605.06527 | Staleness detection in memory-augmented QA. | STALE measures whether stored facts go stale; LHMSB measures whether the agent's *behavior* drifts when facts change, which is a different phenomenon (a fact can be current but the agent can still misapply it). |
-| **MemoryAgentBench** | 2507.05257 | Multi-session memory evaluation with conversational tasks. | MemoryAgentBench is the closest in spirit but uses conversational QA tasks; LHMSB uses procedural task-completion simulators with programmatic grading, and adds goal drift + full-lifecycle ROI as headline metrics. |
+### C2. Goal-relative long-horizon behavioral drift
 
-## Glossary of Canonical Terms
+BEAM operationalizes four state-grounded action failures:
 
-All terms used throughout the LHMSB spec are defined here. Any term appearing in this glossary is used consistently across all spec files (`01-overview.md`, `02-metrics.md`, `03-protocol.md`, `04-datasets.md`, `05-systems.md`). Conversely, any term used in the spec that has a precise technical meaning within LHMSB MUST appear in this glossary.
+- `constraint_loss`: a persistent constraint loses behavioral influence;
+- `plan_deviation`: action departs from the currently valid plan, including
+  premature adoption of a future plan;
+- `stale_state`: a revoked or superseded state still controls action;
+- `local_over_global`: a local goal or scoped exception overrides a global goal
+  or higher-authority constraint.
 
-### Core Entities
+Rates use category-specific eligible denominators. A checked single-decision
+error is first reported as a drift-compatible violation. It becomes an observed
+longitudinal drift event only after adherence to the same category and the same
+state lineage was observed at an earlier distinct eligible checkpoint.
+First-observation errors therefore have no drift onset, and adherence to one
+constraint cannot anchor a later failure of another plan. Longitudinal outputs
+include adherence-anchored first-drift
+handoff, drift-free survival, persistence across distinct checkpoints, and
+recovery after a valid update or fresh reminder. The episode is the statistical
+unit; SCEUs and state lineages are repeated observations within an episode.
+Category-only legacy trajectories are descriptive and cannot satisfy the C2
+gate. Oracle-current-state and full-context trajectories must cover the same
+lineages without drift before an onset can be attributed to memory. The
+single-endpoint matched release reports violation excess, not longitudinal
+onset.
+
+One SCEU/category must identify one focal lineage. A continuation whose same
+category refers to multiple state lineages is split into separate SCEUs; the
+report fails closed instead of applying one observed category flag to every
+eligible lineage.
+
+BEAM does not claim that behavioral drift as a general concept is new. The
+contribution is a reproducible operationalization tied to versioned task state,
+workspace controls, and executable behavior under ordinary task evolution.
+
+### C3. Decision-aligned memory-to-behavior attribution
+
+For the same SCEU, the evaluator reconstructs:
+
+```text
+stored -> backend-retrieved -> model-visible -> intervention evidence -> behavior
+```
+
+The earliest supported failure is localized as:
+
+1. storage failure: required workspace-absent state is not represented in an
+   observed store;
+2. retrieval failure: stored required state is missing from backend retrieval;
+3. exposure failure: backend-retrieved state is removed before the model sees
+   it;
+4. utilization/decision failure: required state is visible but the executable
+   action is wrong.
+
+Decision-layer failures are further separated by targeted interventions:
+`visible_without_detected_unique_causal_effect`,
+`visible_causally_influential_but_wrong`, or
+`visible_use_evidence_incomplete`. This prevents “visible” from being silently
+equated with “used,” and prevents a causally influential but wrong memory from
+being mislabeled as non-use.
+
+An unavailable lifecycle or semantic attribution is reported as
+`storage_evidence_unavailable`, never silently converted into a storage
+failure. Native/exact and inventory-inferred lifecycle provenance are separated.
+
+Successful behavior does not prove memory use. A memory object is labelled
+causally used only when a repeat-stable, state-targeted replacement or
+leave-one-out intervention changes the action or checker result. This is a
+lower bound on unique causal influence; correct behavior without detected
+effect remains `behavior_success_without_detected_unique_causal_effect` or
+`behavior_success_unprobed`. No detected effect does not exclude redundant or
+compensated use.
+
+The report additionally pairs memory conditions at an identical policy,
+readout, episode, SCEU, opportunity, checkpoint, current-state contract, and
+selected action. `outcome_equivalent_fault_profile_divergence` is the fraction
+of these outcome-equivalent pairs whose earliest supported stage or
+intervention-grounded utilization subtype differs. It demonstrates when the
+same end-task outcome hides a different repair target. The pair rows are
+dependent descriptive diagnostics rather than independent statistical units;
+zero divergence is retained and is not interpreted as equivalence.
+
+## Primary evidence and metrics
+
+| Claim | Primary evidence |
+| --- | --- |
+| Memory helps beyond available task artifacts | behavior gain beyond workspace-only; gap to full context; oracle-gap closure |
+| Current state is maintained | current-state storage precision/recall/F1; stale retention; update/delete responsiveness; current-state and conflict resolution |
+| Writes are useful and selective | write coverage, write selectivity, write-to-continuation alignment |
+| Retrieval and prompt exposure are distinct | stored-to-retrieved and retrieved-to-visible conditional yields |
+| Memory affects behavior | state-targeted detected-unique-effect lower bound and first-failure distribution |
+| End-task outcomes conceal mechanism differences | outcome-equivalent fault-profile divergence on the same decision and action |
+| Behavior drifts over the trajectory | eligible drift rate, onset, survival, persistence, and recovery |
+| Memory volume affects selection | matched within-SCEU memory-object-count interventions; not tokens or unmatched checkpoints |
+| Construct effect is not a default-action artifact | paired penalties by terminal archetype plus always-action and always-option shortcut gates |
+| A mechanism is specifically horizon-amplified | same-decision short/medium/long change in the workspace-adjusted evolution/conflict penalty |
+
+Undefined denominators remain null. Lifecycle provenance and semantic alignment
+are separate axes. Measurement-readiness gates are separate from artifact/hash
+validation.
+
+## Positioning and claim boundary
+
+BEAM must not claim to introduce memory lifecycle evaluation or behavioral
+drift as concepts. Adjacent work already covers incremental memory
+competencies, dynamic state questions, arbitrary-length agent trajectories,
+task-level memory benefits, module-level lifecycle analysis, and adversarial
+memory drift. Recent work also directly studies behavioral state decay and
+paired write/retrieval/utilization diagnostic profiles. BEAM's defensible
+novelty is therefore not any one of those labels; it is their joint
+decision-level
+instrumentation:
+
+> evolving authoritative task state + workspace control + executable
+> continuation + causal storage/retrieval/exposure/utilization localization.
+
+The resulting estimand is construct-specific degradation of a delayed task
+state-control channel, not recall accuracy under a longer prompt. Static,
+evolution, and conflict histories are paired at a final executable decision;
+workspace supplies a measured alternative information path; native lifecycle
+traces locate the earliest supported failure; and longitudinal drift records
+its behavioral consequence. Removing this matched identification structure
+would reduce the benchmark to descriptive “MemoryBench at longer context.”
+
+The v0.10 construct-stratified scorecards remain descriptive. A causal claim
+that state evolution itself changes performance is reserved for the separate
+v0.11 matched mechanism experiment, which fixes the terminal decision contract
+and prefix/workspace shape across static, evolution, and hierarchical-conflict
+variants. Memory-object exposure is still an observed backend outcome and is
+reported rather than asserted to be perfectly fixed across native systems.
+
+The detailed contribution/evidence contract and related-work links are in
+[`docs/long-horizon-benchmark-contract.md`](../docs/long-horizon-benchmark-contract.md).
+
+## Canonical glossary
 
 **episode**
-A single complete run of a task family instance. An episode comprises a fixed, ordered sequence of world events (inject, change, retract) and aligned probe points, all derived from a seed. An episode is the unit of counterfactual replay: the same episode (identified by `episode_id` and `seed`) is run under every memory condition with identical events and probes. See also: `world_event_hash`, `session`.
 
-**session**
-One contiguous interaction window within an episode. An agent perceives evidence, takes actions, and may query or update its memory system during a session. Between sessions, context is cleared (only the memory system persists, if one exists). The no-memory control is stateless across sessions; all other conditions persist via their adapter. Sessions simulate the temporal gaps in long-horizon tasks (e.g., "continue this research tomorrow").
+One replayable persistent-task trajectory generated from fixed semantic and
+trajectory seeds. It is the unit of statistical inference.
 
-**probe**
-A fixed measurement point inserted at a specific step in the episode schedule. Each probe has a `kind` (e.g., task-completion, drift-check, retrieval), a `query` presented to the agent, and `gold` (ground truth derived from the world state at that step = revealed-minus-retracted facts). Probes are *aligned*: the same probe appears at the same step in every condition, enabling paired comparison.
+**session / handoff**
 
-**condition**
-A specific memory system configuration under which an episode is run. Leaderboard conditions in v1 include: `no_memory`, `chromadb`, `mem0`, `letta`, `graphiti`, `cognee`. Two sensitivity conditions (`fake_perfect`, `fake_bad`) are included for metric validation but are not leaderboard-visible. Each condition is paired with the same episodes, enabling the counterfactual comparison.
+One isolated interaction window and the boundary after which working context is
+cleared. Handoff count is a temporal-horizon variable, not a synonym for token
+length.
 
-**world_event_hash**
-A stable, deterministic hash computed over the ordered exogenous event+probe schedule of an episode. Identical `world_event_hash` per (episode_id, seed) across all conditions guarantees that every condition sees exactly the same evidence world. Changes to the event schedule (e.g., adding or removing a retraction) produce a different hash. This hash is the primary reproducibility and integrity check.
+**workspace**
 
-### Tracks
+Agent-visible task artifacts at a checkpoint. Required state is labelled
+`explicit`, `derivable`, or `absent` evaluator-side; those labels are never
+shown to the policy.
 
-**native track**
-The PRIMARY leaderboard track. Each memory system is deployed as-is: its own defaults, its own internal LLM (if any), its own indexing strategy. All internal LLM tokens, embedding calls, storage bytes, and retrieval latency are instrumented and counted in the system's cost vector. The native track answers: "When I install this memory system and run it, what's the ROI?" This track is reported separately and never mixed with the controlled track.
+**State-Conditioned Evaluation Unit (SCEU)**
+
+One continuation decision bound to current focal state, dependency closure,
+workspace recoverability, an action catalog, and a programmatic checker.
+
+**memory-reliant state**
+
+Current required state that is absent from the workspace. This is the primary
+denominator for the memory-to-behavior attribution funnel. Derivable state is a
+separate sensitivity track.
+
+**stored**
+
+A current native memory object is deterministically aligned to a required state
+with recorded lifecycle provenance. Ambiguous alignment earns no positive
+coverage.
+
+**backend-retrieved**
+
+Objects returned by the memory backend before benchmark-owned reranking,
+truncation, or prompt-budget filtering. An explicitly empty result is distinct
+from a legacy record in which the field was not recorded.
+
+**model-visible**
+
+Objects actually serialized into the continuation policy's input.
+
+**causally used**
+
+A conservative label supported by a stable targeted intervention. Visibility,
+retrieval, attention claims, or model self-report are insufficient.
 
 **controlled track**
-A SECONDARY sub-study track, reported separately from the native track and never merged into the primary leaderboard. In the controlled track, where a memory system supports pinning its internal model, the same model is used across all systems (typically the same model as the agent). This isolates the effect of the memory architecture from the effect of the internal model quality. Not all systems support this (it is opt-in); the controlled track is always a secondary analysis.
 
-### Cost & Measurement
+Systems share the benchmark-owned embedding/reranking configuration so memory
+architecture and policy differences can be studied under a common readout.
 
-**cost vector**
-A structured record of all resource consumption incurred during an episode run under a given condition. Fields:
+**native track**
 
-| Field | Description |
-|-------|-------------|
-| `agent_input_tokens` | Tokens fed to the agent model (context + tool results) |
-| `agent_output_tokens` | Tokens generated by the agent model |
-| `mem_internal_in_tokens` | Input tokens consumed by the memory system's internal LLM calls (add, search, reflect, summarize, etc.) |
-| `mem_internal_out_tokens` | Output tokens generated by the memory system's internal LLM calls |
-| `embedding_tokens` | Tokens consumed for generating embeddings (text → vector) |
-| `embedding_calls` | Number of embedding API calls |
-| `storage_bytes` | Bytes stored/consumed in the memory backend |
-| `retrieval_latency_ms` | Total wall-clock milliseconds spent in retrieval/search operations |
-| `write_latency_ms` | Total wall-clock milliseconds spent in write/upsert/update operations |
-| `reflection_tokens` | Tokens consumed by reflection/summarization/consolidation (subset of `mem_internal_*` but tracked separately for analysis) |
-| `num_retrieval_calls` | Total count of search/retrieval operations |
-
-Cost vectors are scalarized to **tokens-equivalent** using a declared, pinned conversion sheet (`configs/cost_weights.yaml`). Latency and storage are converted to token equivalents via that sheet. Dollar cost is a secondary, separately reported column using a pinned price sheet. One-time dataset-generation cost and judge cost are excluded from system cost vectors unless the system itself triggers them.
+Each memory system uses its official or declared native configuration. It
+measures the complete deployed system and is reported separately from the
+controlled track.

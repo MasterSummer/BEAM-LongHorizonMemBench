@@ -49,7 +49,7 @@ CLOUD = _outcome(
 )
 
 
-def test_stable_repeated_outcomes_without_change_are_not_causal_use() -> None:
+def test_no_effect_does_not_overclaim_that_visible_memory_was_unused() -> None:
     result = classify_causal_use(
         memory_id="m1",
         intervention_kind="leave_one_out",
@@ -57,7 +57,7 @@ def test_stable_repeated_outcomes_without_change_are_not_causal_use() -> None:
         baseline=(SAFE, SAFE),
         intervention=(SAFE, SAFE),
     )
-    assert result.label == "visible_not_causally_used"
+    assert result.label == "visible_without_detected_unique_causal_effect"
     assert result.baseline_stable
     assert result.intervention_stable
     assert not result.behaviorally_used
@@ -156,7 +156,8 @@ def test_direction_that_disagrees_with_gold_role_remains_ambiguous() -> None:
         intervention=(STALE, STALE),
     )
     assert result.label == "causal_direction_ambiguous"
-    assert not result.behaviorally_used
+    assert result.behaviorally_used
+    assert result.action_changed
 
 
 def test_four_long_horizon_drift_components_are_programmatic() -> None:
@@ -169,7 +170,7 @@ def test_four_long_horizon_drift_components_are_programmatic() -> None:
     result = classify_long_horizon_drift(
         DriftEvidence(
             outcome=outcome,
-            used_state_ids=("P1", "L1"),
+            action_expressed_state_ids=("P1", "L1"),
             active_constraint_ids=("C1",),
             current_plan_state_ids=("P2",),
             stale_state_ids=("P1",),
@@ -193,7 +194,7 @@ def test_valid_state_update_is_not_drift() -> None:
     result = classify_long_horizon_drift(
         DriftEvidence(
             outcome=SAFE,
-            used_state_ids=("P2",),
+            action_expressed_state_ids=("P2",),
             active_constraint_ids=("C1", "C2"),
             current_plan_state_ids=("P2",),
             stale_state_ids=("P1",),

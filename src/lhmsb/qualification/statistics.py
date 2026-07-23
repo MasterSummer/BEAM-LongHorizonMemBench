@@ -15,11 +15,69 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-from lhmsb.qualification.metrics import MultisystemMetricInput
+from lhmsb.qualification.horizon_panel import (
+    HORIZON_PRIMARY_ESTIMANDS,
+    HORIZON_SECONDARY_ESTIMANDS,
+    compute_horizon_panel_contrasts,
+)
+from lhmsb.qualification.longitudinal import (
+    episode_observed_drift_incidence,
+)
+from lhmsb.qualification.metrics import (
+    MultisystemMetricInput,
+    compute_matched_construct_contrasts,
+)
 
 BOOTSTRAP_RESAMPLES = 10_000
 PERMUTATION_RESAMPLES = 10_000
 ALPHA = 0.05
+
+MATCHED_STATISTICS_SCHEMA_VERSION = 2
+MATCHED_PRIMARY_ESTIMANDS = (
+    "state_evolution_penalty_excess_over_workspace",
+    "hierarchical_conflict_penalty_excess_over_workspace",
+)
+MATCHED_SECONDARY_ESTIMANDS = (
+    "state_evolution_penalty_vs_static",
+    "hierarchical_conflict_penalty_vs_static",
+    "state_evolution_correctness_penalty_vs_static",
+    "hierarchical_conflict_correctness_penalty_vs_static",
+    "state_evolution_drift_violation_excess_vs_static",
+    "hierarchical_conflict_drift_violation_excess_vs_static",
+)
+MATCHED_ALL_ESTIMANDS = (
+    *MATCHED_PRIMARY_ESTIMANDS,
+    *MATCHED_SECONDARY_ESTIMANDS,
+)
+
+MATCHED_PRIMARY_ANALYSIS_UNIT = "counterfactual_group"
+MATCHED_PRIMARY_WORKSPACE_ADJUSTMENT = (
+    "matched_workspace_only_difference_in_differences"
+)
+MATCHED_PRIMARY_EFFECT_DIRECTION = (
+    "positive_means_additional_degradation_beyond_workspace"
+)
+MATCHED_DRIFT_SCOPE = "endpoint_violation_only"
+MATCHED_PAIRED_TEST = "sign_flip"
+MATCHED_MULTIPLICITY_SCOPE = (
+    "within_estimand_across_policy_condition_readout_cells"
+)
+
+HORIZON_STATISTICS_SCHEMA_VERSION = 1
+HORIZON_ALL_ESTIMANDS = (
+    *HORIZON_PRIMARY_ESTIMANDS,
+    *HORIZON_SECONDARY_ESTIMANDS,
+)
+HORIZON_PRIMARY_ANALYSIS_UNIT = "horizon_panel"
+HORIZON_PRIMARY_WORKSPACE_ADJUSTMENT = (
+    "difference_in_differences_in_differences_against_workspace_only"
+)
+HORIZON_PRIMARY_EFFECT_DIRECTION = (
+    "positive_means_construct_penalty_grows_more_from_short_to_long_than_"
+    "the_matched_workspace_only_penalty"
+)
+HORIZON_PAIRED_TEST = "panel_level_sign_flip"
+HORIZON_MULTIPLICITY_SCOPE = "two_primary_horizon_amplification_estimands"
 
 _Cell = tuple[str, str, str]
 
@@ -46,8 +104,15 @@ def compute_episode_cluster_statistics(
     metrics: dict[str, Callable[[Sequence[MultisystemMetricInput]], float | None]] = {
         "mean_behavior_score": _mean_behavior_score,
         "behavior_correct_rate": _behavior_correct_rate,
+        "eligible_drift_violation_rate": _eligible_drift_rate,
+        "canonical_drift_violation_rate": _canonical_drift_violation_rate,
+        "observed_longitudinal_drift_incidence": (
+            episode_observed_drift_incidence
+        ),
+        # Schema-v3 compatibility aliases. New analyses should use the
+        # explicitly named violation and longitudinal metrics above.
         "eligible_drift_rate": _eligible_drift_rate,
-        "observed_drift_rate": _observed_drift_rate,
+        "observed_drift_rate": _canonical_drift_violation_rate,
         "causal_memory_use_rate": _causal_memory_use_rate,
     }
     by_episode_cell: dict[
@@ -104,7 +169,14 @@ def compute_episode_cluster_statistics(
             }
         )
         pairs = _comparison_pairs(policy_cells)
-        for metric_name in ("mean_behavior_score", "behavior_correct_rate"):
+        for metric_name in (
+            "mean_behavior_score",
+            "behavior_correct_rate",
+            "eligible_drift_violation_rate",
+            "canonical_drift_violation_rate",
+            "observed_longitudinal_drift_incidence",
+            "eligible_drift_rate",
+        ):
             for pair_index, (left, right, contrast) in enumerate(pairs):
                 left_values = episode_values.get((left, metric_name), {})
                 right_values = episode_values.get((right, metric_name), {})
@@ -185,12 +257,36 @@ def compute_episode_cluster_statistics(
                 "Exact and inferred storage-provenance tracks remain descriptive "
                 "unless enough episode-level exact observations exist."
             ),
+            (
+                "Drift-compatible violations and adherence-anchored longitudinal "
+                "drift are distinct; first-observation errors never enter the "
+                "longitudinal drift incidence."
+            ),
+            (
+                "eligible_drift_rate and observed_drift_rate are compatibility "
+                "aliases for violation rates and are not used as longitudinal "
+                "drift estimands."
+            ),
         ],
     }
 
 
 def statistics_markdown(payload: dict[str, object]) -> str:
     """Render a concise human-readable companion to ``statistics.json``."""
+    if payload.get("status") == "suppressed_dependent_physical_members":
+        return "\n".join(
+            (
+                "# Generic episode statistics suppressed",
+                "",
+                str(payload.get("reason", "")),
+                "",
+                (
+                    "Declared primary analysis unit: "
+                    f"**{payload.get('analysis_unit', 'missing')}**."
+                ),
+                "",
+            )
+        )
     lines = [
         "# Episode-clustered statistical report",
         "",
@@ -287,6 +383,470 @@ def statistics_markdown(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def compute_matched_group_statistics(
+    observations: Sequence[MultisystemMetricInput],
+    *,
+    seed: int = 20260723,
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES,
+    permutation_resamples: int = PERMUTATION_RESAMPLES,
+) -> dict[str, object]:
+    """Estimate matched history effects using counterfactual groups as units.
+
+    Static, evolution, and conflict are three members of one counterfactual
+    group, not three independent episodes.  The contrast builder first reduces
+    them to one within-group effect; only those effects are bootstrapped and
+    sign-flipped here.
+    """
+
+    if bootstrap_resamples < 1 or permutation_resamples < 1:
+        raise ValueError("resample counts must be positive")
+    contrasts = tuple(
+        row
+        for row in compute_matched_construct_contrasts(observations)
+        if row.get("complete") is True
+    )
+    by_cell: dict[tuple[str, str, str], list[Mapping[str, object]]] = (
+        defaultdict(list)
+    )
+    for row in contrasts:
+        by_cell[
+            (
+                str(row["policy_profile_id"]),
+                str(row["condition"]),
+                str(row["readout"]),
+            )
+        ].append(row)
+
+    raw_estimates: list[dict[str, object]] = []
+    for cell_index, (cell, rows) in enumerate(sorted(by_cell.items())):
+        for estimand_index, estimand in enumerate(MATCHED_ALL_ESTIMANDS):
+            values = [
+                float(value)
+                for row in rows
+                if (value := row.get(estimand)) is not None
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            ]
+            if not values:
+                continue
+            interval = _bootstrap_interval(
+                values,
+                seed=seed + cell_index * 100 + estimand_index,
+                n_resamples=bootstrap_resamples,
+            )
+            standard_deviation = (
+                statistics.stdev(values) if len(values) > 1 else 0.0
+            )
+            raw_estimates.append(
+                {
+                    "policy_profile_id": cell[0],
+                    "condition": cell[1],
+                    "readout": cell[2],
+                    "metric": estimand,
+                    "estimand_role": (
+                        "primary"
+                        if estimand in MATCHED_PRIMARY_ESTIMANDS
+                        else "secondary"
+                    ),
+                    "contrast": "matched_history_vs_static",
+                    "analysis_unit": "counterfactual_group",
+                    "n_pairs": len(values),
+                    "mean_difference": interval.point,
+                    "ci_low": interval.low,
+                    "ci_high": interval.high,
+                    "paired_cohens_dz": (
+                        interval.point / standard_deviation
+                        if standard_deviation
+                        else 0.0
+                    ),
+                    "permutation_p_value": _paired_sign_flip_p_value(
+                        values,
+                        seed=(
+                            seed
+                            + 10_000
+                            + cell_index * 100
+                            + estimand_index
+                        ),
+                        n_resamples=permutation_resamples,
+                    ),
+                    "minimum_detectable_dz_80pct": (
+                        _minimum_detectable_effect(len(values))
+                    ),
+                    "effect_direction": (
+                        "positive means worse than the matched static history"
+                    ),
+                }
+            )
+
+    archetype_rows: list[dict[str, object]] = []
+    archetype_groups: dict[
+        tuple[str, str, str, str], list[Mapping[str, object]]
+    ] = defaultdict(list)
+    for row in contrasts:
+        archetype_groups[
+            (
+                str(row["policy_profile_id"]),
+                str(row["condition"]),
+                str(row["readout"]),
+                str(row.get("terminal_archetype", "")),
+            )
+        ].append(row)
+    for key, rows in sorted(archetype_groups.items()):
+        for estimand in MATCHED_ALL_ESTIMANDS:
+            values = [
+                float(value)
+                for row in rows
+                if (value := row.get(estimand)) is not None
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            ]
+            if not values:
+                continue
+            archetype_rows.append(
+                {
+                    "policy_profile_id": key[0],
+                    "condition": key[1],
+                    "readout": key[2],
+                    "terminal_archetype": key[3],
+                    "metric": estimand,
+                    "estimand_role": (
+                        "primary"
+                        if estimand in MATCHED_PRIMARY_ESTIMANDS
+                        else "secondary"
+                    ),
+                    "analysis_unit": "counterfactual_group",
+                    "n_groups": len(values),
+                    "mean_difference": statistics.fmean(values),
+                }
+            )
+
+    adjusted = _holm_adjust(raw_estimates)
+    return {
+        "schema_version": MATCHED_STATISTICS_SCHEMA_VERSION,
+        "analysis_unit": "counterfactual_group",
+        "primary_analysis_unit": MATCHED_PRIMARY_ANALYSIS_UNIT,
+        "physical_member_role": "within_group_repeated_condition",
+        "primary_estimands": list(MATCHED_PRIMARY_ESTIMANDS),
+        "secondary_estimands": list(MATCHED_SECONDARY_ESTIMANDS),
+        "primary_workspace_adjustment": MATCHED_PRIMARY_WORKSPACE_ADJUSTMENT,
+        "primary_effect_direction": MATCHED_PRIMARY_EFFECT_DIRECTION,
+        "drift_scope": MATCHED_DRIFT_SCOPE,
+        "paired_test": MATCHED_PAIRED_TEST,
+        "multiplicity_scope": MATCHED_MULTIPLICITY_SCOPE,
+        "alpha": ALPHA,
+        "bootstrap_resamples": bootstrap_resamples,
+        "permutation_resamples": permutation_resamples,
+        "seed": seed,
+        "n_complete_group_cells": len(contrasts),
+        "n_unique_counterfactual_groups": len(
+            {str(row["counterfactual_group_id"]) for row in contrasts}
+        ),
+        "estimates": adjusted,
+        "terminal_archetype_sensitivity": archetype_rows,
+        "notes": [
+            "Each static/evolution/conflict triplet contributes one paired effect.",
+            "Physical triplet members are never treated as independent samples.",
+            "Positive effects denote degradation relative to matched static history.",
+            (
+                "Penalty-excess-over-workspace estimands are difference-in-differences: "
+                "they subtract the matched workspace-only construct penalty so that "
+                "workspace-surface difficulty is not attributed to the memory channel."
+            ),
+            (
+                "Drift fields in this matched endpoint report are violation "
+                "excesses, not longitudinal onset."
+            ),
+            "Confidence intervals resample counterfactual groups; p-values use paired sign flips.",
+        ],
+    }
+
+
+def matched_group_statistics_markdown(payload: Mapping[str, object]) -> str:
+    """Render matched state-control mechanism estimates."""
+
+    if payload.get("status") == "suppressed_within_panel_triplets":
+        return "\n".join(
+            (
+                "# Within-dose matched statistics suppressed",
+                "",
+                str(payload.get("reason", "")),
+                "",
+                "Declared analysis unit: **horizon panel**.",
+                "",
+            )
+        )
+
+    lines = [
+        "# Counterfactually matched state-control statistics",
+        "",
+        (
+            "Analysis unit: **counterfactual group**. Static, evolution, and "
+            "hierarchical-conflict members are repeated conditions within a group."
+        ),
+        "",
+        "Positive effects mean worse performance than the matched static history.",
+        (
+            "For `*_penalty_excess_over_workspace`, positive values mean the "
+            "condition loses more performance than workspace-only under the same "
+            "history manipulation."
+        ),
+        "",
+        "## Frozen analysis contract",
+        "",
+        "Primary estimands:",
+        *(
+            f"- `{estimand}`"
+            for estimand in _string_sequence(payload.get("primary_estimands"))
+        ),
+        "",
+        (
+            "Primary workspace adjustment: "
+            f"`{payload.get('primary_workspace_adjustment', '')}`."
+        ),
+        (
+            "Matched endpoint drift scope: "
+            f"`{payload.get('drift_scope', '')}`; it is not longitudinal onset."
+        ),
+        (
+            "Multiplicity scope: "
+            f"`{payload.get('multiplicity_scope', '')}`."
+        ),
+        "",
+        "Secondary estimands are descriptive mechanism, correctness, and endpoint-"
+        "violation contrasts; they cannot replace the workspace-adjusted primary "
+        "analysis.",
+        "",
+        "## Estimates",
+        "",
+        "| Role | Policy | Condition | Readout | Estimand | Groups | Mean | 95% CI | "
+        "d_z | Holm p |",
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for row in _record_sequence(payload.get("estimates")):
+        lines.append(
+            "| {role} | {policy} | {condition} | {readout} | `{metric}` | {n} | "
+            "{mean:.4f} | [{low:.4f}, {high:.4f}] | {effect:.3f} | {p:.4g} |".format(
+                role=row.get("estimand_role", ""),
+                policy=row.get("policy_profile_id", ""),
+                condition=row.get("condition", ""),
+                readout=row.get("readout", ""),
+                metric=row.get("metric", ""),
+                n=int(_number(row.get("n_pairs", 0))),
+                mean=_number(row.get("mean_difference", 0.0)),
+                low=_number(row.get("ci_low", 0.0)),
+                high=_number(row.get("ci_high", 0.0)),
+                effect=_number(row.get("paired_cohens_dz", 0.0)),
+                p=_number(row.get("holm_adjusted_p_value", 1.0)),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "Matched drift estimands are drift-compatible violation excesses. "
+            "Longitudinal onset and survival are reported separately.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def compute_horizon_panel_statistics(
+    observations: Sequence[MultisystemMetricInput],
+    *,
+    seed: int = 20260723,
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES,
+    permutation_resamples: int = PERMUTATION_RESAMPLES,
+) -> dict[str, object]:
+    """Estimate horizon amplification with complete panels as the only units.
+
+    The nine physical members and any repeated target readouts within one panel
+    are reduced to one value before resampling. Transition count, dependency
+    depth, and session handoffs change jointly, so these estimates are not
+    interpreted as a pure handoff effect.
+    """
+
+    if bootstrap_resamples < 1 or permutation_resamples < 1:
+        raise ValueError("resample counts must be positive")
+    contrasts = tuple(
+        row
+        for row in compute_horizon_panel_contrasts(observations)
+        if row.get("complete") is True
+    )
+    panel_values: dict[
+        tuple[_Cell, str], dict[str, list[float]]
+    ] = defaultdict(lambda: defaultdict(list))
+    for row in contrasts:
+        cell = (
+            str(row["policy_profile_id"]),
+            str(row["condition"]),
+            str(row["readout"]),
+        )
+        panel_id = str(row["horizon_panel_id"])
+        for estimand in HORIZON_ALL_ESTIMANDS:
+            value = row.get(estimand)
+            if (
+                isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+            ):
+                panel_values[(cell, estimand)][panel_id].append(float(value))
+
+    raw_estimates: list[dict[str, object]] = []
+    for cell_index, ((cell, estimand), values_by_panel) in enumerate(
+        sorted(panel_values.items())
+    ):
+        values = [
+            statistics.fmean(values_by_panel[panel_id])
+            for panel_id in sorted(values_by_panel)
+        ]
+        if not values:
+            continue
+        interval = _bootstrap_interval(
+            values,
+            seed=seed + cell_index,
+            n_resamples=bootstrap_resamples,
+        )
+        standard_deviation = (
+            statistics.stdev(values) if len(values) > 1 else 0.0
+        )
+        raw_estimates.append(
+            {
+                "policy_profile_id": cell[0],
+                "condition": cell[1],
+                "readout": cell[2],
+                "metric": estimand,
+                "estimand_role": (
+                    "primary"
+                    if estimand in HORIZON_PRIMARY_ESTIMANDS
+                    else "secondary"
+                ),
+                "contrast": "long_vs_short_joint_horizon_dose",
+                "analysis_unit": HORIZON_PRIMARY_ANALYSIS_UNIT,
+                "n_panels": len(values),
+                "mean_difference": interval.point,
+                "ci_low": interval.low,
+                "ci_high": interval.high,
+                "paired_cohens_dz": (
+                    interval.point / standard_deviation
+                    if standard_deviation
+                    else 0.0
+                ),
+                "permutation_p_value": _paired_sign_flip_p_value(
+                    values,
+                    seed=seed + 10_000 + cell_index,
+                    n_resamples=permutation_resamples,
+                ),
+                "minimum_detectable_dz_80pct": _minimum_detectable_effect(
+                    len(values)
+                ),
+                "effect_direction": HORIZON_PRIMARY_EFFECT_DIRECTION,
+            }
+        )
+
+    adjusted = _holm_adjust(raw_estimates)
+    return {
+        "schema_version": HORIZON_STATISTICS_SCHEMA_VERSION,
+        "analysis_role": "supplementary_construct_validity_diagnostic",
+        "analysis_unit": HORIZON_PRIMARY_ANALYSIS_UNIT,
+        "primary_analysis_unit": HORIZON_PRIMARY_ANALYSIS_UNIT,
+        "physical_member_role": "within_panel_repeated_condition",
+        "horizon_axis": (
+            "joint_effective_transition_and_session_handoff_dose"
+        ),
+        "reference_horizon_level": "short",
+        "intermediate_horizon_level": "medium",
+        "target_horizon_level": "long",
+        "primary_estimands": list(HORIZON_PRIMARY_ESTIMANDS),
+        "secondary_estimands": list(HORIZON_SECONDARY_ESTIMANDS),
+        "primary_workspace_adjustment": HORIZON_PRIMARY_WORKSPACE_ADJUSTMENT,
+        "primary_effect_direction": HORIZON_PRIMARY_EFFECT_DIRECTION,
+        "paired_test": HORIZON_PAIRED_TEST,
+        "multiplicity_scope": HORIZON_MULTIPLICITY_SCOPE,
+        "alpha": ALPHA,
+        "bootstrap_resamples": bootstrap_resamples,
+        "permutation_resamples": permutation_resamples,
+        "seed": seed,
+        "n_complete_panel_cells": len(contrasts),
+        "n_unique_horizon_panels": len(
+            {str(row["horizon_panel_id"]) for row in contrasts}
+        ),
+        "estimates": adjusted,
+        "notes": [
+            "Each complete 3-construct by 3-dose grid contributes one panel effect.",
+            "Nine physical members are never treated as independent samples.",
+            (
+                "Primary estimands are workspace-adjusted triple differences in "
+                "construct-penalty amplification from short to long."
+            ),
+            (
+                "The dose jointly changes effective transitions, dependency depth, "
+                "and session handoffs; it is not a pure handoff effect."
+            ),
+            (
+                "Confidence intervals resample panels and p-values use panel-level "
+                "sign flips."
+            ),
+        ],
+    }
+
+
+def horizon_panel_statistics_markdown(payload: Mapping[str, object]) -> str:
+    """Render the preregistered horizon-panel diagnostic."""
+
+    lines = [
+        "# Same-decision horizon-dose statistics",
+        "",
+        (
+            "Analysis unit: **horizon panel**. Each panel contains nine dependent "
+            "physical members; those members are never counted as independent n."
+        ),
+        "",
+        (
+            "The short-to-long dose jointly increases effective transitions, "
+            "dependency depth, and session handoffs. Results therefore diagnose "
+            "horizon sensitivity but do not identify a pure handoff effect."
+        ),
+        "",
+        "Primary estimands:",
+        *(
+            f"- `{estimand}`"
+            for estimand in _string_sequence(payload.get("primary_estimands"))
+        ),
+        "",
+        (
+            "| Role | Policy | Condition | Readout | Estimand | Panels | Mean | "
+            "95% CI | d_z | Holm p |"
+        ),
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for row in _record_sequence(payload.get("estimates")):
+        lines.append(
+            "| {role} | {policy} | {condition} | {readout} | `{metric}` | {n} | "
+            "{mean:.4f} | [{low:.4f}, {high:.4f}] | {effect:.3f} | {p:.4g} |".format(
+                role=row.get("estimand_role", ""),
+                policy=row.get("policy_profile_id", ""),
+                condition=row.get("condition", ""),
+                readout=row.get("readout", ""),
+                metric=row.get("metric", ""),
+                n=int(_number(row.get("n_panels", 0))),
+                mean=_number(row.get("mean_difference", 0.0)),
+                low=_number(row.get("ci_low", 0.0)),
+                high=_number(row.get("ci_high", 0.0)),
+                effect=_number(row.get("paired_cohens_dz", 0.0)),
+                p=_number(row.get("holm_adjusted_p_value", 1.0)),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "This is supplementary construct-validity evidence and cannot by "
+            "itself establish a confirmatory long-horizon effect.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _group_cluster_sensitivity(
     episode_values: Mapping[tuple[_Cell, str], Mapping[str, float]],
     episode_groups: Mapping[str, str],
@@ -359,7 +919,11 @@ def _group_cluster_sensitivity(
         policy_cells = sorted(
             {cell for cell, _metric in group_values if cell[0] == policy}
         )
-        for metric_name in ("mean_behavior_score", "behavior_correct_rate"):
+        for metric_name in (
+            "mean_behavior_score",
+            "behavior_correct_rate",
+            "eligible_drift_rate",
+        ):
             for pair_index, (left, right, contrast) in enumerate(
                 _comparison_pairs(policy_cells)
             ):
@@ -422,6 +986,8 @@ def _leave_one_out_means(values: Sequence[float]) -> tuple[float, ...]:
 def _comparison_pairs(cells: Sequence[_Cell]) -> tuple[tuple[_Cell, _Cell, str], ...]:
     by_condition = {(cell[1], cell[2]): cell for cell in cells}
     workspace = by_condition.get(("workspace_only", "none"))
+    full_context = by_condition.get(("full_context", "none"))
+    oracle = by_condition.get(("oracle_current_state", "none"))
     flat = by_condition.get(("flat_retrieval", "common_rerank"))
     output: list[tuple[_Cell, _Cell, str]] = []
     memory_cells = [
@@ -437,6 +1003,16 @@ def _comparison_pairs(cells: Sequence[_Cell]) -> tuple[tuple[_Cell, _Cell, str],
             (cell, flat, "gain_over_flat_retrieval")
             for cell in memory_cells
             if cell != flat
+        )
+    if full_context is not None:
+        output.extend(
+            (cell, full_context, "difference_to_full_context")
+            for cell in memory_cells
+        )
+    if oracle is not None:
+        output.extend(
+            (cell, oracle, "difference_to_oracle_current_state")
+            for cell in memory_cells
         )
     for condition in ("mem0", "amem", "memos"):
         native = by_condition.get((condition, "native"))
@@ -484,7 +1060,7 @@ def _eligible_drift_rate(
     )
 
 
-def _observed_drift_rate(
+def _canonical_drift_violation_rate(
     rows: Sequence[MultisystemMetricInput],
 ) -> float | None:
     if not rows:
@@ -507,7 +1083,15 @@ def _causal_memory_use_rate(
     if not labels:
         return None
     return statistics.fmean(
-        float(label in {"beneficial", "harmful"}) for label in labels
+        float(
+            label
+            in {
+                "beneficial",
+                "harmful",
+                "causal_direction_ambiguous",
+            }
+        )
+        for label in labels
     )
 
 
@@ -585,6 +1169,12 @@ def _record_sequence(value: object) -> tuple[dict[str, object], ...]:
     return tuple(dict(item) for item in value if isinstance(item, dict))
 
 
+def _string_sequence(value: object) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return ()
+    return tuple(str(item) for item in value)
+
+
 def _number(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError("statistical value must be numeric")
@@ -601,7 +1191,28 @@ def _minimum_detectable_effect(n_pairs: int) -> float | None:
 __all__ = [
     "ALPHA",
     "BOOTSTRAP_RESAMPLES",
+    "HORIZON_ALL_ESTIMANDS",
+    "HORIZON_MULTIPLICITY_SCOPE",
+    "HORIZON_PAIRED_TEST",
+    "HORIZON_PRIMARY_ANALYSIS_UNIT",
+    "HORIZON_PRIMARY_EFFECT_DIRECTION",
+    "HORIZON_PRIMARY_WORKSPACE_ADJUSTMENT",
+    "HORIZON_STATISTICS_SCHEMA_VERSION",
+    "MATCHED_ALL_ESTIMANDS",
+    "MATCHED_DRIFT_SCOPE",
+    "MATCHED_MULTIPLICITY_SCOPE",
+    "MATCHED_PAIRED_TEST",
+    "MATCHED_PRIMARY_ANALYSIS_UNIT",
+    "MATCHED_PRIMARY_EFFECT_DIRECTION",
+    "MATCHED_PRIMARY_ESTIMANDS",
+    "MATCHED_PRIMARY_WORKSPACE_ADJUSTMENT",
+    "MATCHED_SECONDARY_ESTIMANDS",
+    "MATCHED_STATISTICS_SCHEMA_VERSION",
     "PERMUTATION_RESAMPLES",
     "compute_episode_cluster_statistics",
+    "compute_horizon_panel_statistics",
+    "compute_matched_group_statistics",
+    "horizon_panel_statistics_markdown",
+    "matched_group_statistics_markdown",
     "statistics_markdown",
 ]

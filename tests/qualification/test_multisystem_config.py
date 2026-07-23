@@ -33,6 +33,18 @@ AAAI_CONFIG_PATH = (
     / "experiments"
     / "systems_controlled_gpt_only_aaai.yaml"
 )
+MATCHED_CONFIG_PATH = (
+    ROOT
+    / "configs"
+    / "experiments"
+    / "systems_controlled_gpt_only_matched_v011.yaml"
+)
+LONGITUDINAL_CONFIG_PATH = (
+    ROOT
+    / "configs"
+    / "experiments"
+    / "systems_controlled_gpt_only_longitudinal_v013.yaml"
+)
 RUN_ID = "1" * 64
 OTHER_RUN_ID = "2" * 64
 
@@ -228,6 +240,43 @@ def test_aaai_gpt_only_profile_pins_shengsuanyun_route_and_secret() -> None:
             "responses",
         )
     ]
+
+
+def test_matched_mechanism_config_disables_only_count_load_interventions() -> None:
+    config = load_qualification_config(MATCHED_CONFIG_PATH)
+
+    assert isinstance(config, SystemsQualificationConfig)
+    assert config.experiment_id == "systems_controlled_gpt_only_matched_v011"
+    assert config.dataset_release == "software-matched-constructs-v0.11.0"
+    assert config.sampling.enable_memory_count_interventions is False
+    assert config.sampling.baseline_repeats == 2
+    assert config.sampling.intervention_repeats == 2
+    assert config.sampling.visible_memory_count_add_levels == (1, 5, 20)
+
+
+def test_longitudinal_config_pins_v013_release_and_gpt_only_matrix() -> None:
+    config = load_qualification_config(LONGITUDINAL_CONFIG_PATH)
+
+    assert isinstance(config, SystemsQualificationConfig)
+    assert config.experiment_id == "systems_controlled_gpt_only_longitudinal_v013"
+    assert config.dataset_release == "software-longitudinal-trajectories-v0.13.0"
+    assert len(config.policy_profiles) == 1
+    assert config.policy_profiles[0].profile_id == "gpt_5_6_sol_shengsuanyun"
+    assert config.conditions == (
+        "workspace_only",
+        "full_context",
+        "oracle_current_state",
+        "flat_retrieval",
+        "mem0",
+        "amem",
+        "memos",
+    )
+    assert config.sampling.visible_memory_count_opportunity_ids == (
+        "opp-premature-v2",
+        "opp-stale-v1",
+        "opp-local-valid",
+        "opp-global-local-conflict",
+    )
 
 
 def test_schema_v2_config_is_deeply_immutable_and_serializes_condition_definitions() -> None:

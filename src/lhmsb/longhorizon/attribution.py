@@ -133,9 +133,16 @@ def eligible_write_state_ids(
                 if event.session == session_index
                 and event.type in _POSITIVE_WRITE_EVENT_TYPES
                 and event.target_state_id in current
+                and is_benchmark_state_id(event.target_state_id)
             }
         )
     )
+
+
+def is_benchmark_state_id(state_id: str) -> bool:
+    """Return false for evaluator-only neutral records used for matching."""
+
+    return not state_id.startswith("N")
 
 
 def normalize_fact_text(text: str) -> str:
@@ -290,9 +297,21 @@ def attribute_memory(
 def build_software_fact_signatures(plan: EpisodePlan) -> tuple[FactSignature, ...]:
     """Build the fixed evaluator catalog for the Software Mem0 template."""
     catalog = _software_catalog()
+    for state in plan.state_units:
+        if state.state_id not in catalog and state.state_id.startswith("N"):
+            # Counterfactually matched releases use evaluator-only neutral
+            # records to keep event/surface shape fixed without introducing a
+            # decision-relevant transition.  Their exact generated value is
+            # the signature; no hand-authored lexical shortcut is needed.
+            catalog[state.state_id] = _SignatureDefinition(
+                required_anchor_groups=(),
+                allowed_surface_variants=(),
+                negative_anchors=(),
+            )
     state_ids = {state.state_id for state in plan.state_units}
     missing = state_ids.difference(catalog)
-    extra = set(catalog).difference(state_ids)
+    optional = {state_id for state_id in catalog if state_id.startswith("N")}
+    extra = set(catalog).difference(state_ids).difference(optional)
     if missing or extra:
         raise ValueError(
             "software signature catalog does not match plan states: "
@@ -311,7 +330,10 @@ def build_software_fact_signatures(plan: EpisodePlan) -> tuple[FactSignature, ..
             for event in plan.events
             if event.target_state_id == state.state_id and event.type == "add"
         )
-        if not source_events:
+        if (
+            not source_events
+            and plan.metadata_dict.get("construct_mode") != "matched_triplet"
+        ):
             raise ValueError(f"state {state.state_id!r} has no source add event")
         signatures.append(
             FactSignature(
@@ -649,6 +671,26 @@ def _software_catalog() -> dict[str, _SignatureDefinition]:
             ),
             negative_anchors=("v1 is the current implementation", "v1是当前实现"),
         ),
+        "N1": _SignatureDefinition(
+            required_anchor_groups=(
+                ("design review", "review"),
+                ("implementation notes", "project record"),
+            ),
+            allowed_surface_variants=(
+                "routine design review completed",
+            ),
+            negative_anchors=("review was cancelled",),
+        ),
+        "N2": _SignatureDefinition(
+            required_anchor_groups=(
+                ("reviewed implementation notes", "implementation notes"),
+                ("archived", "project record"),
+            ),
+            allowed_surface_variants=(
+                "reviewed implementation notes were archived",
+            ),
+            negative_anchors=("notes remain active",),
+        ),
         "D1": _SignatureDefinition(
             required_anchor_groups=(
                 (
@@ -798,5 +840,6 @@ __all__ = [
     "attribute_memory",
     "build_software_fact_signatures",
     "eligible_write_state_ids",
+    "is_benchmark_state_id",
     "normalize_fact_text",
 ]

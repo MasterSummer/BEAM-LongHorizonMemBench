@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import cast
@@ -15,9 +15,21 @@ from lhmsb.longhorizon.attribution import (
     attribute_memory,
     build_software_fact_signatures,
     eligible_write_state_ids,
+    is_benchmark_state_id,
+)
+from lhmsb.longhorizon.constructs import profile_sceu
+from lhmsb.longhorizon.failure_attribution import (
+    DecisionMemoryAttribution,
+    StorageEvidenceMode,
+    attribute_decision_memory,
 )
 from lhmsb.longhorizon.replay import ReplayResult, replay_plan
 from lhmsb.longhorizon.schema import ContinuationOpportunity
+from lhmsb.longhorizon.task_span import profile_task_span
+from lhmsb.qualification.drift import (
+    DRIFT_LINEAGE_EVIDENCE_MODE,
+    drift_lineage_pairs,
+)
 from lhmsb.qualification.memory_runtime import InventorySnapshot, WriteSessionResult
 from lhmsb.qualification.prefix import MemoryPrefixArtifact, MemoryPrefixCheckpoint
 from lhmsb.qualification.runner import (
@@ -31,6 +43,14 @@ _CANONICAL_DRIFT_CATEGORIES = (
     "stale_state",
     "local_over_global",
 )
+_MEMORY_CONDITIONS = {
+    "flat_retrieval",
+    "mem0",
+    "amem",
+    "memos",
+    "mem0_controlled",
+    "mem0_native",
+}
 
 
 def _is_memory_count_contrast(value: object) -> bool:
@@ -145,8 +165,8 @@ class RetrievalMetricInput:
     candidate_shortfall: bool
     retrieval_latency_seconds: float
     rerank_latency_seconds: float | None = None
-    backend_retrieved_memory_state_ids: tuple[tuple[str, ...], ...] = ()
-    selected_memory_state_ids: tuple[tuple[str, ...], ...] = ()
+    backend_retrieved_memory_state_ids: tuple[tuple[str, ...], ...] | None = None
+    selected_memory_state_ids: tuple[tuple[str, ...], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -219,15 +239,71 @@ class MultisystemMetricInput:
     rerank_latency_seconds: float | None = None
     status: str = "complete"
     baseline_stable: bool = True
-    backend_retrieved_memory_state_ids: tuple[tuple[str, ...], ...] = ()
-    selected_memory_state_ids: tuple[tuple[str, ...], ...] = ()
+    backend_retrieved_memory_state_ids: tuple[tuple[str, ...], ...] | None = None
+    selected_memory_state_ids: tuple[tuple[str, ...], ...] | None = None
     behaviorally_used_memory_ids: tuple[str, ...] = ()
     behavioral_use_probe_count: int = 0
     sham_replacement_count: int = 0
     sham_replacement_action_flips: int = 0
     drift_eligible_categories: tuple[str, ...] | None = None
+    drift_lineage_pairs: tuple[tuple[str, str], ...] = ()
+    drift_lineage_evidence_mode: str = "unavailable"
     current_state_signature: str = ""
     episode_id: str = ""
+    sceu_id: str = ""
+    opportunity_id: str = ""
+    selected_action_id: str = ""
+    control_kind: str = ""
+    construct_kind: str = ""
+    horizon_band: str = ""
+    handoff_count: int = 0
+    oldest_required_state_age: int | None = None
+    latest_decision_event_distance: int | None = None
+    dependency_depth: int = 0
+    relevant_transition_count: int = 0
+    memory_reliant_state_ids: tuple[str, ...] = ()
+    nonexplicit_state_ids: tuple[str, ...] = ()
+    stored_memory_state_ids: tuple[str, ...] = ()
+    stored_exact_state_ids: tuple[str, ...] = ()
+    stored_inferred_state_ids: tuple[str, ...] = ()
+    stored_unavailable_state_ids: tuple[str, ...] = ()
+    storage_evidence_mode: StorageEvidenceMode = "unavailable"
+    behaviorally_probed_state_ids: tuple[str, ...] = ()
+    behaviorally_used_state_ids: tuple[str, ...] = ()
+    counterfactual_group_id: str = ""
+    counterfactual_variant: str = ""
+    counterfactual_terminal_archetype: str = ""
+    is_counterfactual_target: bool = False
+    horizon_panel_id: str = ""
+    horizon_level: str = ""
+    horizon_axis: str = ""
+    effective_task_step_count: int = 0
+    max_task_dependency_depth: int = 0
+    causally_linked_task_step_fraction: float | None = None
+
+    def decision_attribution(self) -> DecisionMemoryAttribution:
+        """Return the first supported memory-to-action stage for this SCEU."""
+        # Retrieval is the backend-returned set.  Any later native truncation,
+        # common reranking, or prompt-budget filtering belongs to the exposure
+        # stage because the model never received the filtered object.
+        backend_retrieved = (
+            self.retrieved_memory_state_ids
+            if self.backend_retrieved_memory_state_ids is None
+            else self.backend_retrieved_memory_state_ids
+        )
+        return attribute_decision_memory(
+            memory_reliant_state_ids=self.memory_reliant_state_ids,
+            stored_state_ids=self.stored_memory_state_ids,
+            retrieved_state_ids=_flatten_state_ids(backend_retrieved),
+            visible_state_ids=_flatten_state_ids(self.visible_memory_state_ids),
+            probed_state_ids=self.behaviorally_probed_state_ids,
+            causally_used_state_ids=self.behaviorally_used_state_ids,
+            behavior_correct=self.is_correct,
+            has_memory_channel=(
+                self.condition in _MEMORY_CONDITIONS and self.readout != "none"
+            ),
+            storage_evidence_mode=self.storage_evidence_mode,
+        )
 
     def behavior_input(self) -> BehaviorMetricInput:
         return BehaviorMetricInput(
@@ -451,7 +527,27 @@ def compute_multisystem_scorecard(
                     sum(row.live_memory_count is not None for row in rows),
                 ),
                 "causal_memory_use_rate": _ratio_value(
-                    sum(label in {"beneficial", "harmful"} for label in causal),
+                    sum(
+                        label
+                        in {
+                            "beneficial",
+                            "harmful",
+                            "causal_direction_ambiguous",
+                        }
+                        for label in causal
+                    ),
+                    len(causal),
+                ),
+                "unique_causal_effect_rate": _ratio_value(
+                    sum(
+                        label
+                        in {
+                            "beneficial",
+                            "harmful",
+                            "causal_direction_ambiguous",
+                        }
+                        for label in causal
+                    ),
                     len(causal),
                 ),
                 "beneficial_intervention_rate": _ratio_value(
@@ -491,6 +587,9 @@ def compute_multisystem_scorecard(
                     "constraint_loss",
                 ),
                 "observed_constraint_loss_rate": observed_by_flag["constraint_loss"],
+                "canonical_constraint_loss_violation_rate": observed_by_flag[
+                    "constraint_loss"
+                ],
                 "current_plan_deviation_rate": _eligible_flag_rate(
                     eligible_by_flag["plan_deviation"],
                     "plan_deviation",
@@ -503,6 +602,9 @@ def compute_multisystem_scorecard(
                     "plan_deviation",
                 ),
                 "observed_plan_deviation_rate": observed_by_flag["plan_deviation"],
+                "canonical_plan_deviation_violation_rate": observed_by_flag[
+                    "plan_deviation"
+                ],
                 "stale_state_action_rate": _eligible_flag_rate(
                     eligible_by_flag["stale_state"],
                     "stale_state",
@@ -515,6 +617,9 @@ def compute_multisystem_scorecard(
                     "stale_state",
                 ),
                 "observed_stale_state_rate": observed_by_flag["stale_state"],
+                "canonical_stale_state_violation_rate": observed_by_flag[
+                    "stale_state"
+                ],
                 "local_over_global_rate": _eligible_flag_rate(
                     eligible_by_flag["local_over_global"],
                     "local_over_global",
@@ -529,6 +634,9 @@ def compute_multisystem_scorecard(
                 "observed_local_over_global_rate": observed_by_flag[
                     "local_over_global"
                 ],
+                "canonical_local_over_global_violation_rate": observed_by_flag[
+                    "local_over_global"
+                ],
                 "aggregate_drift_rate": _ratio_value(
                     sum(_has_targeted_drift(row) for row in aggregate_eligible),
                     len(aggregate_eligible),
@@ -539,7 +647,11 @@ def compute_multisystem_scorecard(
                     len(aggregate_eligible),
                 ),
                 "observed_aggregate_drift_rate": _ratio_value(
-                    sum(_has_observed_drift(row) for row in rows),
+                    sum(_has_canonical_drift_violation(row) for row in rows),
+                    len(rows),
+                ),
+                "canonical_drift_violation_rate": _ratio_value(
+                    sum(_has_canonical_drift_violation(row) for row in rows),
                     len(rows),
                 ),
                 "off_target_drift_rate": _ratio_value(
@@ -562,8 +674,832 @@ def compute_multisystem_scorecard(
     return tuple(output)
 
 
+def compute_failure_attribution_scorecard(
+    observations: Sequence[MultisystemMetricInput],
+) -> tuple[dict[str, object], ...]:
+    """Aggregate the same-decision memory funnel without mixing readouts."""
+    grouped: dict[
+        tuple[str, str, str, str], list[MultisystemMetricInput]
+    ] = defaultdict(list)
+    for item in observations:
+        grouped[
+            (
+                item.policy_profile_id,
+                item.condition,
+                item.readout,
+                item.storage_evidence_mode,
+            )
+        ].append(item)
+
+    stage_names = (
+        "storage_evidence_unavailable",
+        "storage_failure",
+        "retrieval_failure",
+        "exposure_failure",
+        "utilization_failure",
+        "behavior_success_causal",
+        "behavior_success_without_detected_unique_causal_effect",
+        # Retained so a scorecard can ingest a completed legacy report.
+        "behavior_success_without_detected_use",
+        "behavior_success_unprobed",
+    )
+    output: list[dict[str, object]] = []
+    for key in sorted(grouped):
+        attributions = tuple(
+            row.decision_attribution() for row in grouped[key]
+        )
+        counts: Counter[str] = Counter(item.stage for item in attributions)
+        decision_layer_diagnoses: Counter[str] = Counter(
+            item.decision_layer_diagnosis for item in attributions
+        )
+        memory_reliant = tuple(
+            item
+            for item in attributions
+            if item.stage not in {"no_memory_channel", "not_memory_reliant"}
+        )
+        applicable = tuple(
+            item
+            for item in memory_reliant
+            if item.stage != "storage_evidence_unavailable"
+        )
+        row: dict[str, object] = {
+            "policy_profile_id": key[0],
+            "condition": key[1],
+            "readout": key[2],
+            "storage_evidence_mode": key[3],
+            "n_sceu": len(attributions),
+            "memory_reliant_n": len(memory_reliant),
+            "attribution_applicable_n": len(applicable),
+            "no_memory_channel_n": counts["no_memory_channel"],
+            "not_memory_reliant_n": counts["not_memory_reliant"],
+            "memory_required_state_count": sum(
+                item.required_count for item in applicable
+            ),
+            "memory_required_storage_recall": _ratio_value(
+                sum(item.stored_required_count for item in applicable),
+                sum(item.required_count for item in applicable),
+            ),
+            "stored_to_retrieved_yield": _ratio_value(
+                sum(item.retrieved_stored_count for item in applicable),
+                sum(item.stored_required_count for item in applicable),
+            ),
+            "retrieved_to_visible_yield": _ratio_value(
+                sum(item.visible_retrieved_count for item in applicable),
+                sum(item.retrieved_stored_count for item in applicable),
+            ),
+            "visible_required_probe_coverage": _ratio_value(
+                sum(item.probed_visible_count for item in applicable),
+                sum(item.visible_retrieved_count for item in applicable),
+            ),
+            "probed_required_causal_use_rate": _ratio_value(
+                sum(item.causally_used_probed_count for item in applicable),
+                sum(item.probed_visible_count for item in applicable),
+            ),
+        }
+        for stage in stage_names:
+            row[f"{stage}_n"] = counts[stage]
+            row[f"{stage}_rate"] = _ratio_value(
+                counts[stage],
+                len(applicable),
+            )
+        for diagnosis in (
+            "visible_without_detected_unique_causal_effect",
+            # Retained so a scorecard can ingest a completed legacy report.
+            "visible_without_detected_use",
+            "visible_causally_influential_but_wrong",
+            "visible_use_evidence_incomplete",
+        ):
+            row[f"{diagnosis}_n"] = decision_layer_diagnoses[diagnosis]
+            row[f"{diagnosis}_rate"] = _ratio_value(
+                decision_layer_diagnoses[diagnosis],
+                counts["utilization_failure"],
+            )
+        output.append(row)
+    return tuple(output)
+
+
+def decision_attribution_rows(
+    observations: Sequence[MultisystemMetricInput],
+) -> tuple[dict[str, object], ...]:
+    """Materialize the auditable first-failure record for every decision."""
+    output: list[dict[str, object]] = []
+    for row in observations:
+        attribution = row.decision_attribution()
+        output.append(
+            {
+                "episode_id": row.episode_id,
+                "sceu_id": row.sceu_id,
+                "opportunity_id": row.opportunity_id,
+                "result_id": row.result_id,
+                "policy_profile_id": row.policy_profile_id,
+                "condition": row.condition,
+                "readout": row.readout,
+                "checkpoint_session": row.checkpoint_session,
+                "current_state_signature": row.current_state_signature,
+                "handoff_count": row.handoff_count,
+                "construct_kind": row.construct_kind,
+                "horizon_band": row.horizon_band,
+                "counterfactual_group_id": row.counterfactual_group_id,
+                "counterfactual_variant": row.counterfactual_variant,
+                "counterfactual_terminal_archetype": (
+                    row.counterfactual_terminal_archetype
+                ),
+                "is_counterfactual_target": row.is_counterfactual_target,
+                "effective_task_step_count": row.effective_task_step_count,
+                "max_task_dependency_depth": (
+                    row.max_task_dependency_depth
+                ),
+                "selected_action_id": row.selected_action_id,
+                "behavior_score": row.behavior_score,
+                "behavior_correct": row.is_correct,
+                "drift_flags": list(row.drift_flags),
+                **attribution.to_dict(),
+                "stored_exact_state_ids": list(row.stored_exact_state_ids),
+                "stored_inferred_state_ids": list(
+                    row.stored_inferred_state_ids
+                ),
+                "stored_unavailable_state_ids": list(
+                    row.stored_unavailable_state_ids
+                ),
+            }
+        )
+    return tuple(output)
+
+
+def compute_long_horizon_scorecard(
+    observations: Sequence[MultisystemMetricInput],
+) -> tuple[dict[str, object], ...]:
+    """Report behavior and drift by explicit long-horizon construct strata."""
+    grouped: dict[
+        tuple[str, str, str, str, str], list[MultisystemMetricInput]
+    ] = defaultdict(list)
+    for item in observations:
+        if not item.construct_kind or not item.horizon_band:
+            continue
+        grouped[
+            (
+                item.policy_profile_id,
+                item.condition,
+                item.readout,
+                item.construct_kind,
+                item.horizon_band,
+            )
+        ].append(item)
+
+    output: list[dict[str, object]] = []
+    for key in sorted(grouped):
+        rows = grouped[key]
+        eligible = [row for row in rows if _any_drift_is_eligible(row)]
+        ages = [
+            row.oldest_required_state_age
+            for row in rows
+            if row.oldest_required_state_age is not None
+        ]
+        event_distances = [
+            row.latest_decision_event_distance
+            for row in rows
+            if row.latest_decision_event_distance is not None
+        ]
+        output.append(
+            {
+                "policy_profile_id": key[0],
+                "condition": key[1],
+                "readout": key[2],
+                "construct_kind": key[3],
+                "horizon_band": key[4],
+                "n_sceu": len(rows),
+                "n_episodes": len({row.episode_id for row in rows if row.episode_id}),
+                "mean_handoff_count": _ratio_value(
+                    sum(row.handoff_count for row in rows), len(rows)
+                ),
+                "mean_oldest_required_state_age": _ratio_value(
+                    sum(ages), len(ages)
+                ),
+                "mean_latest_decision_event_distance": _ratio_value(
+                    sum(event_distances), len(event_distances)
+                ),
+                "mean_dependency_depth": _ratio_value(
+                    sum(row.dependency_depth for row in rows), len(rows)
+                ),
+                "mean_relevant_transition_count": _ratio_value(
+                    sum(row.relevant_transition_count for row in rows), len(rows)
+                ),
+                "mean_effective_task_step_count": _ratio_value(
+                    sum(row.effective_task_step_count for row in rows),
+                    len(rows),
+                ),
+                "mean_max_task_dependency_depth": _ratio_value(
+                    sum(row.max_task_dependency_depth for row in rows),
+                    len(rows),
+                ),
+                "mean_causally_linked_task_step_fraction": _mean_optional(
+                    row.causally_linked_task_step_fraction for row in rows
+                ),
+                "mean_memory_reliant_state_count": _ratio_value(
+                    sum(len(row.memory_reliant_state_ids) for row in rows),
+                    len(rows),
+                ),
+                "mean_behavior_score": _ratio_value(
+                    sum(row.behavior_score for row in rows), len(rows)
+                ),
+                "behavior_correct_rate": _ratio_value(
+                    sum(row.is_correct for row in rows), len(rows)
+                ),
+                "targeted_drift_rate": _ratio_value(
+                    sum(_has_targeted_drift(row) for row in eligible),
+                    len(eligible),
+                ),
+                "targeted_drift_violation_rate": _ratio_value(
+                    sum(_has_targeted_drift(row) for row in eligible),
+                    len(eligible),
+                ),
+                "drift_eligible_n": len(eligible),
+                "observed_drift_rate": _ratio_value(
+                    sum(_has_canonical_drift_violation(row) for row in rows),
+                    len(rows),
+                ),
+                "canonical_drift_violation_rate": _ratio_value(
+                    sum(_has_canonical_drift_violation(row) for row in rows),
+                    len(rows),
+                ),
+            }
+        )
+    return tuple(output)
+
+
+def compute_long_horizon_control_contrasts(
+    observations: Sequence[MultisystemMetricInput],
+) -> tuple[dict[str, object], ...]:
+    """Pair each system decision with workspace and oracle on the same SCEU."""
+    control_rows: dict[
+        tuple[str, str, str, str], MultisystemMetricInput
+    ] = {}
+    for row in observations:
+        if row.condition not in {"workspace_only", "oracle_current_state"}:
+            continue
+        control_rows[
+            (
+                row.policy_profile_id,
+                row.episode_id,
+                row.opportunity_id,
+                row.condition,
+            )
+        ] = row
+
+    grouped: dict[
+        tuple[str, str, str, str, str],
+        list[
+            tuple[
+                MultisystemMetricInput,
+                MultisystemMetricInput,
+                MultisystemMetricInput,
+            ]
+        ],
+    ] = defaultdict(list)
+    for treatment in observations:
+        if treatment.condition in {"workspace_only", "oracle_current_state"}:
+            continue
+        prefix = (
+            treatment.policy_profile_id,
+            treatment.episode_id,
+            treatment.opportunity_id,
+        )
+        workspace = control_rows.get((*prefix, "workspace_only"))
+        oracle = control_rows.get((*prefix, "oracle_current_state"))
+        if workspace is None or oracle is None:
+            continue
+        grouped[
+            (
+                treatment.policy_profile_id,
+                treatment.condition,
+                treatment.readout,
+                treatment.construct_kind,
+                treatment.horizon_band,
+            )
+        ].append((treatment, workspace, oracle))
+
+    output: list[dict[str, object]] = []
+    for key in sorted(grouped):
+        triples = grouped[key]
+        treatment_gain = sum(
+            treatment.behavior_score - workspace.behavior_score
+            for treatment, workspace, _oracle in triples
+        )
+        oracle_advantage = sum(
+            oracle.behavior_score - workspace.behavior_score
+            for _treatment, workspace, oracle in triples
+        )
+        drift_triples = tuple(
+            triple
+            for triple in triples
+            if all(_any_drift_is_eligible(row) for row in triple)
+        )
+        output.append(
+            {
+                "policy_profile_id": key[0],
+                "condition": key[1],
+                "readout": key[2],
+                "construct_kind": key[3],
+                "horizon_band": key[4],
+                "n_matched_decisions": len(triples),
+                "n_episodes": len(
+                    {treatment.episode_id for treatment, _workspace, _oracle in triples}
+                ),
+                "mean_behavior_gain_beyond_workspace": _ratio_value(
+                    treatment_gain,
+                    len(triples),
+                ),
+                "mean_behavior_gap_to_oracle": _ratio_value(
+                    sum(
+                        oracle.behavior_score - treatment.behavior_score
+                        for treatment, _workspace, oracle in triples
+                    ),
+                    len(triples),
+                ),
+                "oracle_gap_closed": _ratio_value(
+                    treatment_gain,
+                    oracle_advantage,
+                ),
+                "workspace_behavior_correct_rate": _ratio_value(
+                    sum(workspace.is_correct for _treatment, workspace, _oracle in triples),
+                    len(triples),
+                ),
+                "system_behavior_correct_rate": _ratio_value(
+                    sum(treatment.is_correct for treatment, _workspace, _oracle in triples),
+                    len(triples),
+                ),
+                "oracle_behavior_correct_rate": _ratio_value(
+                    sum(oracle.is_correct for _treatment, _workspace, oracle in triples),
+                    len(triples),
+                ),
+                "drift_matched_decisions": len(drift_triples),
+                "targeted_drift_risk_difference_vs_workspace": _ratio_value(
+                    sum(
+                        _has_targeted_drift(treatment)
+                        - _has_targeted_drift(workspace)
+                        for treatment, workspace, _oracle in drift_triples
+                    ),
+                    len(drift_triples),
+                ),
+                "targeted_drift_risk_difference_vs_oracle": _ratio_value(
+                    sum(
+                        _has_targeted_drift(treatment)
+                        - _has_targeted_drift(oracle)
+                        for treatment, _workspace, oracle in drift_triples
+                    ),
+                    len(drift_triples),
+                ),
+            }
+        )
+    return tuple(output)
+
+
+_MATCHED_CONSTRUCT_VARIANTS = (
+    "static",
+    "evolution",
+    "hierarchical_conflict",
+)
+
+
+def compute_matched_construct_contrasts(
+    observations: Sequence[MultisystemMetricInput],
+) -> tuple[dict[str, object], ...]:
+    """Compare static/evolution/conflict histories at one matched decision.
+
+    These rows are deliberately cross-episode: episode identity changes with
+    the manipulated history, while the counterfactual group fixes the terminal
+    request, action catalog, gold action, checkpoint, and opaque option map.
+    """
+
+    grouped: dict[
+        tuple[str, str, str, str, str],
+        dict[str, list[MultisystemMetricInput]],
+    ] = defaultdict(lambda: defaultdict(list))
+    for row in observations:
+        if (
+            not row.is_counterfactual_target
+            or not row.counterfactual_group_id
+            or row.counterfactual_variant
+            not in _MATCHED_CONSTRUCT_VARIANTS
+        ):
+            continue
+        grouped[
+            (
+                row.policy_profile_id,
+                row.condition,
+                row.readout,
+                row.counterfactual_group_id,
+                row.opportunity_id,
+            )
+        ][row.counterfactual_variant].append(row)
+
+    output: list[dict[str, object]] = []
+    for key in sorted(grouped):
+        variants = grouped[key]
+        terminal_archetypes = {
+            row.counterfactual_terminal_archetype
+            for rows in variants.values()
+            for row in rows
+        }
+        complete = (
+            all(variants.get(name) for name in _MATCHED_CONSTRUCT_VARIANTS)
+            and len(terminal_archetypes) == 1
+        )
+        static = variants.get("static", [])
+        evolution = variants.get("evolution", [])
+        conflict = variants.get("hierarchical_conflict", [])
+        static_score = _mean_behavior(static)
+        evolution_score = _mean_behavior(evolution)
+        conflict_score = _mean_behavior(conflict)
+        static_drift = _mean_targeted_drift(static)
+        evolution_drift = _mean_targeted_drift(evolution)
+        conflict_drift = _mean_targeted_drift(conflict)
+        static_stage = _attribution_stage_summary(static)
+        evolution_stage = _attribution_stage_summary(evolution)
+        conflict_stage = _attribution_stage_summary(conflict)
+        output.append(
+            {
+                "policy_profile_id": key[0],
+                "condition": key[1],
+                "readout": key[2],
+                "counterfactual_group_id": key[3],
+                "opportunity_id": key[4],
+                "terminal_archetype": (
+                    next(iter(terminal_archetypes))
+                    if len(terminal_archetypes) == 1
+                    else "inconsistent"
+                ),
+                "complete": complete,
+                "n_static": len(static),
+                "n_evolution": len(evolution),
+                "n_hierarchical_conflict": len(conflict),
+                "static_behavior_score": static_score,
+                "evolution_behavior_score": evolution_score,
+                "hierarchical_conflict_behavior_score": conflict_score,
+                "state_evolution_penalty_vs_static": _optional_difference(
+                    static_score,
+                    evolution_score,
+                ),
+                "hierarchical_conflict_penalty_vs_static": (
+                    _optional_difference(static_score, conflict_score)
+                ),
+                "static_correct_rate": _mean_correct(static),
+                "evolution_correct_rate": _mean_correct(evolution),
+                "hierarchical_conflict_correct_rate": _mean_correct(conflict),
+                "state_evolution_correctness_penalty_vs_static": (
+                    _optional_difference(
+                        _mean_correct(static),
+                        _mean_correct(evolution),
+                    )
+                ),
+                "hierarchical_conflict_correctness_penalty_vs_static": (
+                    _optional_difference(
+                        _mean_correct(static),
+                        _mean_correct(conflict),
+                    )
+                ),
+                "static_targeted_drift_rate": static_drift,
+                "evolution_targeted_drift_rate": evolution_drift,
+                "hierarchical_conflict_targeted_drift_rate": conflict_drift,
+                "static_targeted_drift_violation_rate": static_drift,
+                "evolution_targeted_drift_violation_rate": evolution_drift,
+                "hierarchical_conflict_targeted_drift_violation_rate": (
+                    conflict_drift
+                ),
+                "state_evolution_drift_excess_vs_static": (
+                    _optional_difference(evolution_drift, static_drift)
+                ),
+                "hierarchical_conflict_drift_excess_vs_static": (
+                    _optional_difference(conflict_drift, static_drift)
+                ),
+                "state_evolution_drift_violation_excess_vs_static": (
+                    _optional_difference(evolution_drift, static_drift)
+                ),
+                "hierarchical_conflict_drift_violation_excess_vs_static": (
+                    _optional_difference(conflict_drift, static_drift)
+                ),
+                "static_attribution_stages": static_stage,
+                "evolution_attribution_stages": evolution_stage,
+                "hierarchical_conflict_attribution_stages": conflict_stage,
+                "evolution_attribution_stage_changed": (
+                    complete and evolution_stage != static_stage
+                ),
+                "hierarchical_conflict_attribution_stage_changed": (
+                    complete and conflict_stage != static_stage
+                ),
+            }
+        )
+    workspace_by_decision = {
+        (
+            str(contrast_row["policy_profile_id"]),
+            str(contrast_row["counterfactual_group_id"]),
+            str(contrast_row["opportunity_id"]),
+        ): contrast_row
+        for contrast_row in output
+        if contrast_row["condition"] == "workspace_only"
+        and contrast_row["complete"] is True
+    }
+    adjusted: list[dict[str, object]] = []
+    for contrast_row in output:
+        workspace = workspace_by_decision.get(
+            (
+                str(contrast_row["policy_profile_id"]),
+                str(contrast_row["counterfactual_group_id"]),
+                str(contrast_row["opportunity_id"]),
+            )
+        )
+        static_gain = _mapping_optional_difference(
+            contrast_row,
+            workspace,
+            "static_behavior_score",
+        )
+        evolution_gain = _mapping_optional_difference(
+            contrast_row,
+            workspace,
+            "evolution_behavior_score",
+        )
+        conflict_gain = _mapping_optional_difference(
+            contrast_row,
+            workspace,
+            "hierarchical_conflict_behavior_score",
+        )
+        workspace_evolution_penalty = _mapping_optional_number(
+            workspace,
+            "state_evolution_penalty_vs_static",
+        )
+        workspace_conflict_penalty = _mapping_optional_number(
+            workspace,
+            "hierarchical_conflict_penalty_vs_static",
+        )
+        adjusted.append(
+            {
+                **contrast_row,
+                "workspace_matched_control_available": workspace is not None,
+                "static_gain_beyond_workspace": static_gain,
+                "evolution_gain_beyond_workspace": evolution_gain,
+                "hierarchical_conflict_gain_beyond_workspace": conflict_gain,
+                # Difference-in-differences. Positive values mean that this
+                # condition loses more performance under the construct than
+                # workspace-only does, rather than merely inheriting a harder
+                # workspace surface.
+                "state_evolution_penalty_excess_over_workspace": (
+                    _optional_difference(
+                        _mapping_optional_number(
+                            contrast_row,
+                            "state_evolution_penalty_vs_static",
+                        ),
+                        workspace_evolution_penalty,
+                    )
+                ),
+                "hierarchical_conflict_penalty_excess_over_workspace": (
+                    _optional_difference(
+                        _mapping_optional_number(
+                            contrast_row,
+                            "hierarchical_conflict_penalty_vs_static",
+                        ),
+                        workspace_conflict_penalty,
+                    )
+                ),
+            }
+        )
+    return tuple(adjusted)
+
+
+def compute_matched_construct_scorecard(
+    observations: Sequence[MultisystemMetricInput],
+) -> tuple[dict[str, object], ...]:
+    """Aggregate complete matched construct groups without pooling controls."""
+
+    contrasts = compute_matched_construct_contrasts(observations)
+    grouped: dict[
+        tuple[str, str, str], list[Mapping[str, object]]
+    ] = defaultdict(list)
+    totals: Counter[tuple[str, str, str]] = Counter()
+    for row in contrasts:
+        key = (
+            str(row["policy_profile_id"]),
+            str(row["condition"]),
+            str(row["readout"]),
+        )
+        totals[key] += 1
+        if row["complete"] is True:
+            grouped[key].append(row)
+    output: list[dict[str, object]] = []
+    for key in sorted(totals):
+        rows = grouped.get(key, [])
+        archetype_counts = Counter(
+            str(row.get("terminal_archetype", "")) for row in rows
+        )
+        output.append(
+            {
+                "policy_profile_id": key[0],
+                "condition": key[1],
+                "readout": key[2],
+                "n_counterfactual_groups": totals[key],
+                "n_complete_groups": len(rows),
+                "n_current_v1_offline_groups": archetype_counts[
+                    "current_v1_offline"
+                ],
+                "n_current_v2_offline_groups": archetype_counts[
+                    "current_v2_offline"
+                ],
+                "n_authorized_cloud_groups": archetype_counts[
+                    "authorized_cloud"
+                ],
+                "all_terminal_archetypes_covered": all(
+                    archetype_counts[name] > 0
+                    for name in (
+                        "current_v1_offline",
+                        "current_v2_offline",
+                        "authorized_cloud",
+                    )
+                ),
+                "mean_static_behavior_score": _mean_mapping_value(
+                    rows,
+                    "static_behavior_score",
+                ),
+                "mean_evolution_behavior_score": _mean_mapping_value(
+                    rows,
+                    "evolution_behavior_score",
+                ),
+                "mean_hierarchical_conflict_behavior_score": (
+                    _mean_mapping_value(
+                        rows,
+                        "hierarchical_conflict_behavior_score",
+                    )
+                ),
+                "mean_state_evolution_penalty_vs_static": (
+                    _mean_mapping_value(
+                        rows,
+                        "state_evolution_penalty_vs_static",
+                    )
+                ),
+                "mean_hierarchical_conflict_penalty_vs_static": (
+                    _mean_mapping_value(
+                        rows,
+                        "hierarchical_conflict_penalty_vs_static",
+                    )
+                ),
+                "mean_static_gain_beyond_workspace": _mean_mapping_value(
+                    rows,
+                    "static_gain_beyond_workspace",
+                ),
+                "mean_evolution_gain_beyond_workspace": (
+                    _mean_mapping_value(
+                        rows,
+                        "evolution_gain_beyond_workspace",
+                    )
+                ),
+                "mean_hierarchical_conflict_gain_beyond_workspace": (
+                    _mean_mapping_value(
+                        rows,
+                        "hierarchical_conflict_gain_beyond_workspace",
+                    )
+                ),
+                "mean_state_evolution_penalty_excess_over_workspace": (
+                    _mean_mapping_value(
+                        rows,
+                        "state_evolution_penalty_excess_over_workspace",
+                    )
+                ),
+                "mean_hierarchical_conflict_penalty_excess_over_workspace": (
+                    _mean_mapping_value(
+                        rows,
+                        "hierarchical_conflict_penalty_excess_over_workspace",
+                    )
+                ),
+                "mean_state_evolution_drift_excess_vs_static": (
+                    _mean_mapping_value(
+                        rows,
+                        "state_evolution_drift_excess_vs_static",
+                    )
+                ),
+                "mean_hierarchical_conflict_drift_excess_vs_static": (
+                    _mean_mapping_value(
+                        rows,
+                        "hierarchical_conflict_drift_excess_vs_static",
+                    )
+                ),
+                "mean_state_evolution_drift_violation_excess_vs_static": (
+                    _mean_mapping_value(
+                        rows,
+                        "state_evolution_drift_violation_excess_vs_static",
+                    )
+                ),
+                "mean_hierarchical_conflict_drift_violation_excess_vs_static": (
+                    _mean_mapping_value(
+                        rows,
+                        "hierarchical_conflict_drift_violation_excess_vs_static",
+                    )
+                ),
+                "evolution_attribution_stage_change_rate": _ratio_value(
+                    sum(
+                        row["evolution_attribution_stage_changed"] is True
+                        for row in rows
+                    ),
+                    len(rows),
+                ),
+                "hierarchical_conflict_attribution_stage_change_rate": (
+                    _ratio_value(
+                        sum(
+                            row[
+                                "hierarchical_conflict_attribution_stage_changed"
+                            ]
+                            is True
+                            for row in rows
+                        ),
+                        len(rows),
+                    )
+                ),
+            }
+        )
+    return tuple(output)
+
+
+def _mean_behavior(rows: Sequence[MultisystemMetricInput]) -> float | None:
+    return _ratio_value(sum(row.behavior_score for row in rows), len(rows))
+
+
+def _mean_correct(rows: Sequence[MultisystemMetricInput]) -> float | None:
+    return _ratio_value(sum(row.is_correct for row in rows), len(rows))
+
+
+def _mean_targeted_drift(
+    rows: Sequence[MultisystemMetricInput],
+) -> float | None:
+    eligible = tuple(row for row in rows if _any_drift_is_eligible(row))
+    return _ratio_value(
+        sum(_has_targeted_drift(row) for row in eligible),
+        len(eligible),
+    )
+
+
+def _attribution_stage_summary(
+    rows: Sequence[MultisystemMetricInput],
+) -> str:
+    counts = Counter(row.decision_attribution().stage for row in rows)
+    return "|".join(f"{name}:{counts[name]}" for name in sorted(counts))
+
+
+def _optional_difference(
+    left: float | None,
+    right: float | None,
+) -> float | None:
+    if left is None or right is None:
+        return None
+    return _stable_difference(left, right)
+
+
+def _mapping_optional_number(
+    row: Mapping[str, object] | None,
+    field: str,
+) -> float | None:
+    if row is None:
+        return None
+    value = row.get(field)
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    return float(value)
+
+
+def _mapping_optional_difference(
+    row: Mapping[str, object],
+    reference: Mapping[str, object] | None,
+    field: str,
+) -> float | None:
+    return _optional_difference(
+        _mapping_optional_number(row, field),
+        _mapping_optional_number(reference, field),
+    )
+
+
+def _mean_mapping_value(
+    rows: Sequence[Mapping[str, object]],
+    field: str,
+) -> float | None:
+    values = tuple(
+        float(value)
+        for row in rows
+        for value in (row.get(field),)
+        if isinstance(value, int | float) and not isinstance(value, bool)
+    )
+    return _ratio_value(sum(values), len(values))
+
+
 def _ratio_value(numerator: float, denominator: float) -> float | None:
     return None if denominator == 0 else float(numerator) / float(denominator)
+
+
+def _mean_optional(values: Iterable[float | None]) -> float | None:
+    observed = tuple(value for value in values if value is not None)
+    return _ratio_value(sum(observed), len(observed))
+
+
+def _flatten_state_ids(
+    groups: Sequence[Sequence[str]],
+) -> tuple[str, ...]:
+    """Return a stable unique state set from object-aligned attribution groups."""
+    return tuple(sorted({state_id for group in groups for state_id in group}))
 
 
 def _flag_rate(flags: Sequence[str], name: str, denominator: int) -> float | None:
@@ -608,10 +1544,10 @@ def _has_targeted_drift(
     return bool(targeted.intersection(row.drift_flags))
 
 
-def _has_observed_drift(
+def _has_canonical_drift_violation(
     row: BehaviorMetricInput | MultisystemMetricInput,
 ) -> bool:
-    """Whether any canonical drift occurred, independent of probe targeting."""
+    """Whether any canonical violation occurred, independent of targeting."""
     return bool(set(_CANONICAL_DRIFT_CATEGORIES).intersection(row.drift_flags))
 
 
@@ -738,6 +1674,7 @@ def compute_qualification_metrics(
             future_needed = tuple(
                 state_id
                 for state_id, state in replay.current.items()
+                if is_benchmark_state_id(state_id)
                 if any(
                     session >= write.session_index
                     for session in state.future_need_sessions
@@ -750,9 +1687,21 @@ def compute_qualification_metrics(
                         attribution_map.get(memory_id, ())
                         for memory_id in sorted(new_memory_ids)
                     ),
-                    current_state_ids=tuple(sorted(replay.current)),
+                    current_state_ids=tuple(
+                        sorted(
+                            state_id
+                            for state_id in replay.current
+                            if is_benchmark_state_id(state_id)
+                        )
+                    ),
                     future_needed_state_ids=tuple(sorted(future_needed)),
-                    retired_state_ids=tuple(sorted(replay.invalidated)),
+                    retired_state_ids=tuple(
+                        sorted(
+                            state_id
+                            for state_id in replay.invalidated
+                            if is_benchmark_state_id(state_id)
+                        )
+                    ),
                     live_memory_state_ids=tuple(
                         attribution_map.get(item.memory_id, ())
                         for item in write.inventory.items
@@ -1000,6 +1949,12 @@ def multisystem_observations_from_results(
         spec = specs.get(episode_id)
         if spec is None:
             continue
+        plan_metadata = spec.plan.metadata_dict
+        task_span = profile_task_span(spec.plan)
+        counterfactual_target = plan_metadata.get(
+            "counterfactual_target_opportunity_id",
+            "",
+        )
         policy_id = str(getattr(task, "policy_profile_id", ""))
         task_condition = str(getattr(task, "condition", ""))
         artifact = _artifact_for_task(task, artifact_map)
@@ -1024,12 +1979,16 @@ def multisystem_observations_from_results(
                 candidate_ids = tuple(getattr(row, "candidate_memory_ids", ()))
                 retrieved_ids = tuple(getattr(row, "retrieved_memory_ids", ()))
                 visible_ids = tuple(getattr(row, "model_visible_memory_ids", ()))
-                backend_retrieved_ids = tuple(
-                    getattr(row, "backend_retrieved_memory_ids", ())
-                ) or candidate_ids
-                selected_ids = tuple(
-                    getattr(row, "selected_memory_ids", ())
-                ) or retrieved_ids
+                backend_retrieved_ids = (
+                    tuple(row.backend_retrieved_memory_ids)
+                    if hasattr(row, "backend_retrieved_memory_ids")
+                    else candidate_ids
+                )
+                selected_ids = (
+                    tuple(row.selected_memory_ids)
+                    if hasattr(row, "selected_memory_ids")
+                    else retrieved_ids
+                )
                 behaviorally_used_ids = tuple(
                     getattr(row, "behaviorally_used_memory_ids", ())
                 )
@@ -1052,6 +2011,11 @@ def multisystem_observations_from_results(
                     == "sham_replacement"
                 )
                 primary_causal_rows = neutral_rows or loo_rows
+                behaviorally_probed_ids = tuple(
+                    str(getattr(item, "target_memory_id", ""))
+                    for item in primary_causal_rows
+                    if str(getattr(item, "target_memory_id", ""))
+                )
                 causal_labels = tuple(
                     str(getattr(getattr(item, "classification", None), "label", "indeterminate"))
                     for item in primary_causal_rows
@@ -1084,6 +2048,63 @@ def multisystem_observations_from_results(
                 )
                 opportunity = opportunity_by_id.get(str(getattr(row, "opportunity_id", "")))
                 current = replay_plan(spec.plan, sceu.checkpoint_session)
+                construct = profile_sceu(spec.plan, sceu)
+                stored_state_ids = _flatten_state_ids(
+                    tuple(
+                        _attributed_state_ids(attribution, item.memory_id)
+                        for item in (() if inventory is None else inventory.items)
+                    )
+                )
+                stored_exact_state_ids = _stored_states_for_provenance(
+                    attribution,
+                    inventory,
+                    "native/exact",
+                )
+                stored_inferred_state_ids = _stored_states_for_provenance(
+                    attribution,
+                    inventory,
+                    "inferred",
+                )
+                stored_unavailable_state_ids = _stored_states_for_provenance(
+                    attribution,
+                    inventory,
+                    "unavailable",
+                )
+                stored_unavailable_state_ids = tuple(
+                    sorted(
+                        set(stored_unavailable_state_ids)
+                        | {
+                            state_id
+                            for item in attribution.values()
+                            if not item.contributes_positive_coverage
+                            and item.method == "ambiguous"
+                            for state_id in item.state_ids
+                        }
+                    )
+                )
+                storage_evidence_mode = _storage_evidence_mode(
+                    construct.memory_reliant_state_ids,
+                    stored_exact_state_ids,
+                    stored_inferred_state_ids,
+                    stored_unavailable_state_ids,
+                    inventory_observed=inventory is not None,
+                    checkpoint_evidence_mode=_artifact_storage_evidence_mode(
+                        artifact,
+                        sceu.checkpoint_session,
+                    ),
+                )
+                probed_state_ids = _flatten_state_ids(
+                    tuple(
+                        _attributed_state_ids(attribution, memory_id)
+                        for memory_id in behaviorally_probed_ids
+                    )
+                )
+                used_state_ids = _flatten_state_ids(
+                    tuple(
+                        _attributed_state_ids(attribution, memory_id)
+                        for memory_id in behaviorally_used_ids
+                    )
+                )
                 output.append(
                     MultisystemMetricInput(
                         policy_profile_id=policy_id,
@@ -1092,7 +2113,7 @@ def multisystem_observations_from_results(
                         result_id=str(getattr(row, "result_id", "")),
                         behavior_score=behavior_score,
                         is_correct=is_correct,
-                        required_state_ids=tuple(sceu.required_state_ids),
+                        required_state_ids=construct.current_required_state_ids,
                         stale_state_ids=tuple(sorted(current.invalidated)),
                         candidate_memory_state_ids=tuple(
                             _attributed_state_ids(attribution, memory_id)
@@ -1194,10 +2215,92 @@ def multisystem_observations_from_results(
                             "drift_eligible_categories",
                             None,
                         ),
+                        drift_lineage_pairs=(
+                            tuple(getattr(row, "drift_lineage_pairs", ()))
+                            or drift_lineage_pairs(spec, sceu)
+                        ),
+                        drift_lineage_evidence_mode=str(
+                            getattr(
+                                row,
+                                "drift_lineage_evidence_mode",
+                                DRIFT_LINEAGE_EVIDENCE_MODE,
+                            )
+                        ),
                         current_state_signature=str(
                             getattr(row, "current_state_signature", "")
                         ),
                         episode_id=episode_id,
+                        sceu_id=sceu.sceu_id,
+                        opportunity_id=sceu.opportunity_id,
+                        selected_action_id=selected,
+                        control_kind=(
+                            str(getattr(row, "control_kind", ""))
+                            if opportunity is None
+                            else opportunity.control_kind
+                        ),
+                        construct_kind=construct.construct_kind,
+                        horizon_band=construct.horizon_band,
+                        handoff_count=construct.handoff_count,
+                        oldest_required_state_age=(
+                            construct.oldest_required_state_age
+                        ),
+                        latest_decision_event_distance=(
+                            construct.latest_decision_event_distance
+                        ),
+                        dependency_depth=construct.dependency_depth,
+                        relevant_transition_count=(
+                            construct.relevant_transition_count
+                        ),
+                        memory_reliant_state_ids=(
+                            construct.memory_reliant_state_ids
+                        ),
+                        nonexplicit_state_ids=construct.nonexplicit_state_ids,
+                        stored_memory_state_ids=stored_state_ids,
+                        stored_exact_state_ids=stored_exact_state_ids,
+                        stored_inferred_state_ids=stored_inferred_state_ids,
+                        stored_unavailable_state_ids=(
+                            stored_unavailable_state_ids
+                        ),
+                        storage_evidence_mode=storage_evidence_mode,
+                        behaviorally_probed_state_ids=probed_state_ids,
+                        behaviorally_used_state_ids=used_state_ids,
+                        counterfactual_group_id=plan_metadata.get(
+                            "counterfactual_group_id",
+                            "",
+                        ),
+                        counterfactual_variant=plan_metadata.get(
+                            "counterfactual_variant",
+                            "",
+                        ),
+                        counterfactual_terminal_archetype=plan_metadata.get(
+                            "terminal_archetype",
+                            "",
+                        ),
+                        is_counterfactual_target=(
+                            bool(counterfactual_target)
+                            and sceu.opportunity_id == counterfactual_target
+                        ),
+                        horizon_panel_id=plan_metadata.get(
+                            "horizon_panel_id",
+                            "",
+                        ),
+                        horizon_level=plan_metadata.get(
+                            "horizon_level",
+                            "",
+                        ),
+                        horizon_axis=plan_metadata.get(
+                            "horizon_axis",
+                            "",
+                        ),
+                        effective_task_step_count=(
+                            task_span.effective_step_count
+                        ),
+                        max_task_dependency_depth=(
+                            task_span.max_dependency_depth
+                        ),
+                        causally_linked_task_step_fraction=(
+                            task_span.causally_linked_step_fraction
+                        ),
                     )
                 )
     return tuple(output)
@@ -1307,6 +2410,7 @@ def multisystem_state_checkpoints_from_artifacts(
             future = tuple(
                 state_id
                 for state_id, state in replay.current.items()
+                if is_benchmark_state_id(state_id)
                 if any(
                     session >= checkpoint.checkpoint_session
                     for session in state.future_need_sessions
@@ -1319,9 +2423,21 @@ def multisystem_state_checkpoints_from_artifacts(
                         attributed_state_ids.get(memory_id, ())
                         for memory_id in new_ids
                     ),
-                    current_state_ids=tuple(sorted(replay.current)),
+                    current_state_ids=tuple(
+                        sorted(
+                            state_id
+                            for state_id in replay.current
+                            if is_benchmark_state_id(state_id)
+                        )
+                    ),
                     future_needed_state_ids=tuple(sorted(future)),
-                    retired_state_ids=tuple(sorted(replay.invalidated)),
+                    retired_state_ids=tuple(
+                        sorted(
+                            state_id
+                            for state_id in replay.invalidated
+                            if is_benchmark_state_id(state_id)
+                        )
+                    ),
                     live_memory_state_ids=tuple(
                         attributed_state_ids.get(item.memory_id, ())
                         for item in inventory.items
@@ -1530,6 +2646,102 @@ def _attributed_state_ids(
 ) -> tuple[str, ...]:
     item = attribution.get(memory_id)
     return () if item is None else tuple(item.state_ids)
+
+
+def _stored_states_for_provenance(
+    attribution: Mapping[str, MemoryAttribution],
+    inventory: InventorySnapshot | None,
+    provenance_mode: ProvenanceMode,
+) -> tuple[str, ...]:
+    if inventory is None:
+        return ()
+    return _flatten_state_ids(
+        tuple(
+            item.state_ids
+            for memory in inventory.items
+            for item in (attribution.get(memory.memory_id),)
+            if item is not None
+            and item.contributes_positive_coverage
+            and item.provenance_mode == provenance_mode
+        )
+    )
+
+
+def _storage_evidence_mode(
+    required_state_ids: Sequence[str],
+    exact_state_ids: Sequence[str],
+    inferred_state_ids: Sequence[str],
+    unavailable_state_ids: Sequence[str],
+    *,
+    inventory_observed: bool,
+    checkpoint_evidence_mode: StorageEvidenceMode = "unavailable",
+) -> StorageEvidenceMode:
+    required = set(required_state_ids)
+    if not required:
+        return "not_applicable"
+    if not inventory_observed:
+        return "unavailable"
+    if required.intersection(unavailable_state_ids):
+        return "unavailable"
+    modes: set[ProvenanceMode] = set()
+    if required.intersection(exact_state_ids):
+        modes.add("native/exact")
+    if required.intersection(inferred_state_ids):
+        modes.add("inferred")
+    if checkpoint_evidence_mode in {"native/exact", "inferred"}:
+        modes.add(checkpoint_evidence_mode)
+    elif checkpoint_evidence_mode == "mixed":
+        modes.update({"native/exact", "inferred"})
+    if not modes:
+        return "unavailable"
+    if modes == {"native/exact", "inferred"}:
+        return "mixed"
+    if modes == {"native/exact"}:
+        return "native/exact"
+    return "inferred"
+
+
+def _artifact_storage_evidence_mode(
+    artifact: MemoryPrefixArtifact | None,
+    checkpoint_session: int,
+) -> StorageEvidenceMode:
+    """Return lifecycle evidence available for proving current-store absence.
+
+    Object-level provenance alone is insufficient when a required state has no
+    matching object. The complete checkpoint history is then the evidence:
+    native mutation events are exact, normalized inventory diffs are inferred,
+    and a positive write delta without either is unavailable. An observed but
+    unchanged inventory is conservatively treated as inferred.
+    """
+
+    if artifact is None:
+        return "unavailable"
+    relevant = tuple(
+        item
+        for item in artifact.checkpoints
+        if item.checkpoint_session <= checkpoint_session
+    )
+    if not relevant or any(item.inventory is None for item in relevant):
+        return "unavailable"
+    modes: set[str] = set()
+    previous_n_write = 0
+    for item in relevant:
+        inventory = item.inventory
+        if inventory is None:  # guarded above; retained for type narrowing
+            return "unavailable"
+        write_delta = max(0, inventory.n_write - previous_n_write)
+        previous_n_write = inventory.n_write
+        events = tuple(event for write in item.writes for event in write.events)
+        if write_delta > 0 and not events:
+            return "unavailable"
+        modes.update(_event_provenance(event) for event in events)
+    if modes == {"native/exact", "inferred"}:
+        return "mixed"
+    if modes == {"native/exact"}:
+        return "native/exact"
+    if modes == {"inferred"}:
+        return "inferred"
+    return "inferred"
 
 
 def _checkpoint_retrieval_latency(checkpoint: object | None, opportunity_id: str) -> float:
@@ -1927,15 +3139,17 @@ def _retrieval_metrics(
         backend = [
             set(states)
             for states in (
-                item.backend_retrieved_memory_state_ids
-                or item.candidate_memory_state_ids
+                item.candidate_memory_state_ids
+                if item.backend_retrieved_memory_state_ids is None
+                else item.backend_retrieved_memory_state_ids
             )
         ]
         selected = [
             set(states)
             for states in (
-                item.selected_memory_state_ids
-                or item.retrieved_memory_state_ids
+                item.retrieved_memory_state_ids
+                if item.selected_memory_state_ids is None
+                else item.selected_memory_state_ids
             )
         ]
         candidate_union = set().union(*candidates) if candidates else set()
@@ -2055,13 +3269,35 @@ def _behavior_metrics(
     intervention_labels = [
         label for item in observations for label in item.intervention_labels
     ]
-    causal_used = sum(label in {"beneficial", "harmful"} for label in causal_labels)
+    causal_effect_labels = {
+        "beneficial",
+        "harmful",
+        "causal_direction_ambiguous",
+    }
+    causal_used = sum(label in causal_effect_labels for label in causal_labels)
     values["causal_memory_use_rate"] = safe_ratio(
         causal_used,
         len(causal_labels),
     )
+    values["unique_causal_effect_rate"] = safe_ratio(
+        causal_used,
+        len(causal_labels),
+    )
+    no_detected_unique_effect = sum(
+        label
+        in {
+            "visible_without_detected_unique_causal_effect",
+            # Completed schema-v1 reports used an over-strong name.
+            "visible_not_causally_used",
+        }
+        for label in causal_labels
+    )
     values["visible_but_not_causally_used_rate"] = safe_ratio(
-        causal_labels.count("visible_not_causally_used"),
+        no_detected_unique_effect,
+        len(causal_labels),
+    )
+    values["visible_without_detected_unique_causal_effect_rate"] = safe_ratio(
+        no_detected_unique_effect,
         len(causal_labels),
     )
     values["visible_to_causal_use_yield"] = safe_ratio(
@@ -2159,6 +3395,13 @@ def _behavior_metrics(
             sum(flag in item.drift_flags for item in observations),
             len(observations),
         )
+        canonical_violation_name = {
+            "constraint_loss": "canonical_constraint_loss_violation_rate",
+            "plan_deviation": "canonical_plan_deviation_violation_rate",
+            "stale_state": "canonical_stale_state_violation_rate",
+            "local_over_global": "canonical_local_over_global_violation_rate",
+        }[flag]
+        values[canonical_violation_name] = values[observed_name]
         values[f"{metric_name}_eligible_n"] = safe_ratio(len(eligible), 1)
     aggregate_eligible = [
         item for item in observations if _any_drift_is_eligible(item)
@@ -2169,9 +3412,12 @@ def _behavior_metrics(
     )
     values["targeted_aggregate_drift_rate"] = values["aggregate_drift_rate"]
     values["observed_aggregate_drift_rate"] = safe_ratio(
-        sum(_has_observed_drift(item) for item in observations),
+        sum(_has_canonical_drift_violation(item) for item in observations),
         len(observations),
     )
+    values["canonical_drift_violation_rate"] = values[
+        "observed_aggregate_drift_rate"
+    ]
     values["off_target_drift_rate"] = safe_ratio(
         sum(_has_off_target_drift(item) for item in observations),
         len(observations),
@@ -2659,11 +3905,17 @@ __all__ = [
     "StateCheckpointMetricInput",
     "UsageMetricInput",
     "compute_metric_collection",
+    "compute_failure_attribution_scorecard",
+    "compute_long_horizon_scorecard",
+    "compute_long_horizon_control_contrasts",
+    "compute_matched_construct_contrasts",
+    "compute_matched_construct_scorecard",
     "compute_multisystem_metrics",
     "compute_multisystem_metrics_by_cell",
     "compute_multisystem_scorecard",
     "compute_schema_v2_metrics",
     "compute_qualification_metrics",
+    "decision_attribution_rows",
     "multisystem_observations_from_results",
     "multisystem_state_checkpoints_from_artifacts",
     "safe_ratio",

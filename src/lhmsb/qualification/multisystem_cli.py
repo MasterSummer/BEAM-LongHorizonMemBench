@@ -22,12 +22,36 @@ from pathlib import Path
 from typing import Any, cast
 
 from lhmsb.datasets.mem0_stateful_pipeline import Mem0StatefulDatasetError
+from lhmsb.families.software.horizon_panel import (
+    HorizonDose,
+    HorizonPanelAudit,
+    audit_horizon_panel,
+)
+from lhmsb.families.software.matched_constructs import (
+    MATCHED_CONSTRUCT_VARIANTS,
+    audit_matched_construct_triplet,
+)
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.longhorizon.interventions import (
     CausalUseLabel,
     EffectDirection,
     InterventionKind,
     MemoryRole,
+)
+from lhmsb.qualification.analysis_phase import (
+    ANALYSIS_PHASES,
+    AnalysisPhase,
+    AnalysisPhaseError,
+    parse_analysis_timing,
+    validate_analysis_phase,
+)
+from lhmsb.qualification.completed_report_audit import (
+    CompletedReportAuditError,
+    write_completed_report_audit,
+)
+from lhmsb.qualification.completed_report_reanalysis import (
+    CompletedReportReanalysisError,
+    write_completed_report_reanalysis,
 )
 from lhmsb.qualification.config import (
     build_evaluation_task_templates,
@@ -36,6 +60,7 @@ from lhmsb.qualification.config import (
     finalize_evaluation_plan,
     load_qualification_config,
 )
+from lhmsb.qualification.design_audit import compute_experiment_design_audit
 from lhmsb.qualification.evaluate import EvaluationTaskResult
 from lhmsb.qualification.prefix import MemoryPrefixArtifact
 from lhmsb.qualification.preflight import load_mem0_specs
@@ -69,6 +94,8 @@ _SYSTEM_COMMANDS = frozenset(
         "validate-systems",
         "preflight-systems",
         "smoke-systems",
+        "audit-completed-report",
+        "reanalyze-completed-report",
     }
 )
 
@@ -200,9 +227,7 @@ def _assert_planned_code_identity(manifest: Mapping[str, object]) -> tuple[str, 
             "formal worker checkout is dirty; restore the planned clean commit"
         )
     if current_commit != planned_commit:
-        raise MultisystemCliError(
-            "formal worker code commit differs from the immutable run plan"
-        )
+        raise MultisystemCliError("formal worker code commit differs from the immutable run plan")
     return current_commit, current_dirty, current_ref
 
 
@@ -307,9 +332,7 @@ def _assert_planned_preparation_manifests(
     )
     for label, expected, actual in comparisons:
         if expected is not None and expected != actual:
-            raise MultisystemCliError(
-                f"{label} identity differs from the immutable run plan"
-            )
+            raise MultisystemCliError(f"{label} identity differs from the immutable run plan")
     return runtime_hash, source_tree_hash, model_bundle_hash, python_lock_hash
 
 
@@ -325,6 +348,248 @@ def _specs(dataset: Path) -> tuple[SoftwareMem0VerticalSpec, ...]:
         return load_mem0_specs(dataset.resolve())
     except (Mem0StatefulDatasetError, OSError, KeyError, TypeError, ValueError) as exc:
         raise MultisystemCliError(f"cannot load frozen dataset: {exc}") from exc
+
+
+def _dataset_selection(
+    manifest: Mapping[str, object],
+    all_specs: Sequence[SoftwareMem0VerticalSpec],
+    *,
+    configured_release: str,
+    episode_limit: int | None,
+) -> tuple[tuple[SoftwareMem0VerticalSpec, ...], dict[str, object]]:
+    """Validate dataset identity and select complete statistical units.
+
+    Mixed and longitudinal trajectory releases use physical episodes as their
+    analysis units. Matched releases use counterfactual groups. Horizon
+    releases use complete short/medium/long panels, each containing three
+    matched triplets. A physical-episode prefix may therefore be selected only
+    when it contains complete statistical units.
+    """
+    release_id = _text(manifest.get("release_id"), "dataset release_id")
+    if release_id != configured_release:
+        raise MultisystemCliError(
+            "dataset release does not match experiment config: "
+            f"manifest={release_id!r}, config={configured_release!r}"
+        )
+    manifest_rows = manifest.get("episodes")
+    if not isinstance(manifest_rows, Sequence) or isinstance(manifest_rows, (str, bytes)):
+        raise MultisystemCliError("dataset manifest episodes must be an array")
+    manifest_episode_ids: list[str] = []
+    for index, row in enumerate(manifest_rows):
+        if not isinstance(row, Mapping):
+            raise MultisystemCliError(f"dataset manifest episode {index} must be an object")
+        manifest_episode_ids.append(
+            _text(row.get("episode_id"), f"dataset manifest episode {index} ID")
+        )
+    spec_episode_ids = tuple(spec.plan.episode_id for spec in all_specs)
+    if tuple(manifest_episode_ids) != spec_episode_ids:
+        raise MultisystemCliError("dataset manifest episode order differs from evaluator episodes")
+    declared_episode_count = _integer(manifest.get("n_episodes"), "dataset n_episodes")
+    if declared_episode_count != len(all_specs):
+        raise MultisystemCliError("dataset manifest episode count differs from evaluator episodes")
+
+    grouped: dict[str, list[SoftwareMem0VerticalSpec]] = {}
+    ungrouped: list[str] = []
+    for spec in all_specs:
+        metadata = spec.plan.metadata_dict
+        group_id = metadata.get("counterfactual_group_id", "")
+        variant = metadata.get("counterfactual_variant", "")
+        if bool(group_id) != bool(variant):
+            raise MultisystemCliError(
+                "matched episode must declare both counterfactual group and variant: "
+                f"{spec.plan.episode_id}"
+            )
+        if group_id:
+            if variant not in MATCHED_CONSTRUCT_VARIANTS:
+                raise MultisystemCliError(
+                    f"unknown counterfactual variant for {spec.plan.episode_id}: {variant!r}"
+                )
+            grouped.setdefault(group_id, []).append(spec)
+        else:
+            ungrouped.append(spec.plan.episode_id)
+    if grouped and ungrouped:
+        raise MultisystemCliError(
+            "dataset mixes matched and ungrouped episodes; analysis unit is ambiguous"
+        )
+
+    construct_mode = str(manifest.get("construct_mode", "mixed"))
+    is_matched = bool(grouped)
+    if is_matched != (construct_mode in {"matched_triplets", "horizon_panels"}):
+        raise MultisystemCliError(
+            "dataset construct_mode disagrees with evaluator counterfactual metadata"
+        )
+    if construct_mode not in {
+        "mixed",
+        "matched_triplets",
+        "horizon_panels",
+        "longitudinal_trajectories",
+    }:
+        raise MultisystemCliError(f"unknown dataset construct_mode: {construct_mode!r}")
+    is_longitudinal = construct_mode == "longitudinal_trajectories"
+    longitudinal_members = tuple(
+        spec.plan.metadata_dict.get("construct_mode") == "longitudinal_trajectory"
+        for spec in all_specs
+    )
+    if is_longitudinal != (bool(longitudinal_members) and all(longitudinal_members)):
+        raise MultisystemCliError(
+            "dataset construct_mode disagrees with evaluator longitudinal metadata"
+        )
+    if not is_longitudinal and any(longitudinal_members):
+        raise MultisystemCliError(
+            "non-longitudinal dataset contains a longitudinal trajectory episode"
+        )
+    if is_matched:
+        for group_id, group_specs in sorted(grouped.items()):
+            matched_audit = audit_matched_construct_triplet(tuple(group_specs))
+            if not matched_audit.ok:
+                raise MultisystemCliError(
+                    f"invalid counterfactual group {group_id}: " + "; ".join(matched_audit.errors)
+                )
+        declared_groups = _integer(
+            manifest.get("n_counterfactual_groups"),
+            "dataset n_counterfactual_groups",
+        )
+        if declared_groups != len(grouped):
+            raise MultisystemCliError(
+                "dataset counterfactual-group count differs from evaluator episodes"
+            )
+
+    horizon_panels: dict[str, list[SoftwareMem0VerticalSpec]] = {}
+    nonpanel_matched: list[str] = []
+    for spec in all_specs:
+        panel_id = spec.plan.metadata_dict.get("horizon_panel_id", "")
+        if panel_id:
+            horizon_panels.setdefault(panel_id, []).append(spec)
+        elif is_matched:
+            nonpanel_matched.append(spec.plan.episode_id)
+    is_horizon = construct_mode == "horizon_panels"
+    if is_horizon and nonpanel_matched:
+        raise MultisystemCliError(
+            "horizon dataset contains matched episodes without a horizon panel ID"
+        )
+    if bool(horizon_panels) != is_horizon:
+        raise MultisystemCliError(
+            "dataset construct_mode disagrees with evaluator horizon metadata"
+        )
+    if is_horizon:
+        for panel_id, panel_specs in sorted(horizon_panels.items()):
+            horizon_audit = _audit_horizon_specs(tuple(panel_specs))
+            if not horizon_audit.ok:
+                raise MultisystemCliError(
+                    f"invalid horizon panel {panel_id}: "
+                    + "; ".join(
+                        [
+                            *horizon_audit.errors,
+                            *(
+                                error
+                                for item in horizon_audit.variant_audits
+                                for error in item.errors
+                            ),
+                        ]
+                    )
+                )
+        declared_panels = _integer(
+            manifest.get("n_horizon_panels"),
+            "dataset n_horizon_panels",
+        )
+        if declared_panels != len(horizon_panels):
+            raise MultisystemCliError("dataset horizon-panel count differs from evaluator episodes")
+
+    selected = tuple(all_specs if episode_limit is None else all_specs[:episode_limit])
+    selected_groups: dict[str, list[SoftwareMem0VerticalSpec]] = {}
+    if is_matched:
+        for spec in selected:
+            group_id = spec.plan.metadata_dict["counterfactual_group_id"]
+            selected_groups.setdefault(group_id, []).append(spec)
+    if is_matched and not is_horizon:
+        incomplete = {
+            group_id: sorted(
+                spec.plan.metadata_dict["counterfactual_variant"] for spec in group_specs
+            )
+            for group_id, group_specs in selected_groups.items()
+            if {spec.plan.metadata_dict["counterfactual_variant"] for spec in group_specs}
+            != set(MATCHED_CONSTRUCT_VARIANTS)
+        }
+        if incomplete:
+            raise MultisystemCliError(
+                "--episode-limit splits a matched counterfactual triplet; "
+                "select a complete three-member group prefix: "
+                f"{incomplete}"
+            )
+    selected_panels: dict[str, list[SoftwareMem0VerticalSpec]] = {}
+    if is_horizon:
+        for spec in selected:
+            panel_id = spec.plan.metadata_dict["horizon_panel_id"]
+            selected_panels.setdefault(panel_id, []).append(spec)
+        incomplete_panels = {
+            panel_id: len(panel_specs)
+            for panel_id, panel_specs in selected_panels.items()
+            if len(panel_specs) != 9 or not _audit_horizon_specs(tuple(panel_specs)).ok
+        }
+        if incomplete_panels:
+            raise MultisystemCliError(
+                "--episode-limit splits a horizon panel; select a complete "
+                f"nine-member panel prefix: {incomplete_panels}"
+            )
+    selected_group_ids = tuple(sorted(selected_groups))
+    selected_panel_ids = tuple(sorted(selected_panels))
+    primary_analysis_unit = (
+        "horizon_panel" if is_horizon else ("counterfactual_group" if is_matched else "episode")
+    )
+    n_statistical_units = (
+        len(selected_panel_ids)
+        if is_horizon
+        else (len(selected_group_ids) if is_matched else len(selected))
+    )
+    dataset_statistical_units = (
+        len(horizon_panels) if is_horizon else (len(grouped) if is_matched else len(all_specs))
+    )
+    return selected, {
+        "construct_mode": construct_mode,
+        "primary_analysis_unit": primary_analysis_unit,
+        "physical_episode_count": len(selected),
+        "n_statistical_units": n_statistical_units,
+        "counterfactual_group_ids": list(selected_group_ids),
+        "horizon_panel_ids": list(selected_panel_ids),
+        "dataset_physical_episode_count": len(all_specs),
+        "dataset_statistical_unit_count": dataset_statistical_units,
+    }
+
+
+def _audit_horizon_specs(
+    specs: tuple[SoftwareMem0VerticalSpec, ...],
+) -> HorizonPanelAudit:
+    by_level = {spec.plan.metadata_dict.get("horizon_level", ""): spec for spec in specs}
+    if set(by_level) != {"short", "medium", "long"}:
+        return audit_horizon_panel(specs)
+    doses = tuple(
+        HorizonDose(
+            level,
+            by_level[level].plan.n_sessions,
+            int(by_level[level].plan.metadata_dict["horizon_steps_per_session"]),
+        )
+        for level in ("short", "medium", "long")
+    )
+    return audit_horizon_panel(specs, doses=doses)
+
+
+def _validate_analysis_phase(
+    phase: AnalysisPhase,
+    *,
+    dataset_design: Mapping[str, object],
+    design_audit: Mapping[str, object],
+) -> None:
+    """Prevent diagnostic/calibration samples from being labelled confirmatory."""
+
+    try:
+        validate_analysis_phase(
+            phase,
+            construct_mode=dataset_design.get("construct_mode"),
+            n_statistical_units=dataset_design.get("n_statistical_units"),
+            balanced_mechanism_design_ready=design_audit.get("balanced_mechanism_design_ready"),
+        )
+    except AnalysisPhaseError as exc:
+        raise MultisystemCliError(str(exc)) from exc
 
 
 def _prep_to_dict(task: PreparationTask) -> dict[str, object]:
@@ -378,9 +643,7 @@ def _template_from_dict(raw: Mapping[str, object]) -> EvaluationTaskTemplate:
         task_payload_hash=_text(raw.get("task_payload_hash"), "task_payload_hash"),
         scored_conditions=scored,
         prefix_backend=(
-            cast(SystemBackend, prefix_backend)
-            if prefix_backend is not None
-            else None
+            cast(SystemBackend, prefix_backend) if prefix_backend is not None else None
         ),
     )
 
@@ -420,9 +683,7 @@ def _task_from_dict(raw: Mapping[str, object]) -> EvaluationTask:
         task_payload_hash=_text(raw.get("task_payload_hash"), "task_payload_hash"),
         scored_conditions=scored,
         prefix_backend=(
-            cast(SystemBackend, prefix_backend)
-            if prefix_backend is not None
-            else None
+            cast(SystemBackend, prefix_backend) if prefix_backend is not None else None
         ),
     )
 
@@ -436,6 +697,7 @@ def plan_systems_run(
     force: bool = False,
     n_sessions: int | None = None,
     episode_limit: int | None = None,
+    analysis_phase: AnalysisPhase = "development",
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Write the immutable Stage-A preparation/template contract."""
@@ -443,16 +705,46 @@ def plan_systems_run(
     all_specs = _specs(dataset)
     if not all_specs:
         raise MultisystemCliError("frozen dataset contains no episodes")
-    if n_sessions is not None and any(
-        spec.plan.n_sessions != n_sessions for spec in all_specs
-    ):
-        raise MultisystemCliError("dataset session count does not match --n-sessions")
+    dataset_manifest = dataset.resolve() / "MANIFEST.json"
+    if not dataset_manifest.is_file():
+        raise MultisystemCliError(f"missing dataset manifest: {dataset_manifest}")
+    dataset_metadata = _read_json(dataset_manifest)
+    manifest_construct_mode = str(dataset_metadata.get("construct_mode", "mixed"))
+    if n_sessions is not None:
+        session_count_matches = (
+            max((spec.plan.n_sessions for spec in all_specs), default=0) == n_sessions
+            if manifest_construct_mode == "horizon_panels"
+            else all(spec.plan.n_sessions == n_sessions for spec in all_specs)
+        )
+        if not session_count_matches:
+            raise MultisystemCliError("dataset session count does not match --n-sessions")
     if episode_limit is not None and episode_limit < 1:
         raise MultisystemCliError("--episode-limit must be positive")
-    specs = (
-        all_specs
-        if episode_limit is None
-        else all_specs[:episode_limit]
+    if episode_limit is not None and episode_limit > len(all_specs):
+        raise MultisystemCliError("--episode-limit exceeds the frozen physical episode count")
+    specs, dataset_design = _dataset_selection(
+        dataset_metadata,
+        all_specs,
+        configured_release=config.dataset_release,
+        episode_limit=episode_limit,
+    )
+    design_audit = compute_experiment_design_audit({spec.plan.episode_id: spec for spec in specs})
+    if design_audit.get("run_ready") is not True:
+        raw_failures = design_audit.get("failed_check_ids")
+        failures = (
+            raw_failures
+            if isinstance(raw_failures, Sequence) and not isinstance(raw_failures, str | bytes)
+            else ()
+        )
+        raise MultisystemCliError(
+            "policy-free experiment design audit failed: "
+            + ", ".join(str(item) for item in failures)
+        )
+    design_audit_hash = canonical_hash(design_audit)
+    _validate_analysis_phase(
+        analysis_phase,
+        dataset_design=dataset_design,
+        design_audit=design_audit,
     )
     selected_episode_ids = tuple(spec.plan.episode_id for spec in specs)
     commit, dirty, ref = _git_identity()
@@ -464,9 +756,6 @@ def plan_systems_run(
     model_bundle_hash = _model_files_hash(env)
     python_lock_manifest_hash = _python_lock_manifest_hash(env)
     manifest_path = run_directory / "run_manifest.json"
-    dataset_manifest = dataset.resolve() / "MANIFEST.json"
-    if not dataset_manifest.is_file():
-        raise MultisystemCliError(f"missing dataset manifest: {dataset_manifest}")
     identity = {
         "schema_version": SCHEMA_VERSION,
         "code_commit": commit,
@@ -483,6 +772,13 @@ def plan_systems_run(
         # A smoke subset and the full run share the same frozen dataset hash,
         # so the selected episode identities must also bind the run identity.
         "episode_ids": list(selected_episode_ids),
+        "construct_mode": dataset_design["construct_mode"],
+        "primary_analysis_unit": dataset_design["primary_analysis_unit"],
+        "counterfactual_group_ids": dataset_design["counterfactual_group_ids"],
+        "horizon_panel_ids": dataset_design["horizon_panel_ids"],
+        "analysis_phase": analysis_phase,
+        "analysis_timing": "pre_specified",
+        "experiment_design_audit_hash": design_audit_hash,
         "policy_profiles": [asdict(item) for item in config.policy_profiles],
         "writer_profile": asdict(config.writer_profile),
         "retrieval": asdict(config.retrieval),
@@ -513,7 +809,10 @@ def plan_systems_run(
         "scored_cell_count": sum(len(item.scored_conditions) for item in templates),
         "episode_ids": list(selected_episode_ids),
         "episode_limit": episode_limit,
-        "n_sessions": specs[0].plan.n_sessions,
+        **dataset_design,
+        "experiment_design_audit_status": design_audit["audit_status"],
+        "balanced_mechanism_design_ready": design_audit["balanced_mechanism_design_ready"],
+        "n_sessions": max(spec.plan.n_sessions for spec in specs),
         "required_secret_env": list(config.required_secret_env),
         "finalized": False,
     }
@@ -528,6 +827,7 @@ def plan_systems_run(
         raise MultisystemCliError("run directory is non-empty; pass --force")
     run_directory.mkdir(parents=True, exist_ok=True)
     _atomic_write(run_directory / "run_config.yaml", config_path.read_bytes())
+    _atomic_json(run_directory / "experiment_design_audit.json", design_audit)
     _atomic_json(manifest_path, payload)
     _atomic_jsonl(
         run_directory / "prepare_tasks.jsonl",
@@ -553,10 +853,105 @@ def _load_contract(
     if _integer(manifest.get("schema_version"), "schema_version") != SCHEMA_VERSION:
         raise MultisystemCliError("unsupported schema-v2 run manifest")
     config = _config(Path(_text(manifest.get("config_path"), "config_path")))
-    specs = _specs(Path(_text(manifest.get("dataset_path"), "dataset_path")))
+    if config.config_hash != _text(manifest.get("config_hash"), "config_hash"):
+        raise MultisystemCliError("experiment config differs from the immutable run plan")
+    dataset_path = Path(_text(manifest.get("dataset_path"), "dataset_path"))
+    dataset_manifest_path = dataset_path / "MANIFEST.json"
+    if not dataset_manifest_path.is_file():
+        raise MultisystemCliError(f"missing dataset manifest: {dataset_manifest_path}")
+    expected_dataset_hash = _text(
+        manifest.get("dataset_manifest_sha256"),
+        "dataset_manifest_sha256",
+    )
+    if _sha256(dataset_manifest_path) != expected_dataset_hash:
+        raise MultisystemCliError("dataset manifest differs from the immutable run plan")
+    specs = _specs(dataset_path)
+    raw_episode_limit = manifest.get("episode_limit")
+    episode_limit = (
+        None if raw_episode_limit is None else _integer(raw_episode_limit, "episode_limit")
+    )
+    selected_specs, dataset_design = _dataset_selection(
+        _read_json(dataset_manifest_path),
+        specs,
+        configured_release=config.dataset_release,
+        episode_limit=episode_limit,
+    )
+    design_audit_path = run_directory / "experiment_design_audit.json"
+    if not design_audit_path.is_file():
+        raise MultisystemCliError("missing immutable experiment design audit")
+    persisted_design_audit = _read_json(design_audit_path)
+    recomputed_design_audit = compute_experiment_design_audit(
+        {spec.plan.episode_id: spec for spec in selected_specs}
+    )
+    if persisted_design_audit != recomputed_design_audit:
+        raise MultisystemCliError(
+            "experiment design audit differs from the selected frozen dataset"
+        )
+    expected_design_audit_hash = _text(
+        manifest.get("experiment_design_audit_hash"),
+        "experiment_design_audit_hash",
+    )
+    if canonical_hash(persisted_design_audit) != expected_design_audit_hash:
+        raise MultisystemCliError(
+            "experiment design audit hash differs from the immutable run plan"
+        )
+    if persisted_design_audit.get("run_ready") is not True:
+        raise MultisystemCliError("experiment design audit is not run-ready")
+    raw_analysis_phase = _text(
+        manifest.get("analysis_phase"),
+        "analysis_phase",
+    )
+    if raw_analysis_phase not in ANALYSIS_PHASES:
+        raise MultisystemCliError(
+            f"unknown analysis phase in immutable run plan: {raw_analysis_phase}"
+        )
+    _validate_analysis_phase(
+        raw_analysis_phase,
+        dataset_design=dataset_design,
+        design_audit=persisted_design_audit,
+    )
+    try:
+        analysis_timing = parse_analysis_timing(manifest.get("analysis_timing", "pre_specified"))
+    except AnalysisPhaseError as exc:
+        raise MultisystemCliError(str(exc)) from exc
+    if analysis_timing != "pre_specified":
+        raise MultisystemCliError("immutable live-run contract must be fixed before policy calls")
+    planned_episode_ids = manifest.get("episode_ids")
+    if not isinstance(planned_episode_ids, Sequence) or isinstance(
+        planned_episode_ids, (str, bytes)
+    ):
+        raise MultisystemCliError("run manifest episode_ids must be an array")
+    if tuple(str(item) for item in planned_episode_ids) != tuple(
+        spec.plan.episode_id for spec in selected_specs
+    ):
+        raise MultisystemCliError("selected dataset episodes differ from the immutable run plan")
+    for field in (
+        "construct_mode",
+        "primary_analysis_unit",
+        "physical_episode_count",
+        "n_statistical_units",
+        "counterfactual_group_ids",
+        "horizon_panel_ids",
+        "experiment_design_audit_status",
+        "balanced_mechanism_design_ready",
+    ):
+        expected = (
+            persisted_design_audit[
+                "audit_status"
+                if field == "experiment_design_audit_status"
+                else "balanced_mechanism_design_ready"
+            ]
+            if field
+            in {
+                "experiment_design_audit_status",
+                "balanced_mechanism_design_ready",
+            }
+            else dataset_design[field]
+        )
+        if field in manifest and manifest[field] != expected:
+            raise MultisystemCliError(f"dataset {field} differs from the immutable run plan")
     preparations = tuple(
-        _prep_from_dict(item)
-        for item in _read_jsonl(run_directory / "prepare_tasks.jsonl")
+        _prep_from_dict(item) for item in _read_jsonl(run_directory / "prepare_tasks.jsonl")
     )
     templates = tuple(
         _template_from_dict(item)
@@ -633,9 +1028,7 @@ def _live_data_root(
     environment: Mapping[str, str],
 ) -> Path:
     """Resolve the native data root without a container-specific fallback."""
-    configured = environment.get(config.data_root_env) or environment.get(
-        "LHMSB_DATA_ROOT"
-    )
+    configured = environment.get(config.data_root_env) or environment.get("LHMSB_DATA_ROOT")
     if configured:
         return Path(configured).expanduser()
     # A local fallback is useful for unit tests and repository-only smoke runs;
@@ -742,9 +1135,7 @@ def _evaluate_live_task(
     from lhmsb.qualification.providers import PolicyClient
 
     manifest, config, specs, preparations, _ = _load_contract(run_directory)
-    evaluation_commit, evaluation_dirty, evaluation_ref = (
-        _assert_planned_code_identity(manifest)
-    )
+    evaluation_commit, evaluation_dirty, evaluation_ref = _assert_planned_code_identity(manifest)
     tasks = _load_tasks(run_directory)
     if task_index < 0 or task_index >= len(tasks):
         raise MultisystemCliError("evaluation task index is out of range")
@@ -808,6 +1199,23 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise MultisystemCliError("result sequence field must be an array")
     return tuple(str(item) for item in value)
+
+
+def _string_pairs(value: object) -> tuple[tuple[str, str], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise MultisystemCliError("result pair field must be an array")
+    output: list[tuple[str, str]] = []
+    for item in value:
+        if (
+            not isinstance(item, Sequence)
+            or isinstance(item, (str, bytes))
+            or len(item) != 2
+        ):
+            raise MultisystemCliError("result pair entries must contain two strings")
+        output.append((str(item[0]), str(item[1])))
+    return tuple(output)
 
 
 def _mapping_value(value: object, label: str) -> Mapping[str, object]:
@@ -940,19 +1348,13 @@ def _evaluation_result_from_dict(raw: Mapping[str, object]) -> EvaluationTaskRes
             ),
             usage=PolicyUsage(
                 input_tokens=(
-                    None
-                    if usage.get("input_tokens") is None
-                    else _as_int(usage["input_tokens"])
+                    None if usage.get("input_tokens") is None else _as_int(usage["input_tokens"])
                 ),
                 output_tokens=(
-                    None
-                    if usage.get("output_tokens") is None
-                    else _as_int(usage["output_tokens"])
+                    None if usage.get("output_tokens") is None else _as_int(usage["output_tokens"])
                 ),
                 cached_tokens=(
-                    None
-                    if usage.get("cached_tokens") is None
-                    else _as_int(usage["cached_tokens"])
+                    None if usage.get("cached_tokens") is None else _as_int(usage["cached_tokens"])
                 ),
                 reasoning_tokens=(
                     None
@@ -1019,11 +1421,7 @@ def _evaluation_result_from_dict(raw: Mapping[str, object]) -> EvaluationTaskRes
         data = _mapping_value(value, "evaluation intervention")
         raw_evaluations = data.get("evaluations", ())
         evaluations = (
-            tuple(
-                evaluation_call(item)
-                for item in raw_evaluations
-                if isinstance(item, Mapping)
-            )
+            tuple(evaluation_call(item) for item in raw_evaluations if isinstance(item, Mapping))
             if isinstance(raw_evaluations, Sequence)
             and not isinstance(raw_evaluations, (str, bytes))
             else ()
@@ -1044,9 +1442,7 @@ def _evaluation_result_from_dict(raw: Mapping[str, object]) -> EvaluationTaskRes
             baseline_memory_count=_as_int(data.get("baseline_memory_count")),
             intervention_memory_count=_as_int(data.get("intervention_memory_count")),
             count_contrast=(
-                None
-                if data.get("count_contrast") is None
-                else str(data.get("count_contrast"))
+                None if data.get("count_contrast") is None else str(data.get("count_contrast"))
             ),
             provenance_mode=str(data.get("provenance_mode", "unavailable")),
         )
@@ -1056,21 +1452,12 @@ def _evaluation_result_from_dict(raw: Mapping[str, object]) -> EvaluationTaskRes
         raw_baselines = data.get("baseline_evaluations", ())
         raw_interventions = data.get("interventions", ())
         baselines = (
-            tuple(
-                evaluation_call(item)
-                for item in raw_baselines
-                if isinstance(item, Mapping)
-            )
-            if isinstance(raw_baselines, Sequence)
-            and not isinstance(raw_baselines, (str, bytes))
+            tuple(evaluation_call(item) for item in raw_baselines if isinstance(item, Mapping))
+            if isinstance(raw_baselines, Sequence) and not isinstance(raw_baselines, (str, bytes))
             else ()
         )
         interventions = (
-            tuple(
-                intervention(item)
-                for item in raw_interventions
-                if isinstance(item, Mapping)
-            )
+            tuple(intervention(item) for item in raw_interventions if isinstance(item, Mapping))
             if isinstance(raw_interventions, Sequence)
             and not isinstance(raw_interventions, (str, bytes))
             else ()
@@ -1116,32 +1503,29 @@ def _evaluation_result_from_dict(raw: Mapping[str, object]) -> EvaluationTaskRes
                     data.get("retrieved_memory_ids"),
                 )
             ),
-            behaviorally_used_memory_ids=_string_tuple(
-                data.get("behaviorally_used_memory_ids")
-            ),
+            behaviorally_used_memory_ids=_string_tuple(data.get("behaviorally_used_memory_ids")),
             drift_eligible_categories=(
                 None
                 if data.get("drift_eligible_categories") is None
                 else _string_tuple(data.get("drift_eligible_categories"))
             ),
-            current_state_signature=str(
-                data.get("current_state_signature", "")
+            drift_lineage_pairs=_string_pairs(data.get("drift_lineage_pairs")),
+            drift_lineage_evidence_mode=str(
+                data.get("drift_lineage_evidence_mode", "unavailable")
             ),
+            current_state_signature=str(data.get("current_state_signature", "")),
         )
 
     raw_conditions = raw.get("condition_results", ())
     condition_rows: list[EvaluationConditionResult] = []
-    if isinstance(raw_conditions, Sequence) and not isinstance(
-        raw_conditions, (str, bytes)
-    ):
+    if isinstance(raw_conditions, Sequence) and not isinstance(raw_conditions, (str, bytes)):
         for raw_condition in raw_conditions:
             if not isinstance(raw_condition, Mapping):
                 continue
             raw_sceu = raw_condition.get("sceu_results", ())
             sceu_rows = (
                 tuple(sceu(item) for item in raw_sceu if isinstance(item, Mapping))
-                if isinstance(raw_sceu, Sequence)
-                and not isinstance(raw_sceu, (str, bytes))
+                if isinstance(raw_sceu, Sequence) and not isinstance(raw_sceu, (str, bytes))
                 else ()
             )
             condition_rows.append(
@@ -1365,6 +1749,11 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--force", action="store_true")
     plan.add_argument("--n-sessions", type=int)
     plan.add_argument("--episode-limit", type=int)
+    plan.add_argument(
+        "--analysis-phase",
+        choices=ANALYSIS_PHASES,
+        default=os.environ.get("LHMSB_ANALYSIS_PHASE", "development"),
+    )
     plan.add_argument("--json", type=Path)
 
     prep = sub.add_parser("prepare-task")
@@ -1409,6 +1798,27 @@ def _parser() -> argparse.ArgumentParser:
     smoke = sub.add_parser("smoke-systems")
     smoke.add_argument("--dry-run", action="store_true")
     smoke.add_argument("--json", type=Path)
+
+    audit = sub.add_parser("audit-completed-report")
+    audit.add_argument("--report", required=True, type=Path)
+    audit.add_argument("--out", required=True, type=Path)
+    audit.add_argument(
+        "--dataset",
+        type=Path,
+        help="Exact frozen dataset declared by the source run; required for zero-API attribution",
+    )
+    audit.add_argument(
+        "--analysis-timing",
+        choices=("post_hoc_scope_audit", "post_hoc_exploratory"),
+        default="post_hoc_scope_audit",
+    )
+    audit.add_argument("--force", action="store_true")
+
+    reanalysis = sub.add_parser("reanalyze-completed-report")
+    reanalysis.add_argument("--report", required=True, type=Path)
+    reanalysis.add_argument("--dataset", required=True, type=Path)
+    reanalysis.add_argument("--out", required=True, type=Path)
+    reanalysis.add_argument("--force", action="store_true")
     return parser
 
 
@@ -1428,6 +1838,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 force=args.force,
                 n_sessions=args.n_sessions,
                 episode_limit=args.episode_limit,
+                analysis_phase=cast(AnalysisPhase, args.analysis_phase),
             )
             if args.json:
                 _atomic_json(args.json, payload)
@@ -1501,13 +1912,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.json:
                 _atomic_json(args.json, preflight_report)
             print(
-                "systems preflight passed"
-                if preflight_report["ok"]
-                else "systems preflight FAILED"
+                "systems preflight passed" if preflight_report["ok"] else "systems preflight FAILED"
             )
             return 0 if preflight_report["ok"] else 1
+        if args.command == "audit-completed-report":
+            output = write_completed_report_audit(
+                args.report,
+                args.out,
+                frozen_dataset=args.dataset,
+                audit_analysis_timing=parse_analysis_timing(args.analysis_timing),
+                force=args.force,
+            )
+            print(f"completed-report contribution audit -> {output}")
+            return 0
+        if args.command == "reanalyze-completed-report":
+            output = write_completed_report_reanalysis(
+                args.report,
+                args.dataset,
+                args.out,
+                force=args.force,
+            )
+            print(f"completed-report decision reanalysis -> {output}")
+            return 0
         raise MultisystemCliError(f"unknown command: {args.command}")
-    except (MultisystemCliError, OSError, KeyError, TypeError, ValueError) as exc:
+    except (
+        CompletedReportAuditError,
+        CompletedReportReanalysisError,
+        MultisystemCliError,
+        OSError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
         print(f"{args.command} FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 

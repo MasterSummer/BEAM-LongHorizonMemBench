@@ -5,6 +5,21 @@ under :mod:`lhmsb.types` and is not changed by the vertical slice.
 """
 
 from lhmsb.longhorizon.attribution import ProvenanceMode
+from lhmsb.longhorizon.constructs import (
+    ConstructKind,
+    HorizonBand,
+    LongHorizonConstructProfile,
+    horizon_band,
+    profile_sceu,
+)
+from lhmsb.longhorizon.failure_attribution import (
+    DecisionFailureStage,
+    DecisionLayerDiagnosis,
+    DecisionMemoryAttribution,
+    StorageEvidenceMode,
+    UseEvidenceStatus,
+    attribute_decision_memory,
+)
 from lhmsb.longhorizon.public_surface import (
     EvaluatorContinuation,
     PublicActionOption,
@@ -29,16 +44,31 @@ from lhmsb.longhorizon.schema import (
     StateEventKind,
     StateKind,
     StateUnit,
+    TaskStep,
+    TaskStepExecutionMode,
+    TaskStepKind,
     WorkspaceArtifact,
     WorkspaceRecoverability,
     WorkspaceSnapshot,
 )
+from lhmsb.longhorizon.task_span import (
+    MIN_LONG_HORIZON_EFFECTIVE_STEPS,
+    MIN_ONLINE_LONG_HORIZON_POLICY_STEPS,
+    TaskSpanProfile,
+    TrajectoryInteractionMode,
+    build_software_task_steps,
+    profile_task_span,
+)
 
 __all__ = [
     "ActionSpec",
+    "ConstructKind",
     "ControlKind",
     "ContinuationOpportunity",
     "ContinuationScope",
+    "DecisionFailureStage",
+    "DecisionLayerDiagnosis",
+    "DecisionMemoryAttribution",
     "EpisodePlan",
     "EvaluatorContinuation",
     "PublicActionOption",
@@ -51,13 +81,29 @@ __all__ = [
     "StateEventKind",
     "StateKind",
     "StateReplayError",
+    "StorageEvidenceMode",
+    "UseEvidenceStatus",
     "SurfaceLeakError",
     "SurfaceLeakPolicy",
     "StateUnit",
+    "TaskStep",
+    "TaskStepExecutionMode",
+    "TaskStepKind",
+    "HorizonBand",
+    "LongHorizonConstructProfile",
+    "MIN_LONG_HORIZON_EFFECTIVE_STEPS",
+    "MIN_ONLINE_LONG_HORIZON_POLICY_STEPS",
+    "TaskSpanProfile",
+    "TrajectoryInteractionMode",
     "WorkspaceArtifact",
     "WorkspaceSnapshot",
     "WorkspaceRecoverability",
+    "attribute_decision_memory",
+    "build_software_task_steps",
+    "horizon_band",
     "plan_hash",
+    "profile_sceu",
+    "profile_task_span",
     "public_surface_hash",
     "replay_plan",
     "render_surfaces",

@@ -253,6 +253,7 @@ class CausalSamplingProfile:
     intervention_repeats: int = 2
     provider_seed: int | None = None
     format_repair_attempts: int = 1
+    enable_memory_count_interventions: bool = True
     visible_memory_count_add_levels: tuple[int, ...] = (1, 5, 20)
     visible_memory_count_opportunity_ids: tuple[str, ...] = (
         "opp-premature-v2",
@@ -282,6 +283,8 @@ class CausalSamplingProfile:
             raise ValueError("provider_seed must be null or non-negative")
         if self.format_repair_attempts < 0:
             raise ValueError("format_repair_attempts must be non-negative")
+        if not isinstance(self.enable_memory_count_interventions, bool):
+            raise ValueError("enable_memory_count_interventions must be boolean")
         if (
             not self.visible_memory_count_add_levels
             or any(value < 1 for value in self.visible_memory_count_add_levels)
@@ -1054,7 +1057,14 @@ class SystemsQualificationConfig:
         )
         if self.retrieval != expected_retrieval:
             raise ValueError("schema-v2 common retrieval identity is not canonical")
-        if self.sampling != CausalSamplingProfile():
+        canonical_sampling = CausalSamplingProfile()
+        matched_mechanism_sampling = CausalSamplingProfile(
+            enable_memory_count_interventions=False,
+        )
+        if self.sampling not in {
+            canonical_sampling,
+            matched_mechanism_sampling,
+        }:
             raise ValueError("schema-v2 sampling profile is not canonical")
         if self.source_lock_hash is None:
             raise ValueError("schema-v2 source lock SHA is required")

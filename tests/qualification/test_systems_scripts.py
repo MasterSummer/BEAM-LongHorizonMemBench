@@ -136,6 +136,7 @@ def test_slurm_prepare_forwards_episode_limit(tmp_path: Path) -> None:
             "LHMSB_DATA_ROOT": str(tmp_path / "data"),
             "LHMSB_ENV_FILE": str(tmp_path / "missing.env"),
             "LHMSB_RUN_NAME": "calibration",
+            "LHMSB_ANALYSIS_PHASE": "calibration",
         }
     )
     result = subprocess.run(
@@ -148,6 +149,7 @@ def test_slurm_prepare_forwards_episode_limit(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "--episode-limit 5" in result.stdout
+    assert "--analysis-phase calibration" in result.stdout
 
 
 def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
@@ -165,7 +167,7 @@ def test_scripts_use_schema_v2_commands_and_keep_running_matrix() -> None:
         ):
             assert marker in text
     assert "--episode-limit 1" in smoke
-    assert "datasets/software_v9" in smoke
+    assert "datasets/software_v10" in smoke
     assert "systems_controlled_gpt_only_aaai.yaml" in smoke
 
 
@@ -175,7 +177,7 @@ def test_preflight_and_bootstrap_default_to_the_confirmatory_release() -> None:
         ROOT / "scripts" / "bootstrap_systems_server.sh",
     ):
         text = path.read_text(encoding="utf-8")
-        assert "datasets/software_v9" in text
+        assert "datasets/software_v10" in text
         assert "systems_controlled_gpt_only_aaai.yaml" in text
 
 
@@ -210,6 +212,8 @@ def test_qualification_supports_five_episode_calibration(tmp_path: Path) -> None
         "--dry-run",
         "--episode-limit",
         "5",
+        "--analysis-phase",
+        "calibration",
         "--data-root",
         str(tmp_path / "data"),
         "--env-file",
@@ -218,6 +222,7 @@ def test_qualification_supports_five_episode_calibration(tmp_path: Path) -> None
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "plan-systems" in result.stdout
     assert "--episode-limit 5" in result.stdout
+    assert "--analysis-phase calibration" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -246,6 +251,39 @@ def test_system_dataset_environment_override_survives_data_root(
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert str(held_out) in result.stdout
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        ROOT / "scripts" / "preflight_systems.sh",
+        ROOT / "scripts" / "run_systems_smoke.sh",
+        ROOT / "scripts" / "run_systems_qualification.sh",
+    ),
+)
+def test_system_config_environment_override_reaches_the_cli(
+    path: Path,
+    tmp_path: Path,
+) -> None:
+    matched_config = (
+        ROOT
+        / "configs"
+        / "experiments"
+        / "systems_controlled_gpt_only_matched_v011.yaml"
+    )
+    environment = dict(os.environ)
+    environment["LHMSB_SYSTEM_CONFIG"] = str(matched_config)
+    result = _run(
+        path,
+        "--dry-run",
+        "--data-root",
+        str(tmp_path / "data"),
+        "--env-file",
+        str(tmp_path / "missing.env"),
+        env=environment,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert str(matched_config) in result.stdout
 
 
 def test_qualification_rejects_invalid_episode_limit(tmp_path: Path) -> None:
