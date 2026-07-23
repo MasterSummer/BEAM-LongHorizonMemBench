@@ -42,6 +42,11 @@ systems_require_value() {
 
 systems_load_env() {
   local env_file="$1"
+  # The operator file contains stable credentials and host defaults. A run
+  # may select a different frozen release/config via Slurm exports; preserve
+  # those explicit overrides so stale operator defaults cannot redirect it.
+  local dataset_override="${LHMSB_SYSTEM_DATASET_OVERRIDE:-}"
+  local config_override="${LHMSB_SYSTEM_CONFIG_OVERRIDE:-}"
   if [[ ! -f "${env_file}" ]]; then
     printf 'missing operator settings file: %s\n' "${env_file}" >&2
     return 1
@@ -59,6 +64,12 @@ systems_load_env() {
   # never instantiates a local Transformers model.  Suppress only the advisory
   # emitted by Transformers when torch is intentionally absent from that venv.
   export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
+  if [[ -n "${dataset_override}" ]]; then
+    export LHMSB_SYSTEM_DATASET="${dataset_override}"
+  fi
+  if [[ -n "${config_override}" ]]; then
+    export LHMSB_SYSTEM_CONFIG="${config_override}"
+  fi
 }
 
 systems_prepare_dirs() {
