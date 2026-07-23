@@ -325,6 +325,28 @@ def test_checkpoint_evidence_can_prove_a_required_state_was_not_stored() -> None
     ) == "unavailable"
 
 
+def test_ambiguous_duplicate_does_not_erase_positive_storage_evidence() -> None:
+    """An unresolved duplicate is not the same as an unresolved state."""
+
+    assert _storage_evidence_mode(
+        ("C1", "U1"),
+        ("C1", "U1"),
+        (),
+        ("U1",),
+        inventory_observed=True,
+        checkpoint_evidence_mode="native/exact",
+    ) == "native/exact"
+
+    assert _storage_evidence_mode(
+        ("C1",),
+        (),
+        (),
+        ("C1",),
+        inventory_observed=True,
+        checkpoint_evidence_mode="native/exact",
+    ) == "unavailable"
+
+
 def test_failure_attribution_separates_backend_retrieval_from_model_exposure() -> None:
     reranker_filtered = MultisystemMetricInput(
         policy_profile_id="policy-a",

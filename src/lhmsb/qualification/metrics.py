@@ -2681,7 +2681,16 @@ def _storage_evidence_mode(
         return "not_applicable"
     if not inventory_observed:
         return "unavailable"
-    if required.intersection(unavailable_state_ids):
+    # A memory store may contain both an exactly attributable object and an
+    # ambiguous duplicate/summary mentioning the same state.  The duplicate
+    # must not erase the positive lifecycle evidence for that state.  Treat a
+    # required state as unavailable only when it has no exact or inferred
+    # positive attribution at all.  This preserves the conservative behavior
+    # for a genuinely unresolved state while avoiding a false storage failure
+    # caused by an unresolved copy.
+    positively_evidenced = set(exact_state_ids).union(inferred_state_ids)
+    unresolved = set(unavailable_state_ids).difference(positively_evidenced)
+    if required.intersection(unresolved):
         return "unavailable"
     modes: set[ProvenanceMode] = set()
     if required.intersection(exact_state_ids):
