@@ -1027,8 +1027,26 @@ class SystemsQualificationConfig:
             2,
             1,
         )
-        if _policy_identity(self.writer_profile) != expected_writer:
-            raise ValueError("schema-v2 requires the fixed DeepSeek writer profile")
+        shengsuanyun_writer = (
+            "deepseek_v4_pro_writer",
+            "deepseek",
+            "deepseek/deepseek-v4-pro",
+            "shengsuanyun_deepseek_v4_pro",
+            "SHENGSUANYUN_API_KEY",
+            "https://router.shengsuanyun.com/api/v1",
+            None,
+            "chat_completions",
+            180.0,
+            2,
+            1,
+        )
+        if _policy_identity(self.writer_profile) not in {
+            expected_writer,
+            shengsuanyun_writer,
+        }:
+            raise ValueError(
+                "schema-v2 requires a pinned DeepSeek V4 Pro writer route"
+            )
         expected_conditions = (
             "workspace_only",
             "full_context",

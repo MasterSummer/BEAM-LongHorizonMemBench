@@ -45,6 +45,12 @@ LONGITUDINAL_CONFIG_PATH = (
     / "experiments"
     / "systems_controlled_gpt_only_longitudinal_v013.yaml"
 )
+LONGITUDINAL_SHENGSUANYUN_WRITER_CONFIG_PATH = (
+    ROOT
+    / "configs"
+    / "experiments"
+    / "systems_controlled_gpt_only_longitudinal_v013_shengsuanyun_writer.yaml"
+)
 RUN_ID = "1" * 64
 OTHER_RUN_ID = "2" * 64
 
@@ -277,6 +283,18 @@ def test_longitudinal_config_pins_v013_release_and_gpt_only_matrix() -> None:
         "opp-local-valid",
         "opp-global-local-conflict",
     )
+
+
+def test_longitudinal_config_accepts_pinned_shengsuanyun_deepseek_writer() -> None:
+    config = load_qualification_config(LONGITUDINAL_SHENGSUANYUN_WRITER_CONFIG_PATH)
+
+    assert isinstance(config, SystemsQualificationConfig)
+    assert config.writer_profile.profile_id == "deepseek_v4_pro_writer"
+    assert config.writer_profile.model_id == "deepseek/deepseek-v4-pro"
+    assert config.writer_profile.route_id == "shengsuanyun_deepseek_v4_pro"
+    assert config.writer_profile.api_key_env == "SHENGSUANYUN_API_KEY"
+    assert config.writer_profile.endpoint == "https://router.shengsuanyun.com/api/v1"
+    assert config.required_secret_env == ("SHENGSUANYUN_API_KEY",)
 
 
 def test_schema_v2_config_is_deeply_immutable_and_serializes_condition_definitions() -> None:
