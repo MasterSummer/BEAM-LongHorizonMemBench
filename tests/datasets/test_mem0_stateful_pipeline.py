@@ -15,14 +15,14 @@ from lhmsb.datasets.mem0_stateful_pipeline import (
     MEM0_STATEFUL_GENERATOR_VERSION_V10,
     MEM0_STATEFUL_GENERATOR_VERSION_V11,
     MEM0_STATEFUL_GENERATOR_VERSION_V12,
-    MEM0_STATEFUL_GENERATOR_VERSION_V13,
+    MEM0_STATEFUL_GENERATOR_VERSION_V14,
     MEM0_STATEFUL_RELEASE_ID_V3,
     MEM0_STATEFUL_RELEASE_ID_V10,
     MEM0_STATEFUL_RELEASE_ID_V11,
     MEM0_STATEFUL_RELEASE_ID_V12,
-    MEM0_STATEFUL_RELEASE_ID_V13,
+    MEM0_STATEFUL_RELEASE_ID_V14,
     MEM0_STATEFUL_SCHEMA_VERSION_V12,
-    MEM0_STATEFUL_SCHEMA_VERSION_V13,
+    MEM0_STATEFUL_SCHEMA_VERSION_V14,
     Mem0StatefulDatasetError,
     build_mem0_release_archive,
     freeze_mem0_stateful,
@@ -355,14 +355,14 @@ def test_longitudinal_release_freezes_c2_c3_contract_and_regenerates(
     manifest = freeze_mem0_stateful(stage, frozen)
 
     assert len(generated) == 1
-    assert manifest.schema_version == MEM0_STATEFUL_SCHEMA_VERSION_V13
-    assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V13
-    assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V13
+    assert manifest.schema_version == MEM0_STATEFUL_SCHEMA_VERSION_V14
+    assert manifest.release_id == MEM0_STATEFUL_RELEASE_ID_V14
+    assert manifest.generator_version == MEM0_STATEFUL_GENERATOR_VERSION_V14
     assert manifest.construct_mode == "longitudinal_trajectories"
     assert manifest.n_episodes == 1
     assert manifest.n_sessions == 16
     assert manifest.steps_per_session == 16
-    assert len(generated[0].spec.plan.opportunities) == 13
+    assert len(generated[0].spec.plan.opportunities) == 18
     audit = json.loads(
         (frozen / "evaluator" / "dataset_audit.json").read_text(
             encoding="utf-8"
@@ -371,6 +371,9 @@ def test_longitudinal_release_freezes_c2_c3_contract_and_regenerates(
     assert audit["checks"][
         "max_always_action_accuracy_le_0_60_longitudinal"
     ]
+    assert audit["check_applicability"][
+        "max_always_option_accuracy_le_0_40"
+    ] is False
     assert audit["checks"][
         "all_longitudinal_episodes_have_effective_long_horizon_span"
     ]
@@ -382,7 +385,7 @@ def test_longitudinal_release_freezes_c2_c3_contract_and_regenerates(
     assert audit["check_applicability"]["memory_reliant_decisions_present"]
     assert audit["policy_free_baselines"][
         "best_always_action_accuracy"
-    ] == pytest.approx(7 / 13)
+    ] == pytest.approx(7 / 18)
     contribution = audit["contribution_design_audit"]
     assert contribution["scope"] == "longitudinal_trajectory"
     assert contribution["run_ready"] is True
@@ -460,7 +463,7 @@ def test_fifty_episode_release_passes_all_audits_and_uses_v10(tmp_path: Path) ->
     assert all(audit["checks"].values())
     assert (
         audit["policy_free_baselines"]["best_always_action_accuracy"]
-        == 0.5
+        == pytest.approx(6 / 17)
     )
     assert (
         audit["policy_free_baselines"]["best_always_option_accuracy"]

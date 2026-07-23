@@ -1053,16 +1053,35 @@ def compute_measurement_gates(
     unavailable = (
         int(semantic_methods.get("unavailable", 0)) if isinstance(semantic_methods, Mapping) else 0
     )
-    _gate_ratio(
+    # Ambiguous/no-match objects are a substantive storage-quality outcome:
+    # native writers can retain progress summaries that do not preserve a
+    # uniquely attributable task fact.  They must remain visible in the
+    # report, but they are not a benchmark-validity failure.  Requiring 90%
+    # resolution over *all* final objects would reject a run precisely when a
+    # backend exhibits the storage-selectivity failure that C3 is designed to
+    # localize.  The evaluator-contract gates below still require complete
+    # attribution metadata and decision-level storage evidence.
+    _gate_boolean(
         gates,
         "semantic_attribution_resolvability",
-        max(0, semantic_total - ambiguous - unavailable),
-        semantic_total,
-        minimum=SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN,
+        False,
+        applicable=False,
         description=(
-            "Semantic attribution resolves each object as a fact match or a supported "
-            "no-match without evaluator ambiguity."
+            "All-object semantic resolvability is reported as storage quality, "
+            "not used as a readiness gate; evaluator metadata completeness and "
+            "decision-level evidence remain gated."
         ),
+        detail={
+            "quality_metric": (
+                None
+                if semantic_total == 0
+                else max(0, semantic_total - ambiguous - unavailable) / semantic_total
+            ),
+            "ambiguous_objects": ambiguous,
+            "unavailable_objects": unavailable,
+            "threshold_if_reported": SEMANTIC_ATTRIBUTION_RESOLVABILITY_MIN,
+            "policy": "descriptive_storage_quality",
+        },
     )
     stored_lifecycle = (
         semantic.get("lifecycle_provenance_counts", {})

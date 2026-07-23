@@ -378,13 +378,13 @@ the construct penalty grows from short to long more for the memory condition
 than for workspace-only; a null or negative result narrows the long-horizon-
 specific claim and must be retained.
 
-## Run the v0.13 longitudinal drift and localization experiment
+## Run the v0.14 longitudinal drift and localization experiment
 
-v0.13 is the independent multi-checkpoint release for C2 and C3. It does not
+v0.14 is the independent multi-checkpoint release for C2 and C3. It does not
 replace v0.11's matched C1 mechanism estimate or v0.12's horizon-dose
-diagnostic. Each 16-session episode has 13 dependent continuation decisions,
+diagnostic. Each 16-session episode has 18 dependent continuation decisions,
 including a final same-lineage recovery reminder. The episode is the
-statistical unit; the 13 SCEUs are repeated observations and must never inflate
+statistical unit; the 18 SCEUs are repeated observations and must never inflate
 the sample size.
 
 Freeze five independent calibration episodes:
@@ -393,18 +393,18 @@ Freeze five independent calibration episodes:
 python -m lhmsb.datasets generate-mem0-stateful \
   --seeds 301 302 303 304 305 --n-episodes 1 --n-sessions 16 \
   --construct-mode longitudinal_trajectories --steps-per-session 16 \
-  --out "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013_calibration.stage"
+  --out "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014_calibration.stage"
 python -m lhmsb.datasets freeze-mem0-stateful \
-  --src "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013_calibration.stage" \
-  --out "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013_calibration"
+  --src "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014_calibration.stage" \
+  --out "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014_calibration"
 python -m lhmsb.datasets verify-mem0-stateful \
-  --frozen "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013_calibration"
+  --frozen "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014_calibration"
 python -m lhmsb.datasets regen-check-mem0-stateful \
-  --frozen "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013_calibration"
+  --frozen "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014_calibration"
 
-export LHMSB_SYSTEM_CONFIG="${PWD}/configs/experiments/systems_controlled_gpt_only_longitudinal_v013.yaml"
-export LHMSB_SYSTEM_DATASET="${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013_calibration"
-export LHMSB_RUN_NAME="gpt-only-shengsuanyun-longitudinal-v013-calibration"
+export LHMSB_SYSTEM_CONFIG="${PWD}/configs/experiments/systems_controlled_gpt_only_longitudinal_v014_shengsuanyun_writer.yaml"
+export LHMSB_SYSTEM_DATASET="${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014_calibration"
+export LHMSB_RUN_NAME="gpt-only-shengsuanyun-longitudinal-v014-calibration"
 export LHMSB_ANALYSIS_PHASE=calibration
 ```
 
@@ -423,7 +423,7 @@ Planning must fail before API calls unless all of the following pass:
 - every memory-reliant SCEU has a current action-relevant intervention target;
 - no single fixed action solves more than 60% of frozen opportunities;
 - the release/config identity is
-  `software-longitudinal-trajectories-v0.13.0`.
+  `software-longitudinal-trajectories-v0.14.0`.
 
 After measurement gates pass, freeze a disjoint 50-episode confirmatory split:
 
@@ -432,17 +432,17 @@ SEEDS=$(seq 3001 3050)
 python -m lhmsb.datasets generate-mem0-stateful \
   --seeds ${SEEDS} --n-episodes 1 --n-sessions 16 \
   --construct-mode longitudinal_trajectories --steps-per-session 16 \
-  --out "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013.stage"
+  --out "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014.stage"
 python -m lhmsb.datasets freeze-mem0-stateful \
-  --src "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013.stage" \
-  --out "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013"
+  --src "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014.stage" \
+  --out "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014"
 python -m lhmsb.datasets verify-mem0-stateful \
-  --frozen "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013"
+  --frozen "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014"
 python -m lhmsb.datasets regen-check-mem0-stateful \
-  --frozen "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013"
+  --frozen "${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014"
 
-export LHMSB_SYSTEM_DATASET="${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v013"
-export LHMSB_RUN_NAME="gpt-only-shengsuanyun-longitudinal-v013-confirmatory"
+export LHMSB_SYSTEM_DATASET="${LHMSB_DATA_ROOT}/datasets/software_longitudinal_v014"
+export LHMSB_RUN_NAME="gpt-only-shengsuanyun-longitudinal-v014-confirmatory"
 export LHMSB_ANALYSIS_PHASE=confirmatory
 ```
 
@@ -451,7 +451,7 @@ evaluation tasks. Primary C2 analysis is adherence-anchored onset, drift-free
 survival, persistence, and recovery by state lineage with oracle/full-context
 contamination gates. C3 retains the same-decision storage → retrieval → visible
 → intervention → behavior contract. Design readiness alone is not a positive
-drift result, and v0.13 does not identify C1's matched state-evolution penalty
+drift result, and v0.14 does not identify C1's matched state-evolution penalty
 or short-to-long amplification.
 
 ## Expected outputs

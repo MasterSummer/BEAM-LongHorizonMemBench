@@ -68,6 +68,12 @@ MEM0_STATEFUL_RELEASE_ID_V12 = "software-matched-horizon-panels-v0.12.0"
 MEM0_STATEFUL_SCHEMA_VERSION_V13 = 3
 MEM0_STATEFUL_GENERATOR_VERSION_V13 = "software-project-longitudinal-0.13"
 MEM0_STATEFUL_RELEASE_ID_V13 = "software-longitudinal-trajectories-v0.13.0"
+# v0.14 preserves the replay schema while changing the public continuation
+# surface and balancing terminal opportunities.  v0.13 artifacts remain
+# archived historical results and are not silently relabeled as v0.14.
+MEM0_STATEFUL_SCHEMA_VERSION_V14 = 3
+MEM0_STATEFUL_GENERATOR_VERSION_V14 = "software-project-longitudinal-0.14"
+MEM0_STATEFUL_RELEASE_ID_V14 = "software-longitudinal-trajectories-v0.14.0"
 _RELEASE_TIMESTAMP = "2026-07-16T00:00:00Z"
 
 ConstructMode = Literal[
@@ -721,7 +727,7 @@ def _write_stage(out: Path, generated: Sequence[Mem0StatefulGenerated]) -> None:
             MEM0_STATEFUL_SCHEMA_VERSION_V12
             if construct_mode == "horizon_panels"
             else (
-                MEM0_STATEFUL_SCHEMA_VERSION_V13
+                MEM0_STATEFUL_SCHEMA_VERSION_V14
                 if construct_mode == "longitudinal_trajectories"
                 else MEM0_STATEFUL_SCHEMA_VERSION
             )
@@ -1178,8 +1184,15 @@ def _dataset_audit(
     applicability[
         "max_always_action_accuracy_le_0_60_longitudinal"
     ] = longitudinal_release
+    # Longitudinal releases randomize opaque options independently at each
+    # continuation.  The per-episode option-label shortcut is therefore a
+    # descriptive diagnostic, while the preregistered longitudinal balance
+    # gate is on latent action IDs (<=60%).  Keep the option rate in the audit
+    # but do not make a single-episode calibration fail on a permutation
+    # artifact; mixed and matched releases retain their option gate.
     applicability["max_always_option_accuracy_le_0_40"] = (
-        not matched_release or matched_balance_applicable
+        not longitudinal_release
+        and (not matched_release or matched_balance_applicable)
     )
     applicability["matched_construct_triplets_invariant"] = matched_release
     applicability["horizon_panels_same_decision_invariant"] = horizon_release
@@ -1467,7 +1480,7 @@ def _release_for_generation(
     if construct_mode == "horizon_panels":
         return MEM0_STATEFUL_RELEASE_ID_V12, MEM0_STATEFUL_GENERATOR_VERSION_V12
     if construct_mode == "longitudinal_trajectories":
-        return MEM0_STATEFUL_RELEASE_ID_V13, MEM0_STATEFUL_GENERATOR_VERSION_V13
+        return MEM0_STATEFUL_RELEASE_ID_V14, MEM0_STATEFUL_GENERATOR_VERSION_V14
     if n_episodes >= 50:
         return MEM0_STATEFUL_RELEASE_ID_V10, MEM0_STATEFUL_GENERATOR_VERSION_V10
     if n_sessions >= 16 or n_episodes >= 30:
@@ -1631,6 +1644,7 @@ __all__ = [
     "MEM0_STATEFUL_GENERATOR_VERSION_V11",
     "MEM0_STATEFUL_GENERATOR_VERSION_V12",
     "MEM0_STATEFUL_GENERATOR_VERSION_V13",
+    "MEM0_STATEFUL_GENERATOR_VERSION_V14",
     "MEM0_STATEFUL_RELEASE_ID",
     "MEM0_STATEFUL_RELEASE_ID_V3",
     "MEM0_STATEFUL_RELEASE_ID_V4",
@@ -1643,10 +1657,12 @@ __all__ = [
     "MEM0_STATEFUL_RELEASE_ID_V11",
     "MEM0_STATEFUL_RELEASE_ID_V12",
     "MEM0_STATEFUL_RELEASE_ID_V13",
+    "MEM0_STATEFUL_RELEASE_ID_V14",
     "ConstructMode",
     "MEM0_STATEFUL_SCHEMA_VERSION",
     "MEM0_STATEFUL_SCHEMA_VERSION_V12",
     "MEM0_STATEFUL_SCHEMA_VERSION_V13",
+    "MEM0_STATEFUL_SCHEMA_VERSION_V14",
     "Mem0StatefulDatasetError",
     "Mem0StatefulGenerated",
     "Mem0StatefulManifest",

@@ -93,7 +93,7 @@ class SoftwareLongitudinalTrajectoryFamily:
         plan = replace(
             base.plan,
             episode_id=episode_id,
-            template_id="software-project-longitudinal-v13",
+            template_id="software-project-longitudinal-v14",
             opportunities=opportunities,
             sceu_units=initial_sceu,
             sessions=(),

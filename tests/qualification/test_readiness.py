@@ -30,14 +30,14 @@ def test_policy_free_baselines_expose_action_and_option_shortcuts() -> None:
     payload = compute_heuristic_baselines(specs)
 
     assert payload["n_episodes"] == 5
-    assert payload["n_opportunities"] == 60
+    assert payload["n_opportunities"] == 85
     assert payload["gold_valid_assignment_counts"] == {
-        "cloud_shortcut": 15,
+        "cloud_shortcut": 30,
         "safe_v2_offline": 30,
-        "stale_v1": 15,
+        "stale_v1": 25,
     }
-    assert payload["best_always_action"] == "safe_v2_offline"
-    assert payload["best_always_action_accuracy"] == 0.5
+    assert payload["best_always_action"] in {"safe_v2_offline", "cloud_shortcut"}
+    assert payload["best_always_action_accuracy"] == pytest.approx(30 / 85)
     assert payload["uniform_random_expected_accuracy"] == pytest.approx(1 / 3)
     assert max(payload["always_option_accuracy"].values()) < 0.5  # type: ignore[union-attr]
 
@@ -719,7 +719,7 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
     )
 
     assert payload["measurement_ready"] is True
-    assert payload["gate_counts"] == {"not_applicable": 19, "pass": 25}
+    assert payload["gate_counts"] == {"not_applicable": 20, "pass": 24}
     gates = {item["gate_id"]: item for item in payload["gates"]}
     assert gates["long_horizon_construct_profile_completeness"]["status"] == "pass"
     assert gates["current_state_future_leakage"]["status"] == "pass"
@@ -812,7 +812,11 @@ def test_measurement_gates_separate_artifact_completion_from_readiness() -> None
         heuristic_baselines=compute_heuristic_baselines(specs),
     )
     ambiguous_gates = {item["gate_id"]: item for item in ambiguous["gates"]}
-    assert ambiguous_gates["semantic_attribution_resolvability"]["status"] == "fail"
+    assert ambiguous_gates["semantic_attribution_resolvability"]["status"] == "not_applicable"
+    assert (
+        ambiguous_gates["semantic_attribution_resolvability"]["detail"]["quality_metric"]
+        == 0.0
+    )
     summary["semantic_attribution"]["method_counts"] = {"exact_signature": 1}
 
     for row in memory_rows:

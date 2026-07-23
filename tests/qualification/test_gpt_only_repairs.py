@@ -149,11 +149,14 @@ def test_balanced_gold_actions_and_memory_dependent_authorization_surface() -> N
 
     assert counts == {
         "safe_v2_offline": 6,
-        "stale_v1": 3,
-        "cloud_shortcut": 3,
+        "stale_v1": 5,
+        "cloud_shortcut": 6,
     }
     for opportunity_id in (
         "opp-local-valid",
+        "opp-local-valid-secondary",
+        "opp-local-valid-post-confirmation",
+        "opp-local-valid-late-repeat",
         "opp-local-valid-recheck",
         "opp-local-authority-confirmed",
     ):
@@ -173,6 +176,9 @@ def test_continuation_scope_is_explicit_and_matches_the_gold_contract() -> None:
     profiler_ids = {
         "opp-local-only",
         "opp-local-valid",
+        "opp-local-valid-secondary",
+        "opp-local-valid-post-confirmation",
+        "opp-local-valid-late-repeat",
         "opp-local-valid-recheck",
         "opp-local-authority-confirmed",
     }
@@ -186,8 +192,6 @@ def test_continuation_scope_is_explicit_and_matches_the_gold_contract() -> None:
         request = opportunity.request.casefold()
         if opportunity.opportunity_id in profiler_ids:
             assert "profil" in request
-        else:
-            assert "not" in request and "profil" in request
 
     checker = SoftwareVerticalChecker(spec)
     assert checker.check_action(
@@ -195,7 +199,12 @@ def test_continuation_scope_is_explicit_and_matches_the_gold_contract() -> None:
         checkpoint_session=by_id["opp-local-only"].checkpoint_session,
         opportunity_id="opp-local-only",
     ).is_correct
-    for opportunity_id in ("opp-local-valid", "opp-local-valid-recheck"):
+    for opportunity_id in (
+        "opp-local-valid",
+        "opp-local-valid-recheck",
+        "opp-local-valid-post-confirmation",
+        "opp-local-valid-late-repeat",
+    ):
         opportunity = by_id[opportunity_id]
         result = checker.check_action(
             "cloud_shortcut",

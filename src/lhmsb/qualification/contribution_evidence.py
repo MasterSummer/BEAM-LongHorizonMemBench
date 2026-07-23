@@ -67,7 +67,6 @@ _C3_GATES = (
     "causal_use_evidence_consistency",
     "lifecycle_provenance_complete",
     "semantic_attribution_complete",
-    "semantic_attribution_resolvability",
     "stored_object_provenance_complete",
     "flat_causal_probe_coverage",
     "stored_retrieved_visible_behavior_chain",

@@ -96,9 +96,10 @@ def test_oracle_context_exposes_authority_and_scope_without_gold_ids() -> None:
     assert "D1" not in rendered
     assert "P2" not in rendered
     assert "project-owner constraint governs a local-operator plan" not in rendered
-    assert "project-owner constraint governs a local-operator plan" in _SYSTEM_PROMPT
-    assert "later valid replacement or revocation supersedes" in _SYSTEM_PROMPT
-    assert "scoped exception must not be generalized" in _SYSTEM_PROMPT
+    assert "current project state" in _SYSTEM_PROMPT
+    assert "authority" in _SYSTEM_PROMPT
+    assert "later valid replacement or revocation supersedes" not in _SYSTEM_PROMPT
+    assert "project-owner constraint governs" not in _SYSTEM_PROMPT
 
 
 class _Runtime:

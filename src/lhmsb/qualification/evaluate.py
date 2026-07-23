@@ -63,17 +63,11 @@ from lhmsb.qualification.schema import (
     ReadoutKind,
 )
 
-_TASK_STATE_CONTROL_RULES = (
-    "A later valid replacement or revocation supersedes an earlier plan. A "
-    "project-owner constraint governs a local-operator plan unless a current "
-    "project-owner decision explicitly grants an exception for the continuation's "
-    "scope; a scoped exception must not be generalized outside that scope."
-)
-
 _SYSTEM_PROMPT = (
     "Continue the software project using only the supplied current-session surface, "
-    "workspace, and optional context. Apply these stable task-governance rules: "
-    f"{_TASK_STATE_CONTROL_RULES} Select exactly one opaque implementation option."
+    "workspace, and optional context. Follow the current project state, authority, "
+    "and continuation scope represented in that information. Select exactly one "
+    "opaque implementation option."
 )
 
 

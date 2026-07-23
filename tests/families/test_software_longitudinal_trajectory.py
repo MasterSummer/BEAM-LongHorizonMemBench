@@ -43,9 +43,9 @@ def test_longitudinal_release_adds_a_final_same_lineage_recovery_decision() -> N
     spec = _spec()
     opportunity = spec.plan.opportunities[-1]
 
-    assert len(base.plan.opportunities) == 12
-    assert len(spec.plan.opportunities) == 13
-    assert len(spec.plan.sceu_units) == 13
+    assert len(base.plan.opportunities) == 17
+    assert len(spec.plan.opportunities) == 18
+    assert len(spec.plan.sceu_units) == 18
     assert opportunity.opportunity_id == LONGITUDINAL_RECOVERY_OPPORTUNITY_ID
     assert opportunity.checkpoint_session == 15
     assert opportunity.control_kind == "fresh_reminder"
@@ -55,8 +55,8 @@ def test_longitudinal_release_adds_a_final_same_lineage_recovery_decision() -> N
         item.valid_action_ids[0] for item in spec.plan.opportunities
     ) == {
         "safe_v2_offline": 7,
-        "stale_v1": 3,
-        "cloud_shortcut": 3,
+        "stale_v1": 5,
+        "cloud_shortcut": 6,
     }
 
 
@@ -77,12 +77,12 @@ def test_longitudinal_sceu_contract_uses_only_current_action_relevant_targets() 
 def test_longitudinal_task_span_is_causal_and_not_an_online_rollout_claim() -> None:
     span = profile_task_span(_spec().plan)
 
-    assert span.total_step_count == 269
-    assert span.effective_step_count == 269
+    assert span.total_step_count == 274
+    assert span.effective_step_count == 274
     assert span.visible_prefix_step_count == 256
-    assert span.policy_evaluated_step_count == 13
+    assert span.policy_evaluated_step_count == 18
     assert span.maximum_decision_causal_span == 256
-    assert span.long_horizon_decision_count == 3
+    assert span.long_horizon_decision_count == 4
     assert span.anti_padding_verified
     assert span.effect_chain_verified
     assert span.meets_long_horizon_step_threshold

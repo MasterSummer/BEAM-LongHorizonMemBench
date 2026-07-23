@@ -406,7 +406,7 @@ def test_longitudinal_plan_counts_episode_not_repeated_decisions_as_unit(
         _longitudinal_dataset(tmp_path),
         Path(
             "configs/experiments/"
-            "systems_controlled_gpt_only_longitudinal_v013.yaml"
+            "systems_controlled_gpt_only_longitudinal_v014_shengsuanyun_writer.yaml"
         ),
         run,
         allow_dirty=True,
