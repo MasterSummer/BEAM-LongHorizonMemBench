@@ -57,6 +57,12 @@ THREE_POLICY_SHENGSUANYUN_CONFIG_PATH = (
     / "experiments"
     / "systems_controlled_three_policy_longitudinal_v013_shengsuanyun.yaml"
 )
+THREE_POLICY_SHENGSUANYUN_DIRECT_WRITER_CONFIG_PATH = (
+    ROOT
+    / "configs"
+    / "experiments"
+    / "systems_controlled_three_policy_longitudinal_v013_shengsuanyun_direct_writer.yaml"
+)
 RUN_ID = "1" * 64
 OTHER_RUN_ID = "2" * 64
 
@@ -341,6 +347,21 @@ def test_three_policy_longitudinal_config_pins_all_models_to_shengsuanyun() -> N
     ]
     assert config.writer_profile.model_id == "deepseek/deepseek-v4-pro"
     assert config.required_secret_env == ("SHENGSUANYUN_API_KEY",)
+
+
+def test_three_policy_config_can_use_fixed_direct_deepseek_writer() -> None:
+    config = load_qualification_config(THREE_POLICY_SHENGSUANYUN_DIRECT_WRITER_CONFIG_PATH)
+
+    assert isinstance(config, SystemsQualificationConfig)
+    assert config.writer_profile.profile_id == "deepseek_v4_pro_writer"
+    assert config.writer_profile.model_id == "deepseek-v4-pro"
+    assert config.writer_profile.route_id == "deepseek_direct"
+    assert config.writer_profile.api_key_env == "DEEPSEEK_API_KEY"
+    assert config.writer_profile.endpoint == "https://api.deepseek.com"
+    assert config.required_secret_env == (
+        "SHENGSUANYUN_API_KEY",
+        "DEEPSEEK_API_KEY",
+    )
 
 
 def test_schema_v2_config_is_deeply_immutable_and_serializes_condition_definitions() -> None:
