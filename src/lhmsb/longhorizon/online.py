@@ -45,7 +45,12 @@ from lhmsb.qualification.providers import (
     PolicyResponse,
 )
 
-OnlineCondition = Literal["workspace_only", "oracle_current_state", "memory"]
+OnlineCondition = Literal[
+    "workspace_only",
+    "full_context",
+    "oracle_current_state",
+    "memory",
+]
 
 
 class OnlineExecutionError(RuntimeError):
@@ -366,6 +371,7 @@ def run_online_episode(
         "last_option": None,
     }
     working_context: list[str] = []
+    full_context_history: list[str] = []
     stored_memory_ids: tuple[str, ...] = ()
     transcript: list[dict[str, object]] = []
     for session in range(spec.plan.n_sessions):
@@ -398,6 +404,10 @@ def run_online_episode(
                 )
             )
             working_context = []
+        if condition == "full_context":
+            session_surface = spec.plan.sessions[session]
+            full_context_history.extend(session_surface.observations)
+            full_context_history.extend(session_surface.tool_results)
         for local_step in range(steps_per_session):
             ordinal = len(traces)
             options = _build_options(
@@ -440,6 +450,14 @@ def run_online_episode(
                     ),
                 )
             )
+            if condition == "full_context" and full_context_history:
+                messages.append(
+                    PolicyMessage(
+                        role="user",
+                        content="Full prior project context:\n"
+                        + "\n".join(full_context_history[-32:]),
+                    )
+                )
             if working_context:
                 messages.append(
                     PolicyMessage(
@@ -554,6 +572,10 @@ def run_online_episode(
             )
             working_context.append(
                 f"step {ordinal} completed; workspace is now {next_workspace_hash[:12]}"
+            )
+            full_context_history.append(
+                f"session {session} step {ordinal}: option {selected.option_id}; "
+                f"workspace {next_workspace_hash}"
             )
             transcript.append(
                 {

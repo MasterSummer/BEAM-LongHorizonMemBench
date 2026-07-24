@@ -89,7 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--policy-profile", default=None)
     parser.add_argument(
         "--condition",
-        choices=("workspace_only", "oracle_current_state", "memory"),
+        choices=("workspace_only", "full_context", "oracle_current_state", "memory"),
         default="workspace_only",
     )
     parser.add_argument("--backend", choices=("flat_retrieval", "mem0", "amem", "memos"))
