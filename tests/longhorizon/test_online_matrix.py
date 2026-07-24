@@ -80,7 +80,9 @@ def test_canonical_online_decisions_are_solvable_and_not_default_dominated() -> 
         SoftwareMem0VerticalFamily.generate(
             seed,
             n_sessions=16,
-            trajectory_seed=(seed - 3001) % 3,
+            # The canonical dataset pipeline uses the semantic seed as the
+            # first trajectory seed for each one-episode seed group.
+            trajectory_seed=seed,
         )
         for seed in range(3001, 3051)
     )
@@ -94,9 +96,9 @@ def test_canonical_online_decisions_are_solvable_and_not_default_dominated() -> 
     assert audit["ambiguous_decision_count"] == 0
     assert audit["gold_action_counts"] == {
         "cloud_shortcut": 960,
-        "pause_for_repair": 608,
-        "safe_v2_offline": 2288,
-        "stale_v1": 1264,
+        "pause_for_repair": 560,
+        "safe_v2_offline": 2272,
+        "stale_v1": 1328,
     }
     assert audit["max_gold_action_share"] <= 0.60
     assert audit["max_gold_option_share"] <= 0.40
