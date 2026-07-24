@@ -120,6 +120,7 @@ class OnlineStepTrace:
     request_hash: str
     response_hash: str
     response_digest: str
+    model_input_hash: str
     previous_workspace_hash: str
     workspace_hash: str
     previous_state_digest: str
@@ -130,6 +131,7 @@ class OnlineStepTrace:
     stored_memory_ids: tuple[str, ...] = ()
     retrieved_memory_ids: tuple[str, ...] = ()
     memory_provenance_mode: str = "none"
+    consumes_previous_effect: bool = False
     evaluator_action_id: str = ""
     drift_flags: tuple[str, ...] = ()
     violated_state_ids: tuple[str, ...] = ()
@@ -175,6 +177,19 @@ class OnlineExecutionResult:
             and self.task_span.online_long_horizon_agent_execution_supported
         )
 
+    @property
+    def downstream_decision_influence_count(self) -> int:
+        """Number of actions whose effect was consumed by a later decision."""
+        return sum(step.consumes_previous_effect for step in self.steps[1:])
+
+    @property
+    def downstream_decision_influence_rate(self) -> float | None:
+        """Observed action-to-next-decision influence rate."""
+        denominator = max(0, len(self.steps) - 1)
+        if denominator == 0:
+            return None
+        return self.downstream_decision_influence_count / denominator
+
     def to_dict(self) -> dict[str, object]:
         return {
             "episode_id": self.episode_id,
@@ -188,6 +203,8 @@ class OnlineExecutionResult:
             "causal_chain_verified": self.causal_chain_verified,
             "policy_calls": self.policy_calls,
             "online_long_horizon": self.online_long_horizon,
+            "downstream_decision_influence_count": self.downstream_decision_influence_count,
+            "downstream_decision_influence_rate": self.downstream_decision_influence_rate,
         }
 
 
@@ -209,20 +226,25 @@ def _build_options(
             "operation": "implementation update",
             "files": list(action.files),
         }
+        # The option carries a real candidate implementation.  When selected,
+        # _apply_option writes it into the persistent project workspace; the
+        # next policy request therefore observes an action-dependent artifact,
+        # rather than an evaluator-only append-only trace.
+        candidate_files = tuple(action.files) + (
+            (
+                f"online/candidates/session_{session_index:02d}_{index:02d}.json",
+                json.dumps(
+                    patch_payload,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
         options.append(
             PublicActionOption(
                 option_id=f"op-{index:02d}",
-                files=(
-                    (
-                        f"online/steps/session_{session_index:02d}.jsonl",
-                        json.dumps(
-                            patch_payload,
-                            sort_keys=True,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                    ),
-                ),
+                files=candidate_files,
             )
         )
     return tuple(options)
@@ -239,7 +261,28 @@ def _apply_option(
     updated = dict(workspace)
     for path, content in option.files:
         previous = updated.get(path, "")
-        updated[path] = f"{previous}{content}\n"
+        if path == "solution.py":
+            # A selected candidate replaces the currently installed
+            # implementation; it is not an append-only log entry.
+            updated[path] = f"{content}\n"
+        else:
+            updated[path] = f"{previous}{content}\n"
+    # This is the persistent, model-visible project state.  It changes on
+    # every selected action and records which candidate implementation is now
+    # installed.  It is deliberately free of evaluator state IDs/labels.
+    state_path = "state/online_project.json"
+    state_payload = {
+        "implementation_revision": ordinal + 1,
+        "last_selected_option": option.option_id,
+        "session": session_index,
+        "workspace_effect": "candidate implementation installed",
+    }
+    updated[state_path] = json.dumps(
+        state_payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) + "\n"
     progress_path = f"results/session_{session_index}.json"
     progress_entry = json.dumps(
         {
@@ -501,6 +544,17 @@ def run_online_episode(
                 )
                 visible_memory_ids = retrieved_memory_ids
                 provenance_mode = "native" if retrieved_memory_ids else "inferred"
+            consumes_previous_effect = (
+                prior_effect_digest is None
+                or any(
+                    prior_effect_digest in message.content
+                    for message in messages
+                )
+            )
+            if not consumes_previous_effect:
+                raise OnlineExecutionError(
+                    f"policy step {ordinal} did not receive the previous action effect"
+                )
             request = PolicyRequest(
                 request_id=f"{spec.plan.episode_id}:online:{ordinal:05d}",
                 system_prompt=(
@@ -562,6 +616,7 @@ def run_online_episode(
                 request_hash=response.request_hash,
                 response_hash=response.response_hash,
                 response_digest=_response_digest(response),
+                model_input_hash=_policy_input_hash(request),
                 previous_workspace_hash=previous_workspace_hash,
                 workspace_hash=next_workspace_hash,
                 previous_state_digest=prior_state_digest,
@@ -572,6 +627,7 @@ def run_online_episode(
                 stored_memory_ids=stored_memory_ids,
                 retrieved_memory_ids=retrieved_memory_ids,
                 memory_provenance_mode=provenance_mode,
+                consumes_previous_effect=consumes_previous_effect,
                 evaluator_action_id=action.action_id,
                 drift_flags=assessment.drift_flags,
                 violated_state_ids=assessment.violated_state_ids,
@@ -658,9 +714,32 @@ def _verify_causal_chain(steps: Sequence[OnlineStepTrace]) -> bool:
             return False
         if step.state_digest == step.previous_state_digest:
             return False
+        if not step.consumes_previous_effect:
+            return False
+        if index > 0 and step.previous_effect_digest is None:
+            return False
         previous_workspace = step.workspace_hash
         previous_state = step.state_digest
-    return True
+    # The last action has no later decision inside the episode; every earlier
+    # action must be consumed by its immediate successor.  The per-step flag
+    # is set from the actual model-facing messages above, not inferred from a
+    # frozen dependency graph.
+    return all(step.consumes_previous_effect for step in steps[1:])
+
+
+def _policy_input_hash(request: PolicyRequest) -> str:
+    """Hash the exact semantic request sent to the policy client."""
+    return _sha(
+        {
+            "system_prompt": request.system_prompt,
+            "messages": [
+                {"role": message.role, "content": message.content}
+                for message in request.messages
+            ],
+            "options": [option.to_dict() for option in request.options],
+            "max_output_tokens": request.max_output_tokens,
+        }
+    )
 
 
 __all__ = [

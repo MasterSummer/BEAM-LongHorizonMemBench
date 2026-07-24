@@ -6,7 +6,6 @@ import json
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.longhorizon.online import run_online_episode
 from lhmsb.qualification.providers import (
-    PolicyMessage,
     PolicyRequest,
     PolicyResponse,
     PolicyUsage,
@@ -69,11 +68,18 @@ def test_online_execution_requires_and_records_closed_loop_effects() -> None:
         and step.state_digest != step.previous_state_digest
         for step in result.steps
     )
+    assert result.downstream_decision_influence_count == 255
+    assert result.downstream_decision_influence_rate == 1.0
 
     # The next request contains the prior workspace digest, proving that the
     # selected action changes what the policy sees later.
     first_workspace = result.steps[0].workspace_hash
     assert first_workspace in "\n".join(
+        message.content
+        for message in policy.requests[1].messages
+        if message.role == "user"
+    )
+    assert "state/online_project.json" in "\n".join(
         message.content
         for message in policy.requests[1].messages
         if message.role == "user"

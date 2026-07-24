@@ -47,6 +47,14 @@ def build_online_report(run_dir: Path) -> dict[str, object]:
         for step in transitions
         for flag in step.get("drift_flags", [])
     )
+    influence_denominator = sum(
+        max(0, int(result.get("policy_calls", 0)) - 1)
+        for result in results
+    )
+    influence_count = sum(
+        int(result.get("downstream_decision_influence_count", 0))
+        for result in results
+    )
     return {
         "track": "online_long_horizon_agent_execution",
         "run_dir": str(run_dir),
@@ -56,6 +64,9 @@ def build_online_report(run_dir: Path) -> dict[str, object]:
         "causal_chain_verified_count": causal_count,
         "total_policy_calls": total_steps,
         "workspace_mutation_rate": None if not transitions else mutated / len(transitions),
+        "downstream_decision_influence_rate": (
+            None if influence_denominator == 0 else influence_count / influence_denominator
+        ),
         "drift_step_rate": None if not transitions else len(drift_steps) / len(transitions),
         "drift_category_counts": dict(sorted(drift_categories.items())),
         "conditions": sorted(
@@ -97,6 +108,7 @@ def write_online_report(run_dir: Path) -> dict[str, object]:
         f"- Verified causal chains: {report['causal_chain_verified_count']}",
         f"- Policy calls: {report['total_policy_calls']}",
         f"- Workspace mutation rate: {report['workspace_mutation_rate']}",
+        f"- Downstream decision influence rate: {report['downstream_decision_influence_rate']}",
         f"- Drift step rate: {report['drift_step_rate']}",
         f"- Drift categories: {report['drift_category_counts']}",
         "",
