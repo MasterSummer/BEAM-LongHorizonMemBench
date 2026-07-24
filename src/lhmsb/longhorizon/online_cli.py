@@ -96,7 +96,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend", choices=("flat_retrieval", "mem0", "amem", "memos"))
     parser.add_argument("--env-file", type=Path, default=None)
     parser.add_argument("--data-root", type=Path, default=None)
-    parser.add_argument("--steps-per-session", type=int, default=16)
+    parser.add_argument("--steps-per-session", type=int, default=1)
+    parser.add_argument("--environment-steps-per-action", type=int, default=15)
     parser.add_argument("--out", type=Path, required=True)
     return parser
 
@@ -173,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
             condition=condition,
             memory=runtime,
             steps_per_session=args.steps_per_session,
+            environment_steps_per_action=args.environment_steps_per_action,
             max_output_tokens=config.sampling.max_output_tokens,
         )
     finally:

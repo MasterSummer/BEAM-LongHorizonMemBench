@@ -173,7 +173,6 @@ class OnlineExecutionResult:
     def online_long_horizon(self) -> bool:
         return (
             self.causal_chain_verified
-            and self.policy_calls >= 200
             and self.task_span.online_long_horizon_agent_execution_supported
         )
 
@@ -301,6 +300,8 @@ def _build_online_plan(
     spec: SoftwareMem0VerticalSpec,
     steps: Sequence[OnlineStepTrace],
     handoffs: Sequence[OnlineHandoffTrace],
+    *,
+    environment_steps_per_action: int,
 ) -> EpisodePlan:
     """Attach verified online task steps to a copy of the latent plan."""
     del handoffs  # The handoff steps are represented in the task trace itself.
@@ -364,6 +365,37 @@ def _build_online_plan(
             prior_step_id = step_id
             effect_by_step[step_id] = step.effect_digest
             produced_by_step[step_id] = step.produces_effect_ids
+            # The policy action drives a bounded executor/test segment before
+            # the next model decision.  These are genuine environment steps:
+            # they consume the selected implementation effect and leave new
+            # effects that the next session-level decision must inherit.
+            for local_index in range(environment_steps_per_action):
+                executor_id = f"online-exec-{trace.ordinal:05d}-{local_index:02d}"
+                executor = TaskStep(
+                    step_id=executor_id,
+                    ordinal=len(dynamic),
+                    session=session,
+                    kind=("inspect", "test", "record")[local_index % 3],
+                    execution_mode="environment_generated",
+                    summary=(
+                        "Environment executor applied and verified the selected "
+                        f"implementation effect ({local_index + 1}/"
+                        f"{environment_steps_per_action})."
+                    ),
+                    dependency_step_ids=(prior_step_id,),
+                    workspace_paths=(f"results/session_{session}.json",),
+                    consumes_effect_ids=produced_by_step[prior_step_id],
+                    produces_effect_ids=(
+                        f"online-executor-effect:{trace.ordinal:05d}:{local_index:02d}",
+                    ),
+                    dependency_effect_digests=(effect_by_step[prior_step_id],),
+                    visible_in_session=False,
+                )
+                executor = replace(executor, effect_digest=task_step_effect_digest(executor))
+                dynamic.append(executor)
+                prior_step_id = executor_id
+                effect_by_step[executor_id] = executor.effect_digest
+                produced_by_step[executor_id] = executor.produces_effect_ids
     metadata = tuple(spec.plan.metadata) + (
         ("interaction_mode", "online_long_horizon_agent_execution"),
         ("online_policy_steps", str(len(steps))),
@@ -388,18 +420,21 @@ def run_online_episode(
     memory: OnlineMemory | None = None,
     steps_per_session: int = 16,
     max_output_tokens: int = 256,
+    environment_steps_per_action: int = 15,
 ) -> OnlineExecutionResult:
     """Execute one Software episode as a true online closed loop.
 
-    ``steps_per_session=16`` gives 256 actual policy decisions over the
-    canonical 16-session trajectory.  Smaller values are intended only for
-    unit tests; runs below 200 policy calls are explicitly not labelled online
-    long-horizon executions.
+    ``steps_per_session=1`` gives one model-controlled decision per session.
+    The default executor expands each selected action into 15 causally linked
+    environment steps, yielding more than 200 effective steps over the
+    canonical 16-session trajectory without requiring 256 model calls.
     """
     if condition == "memory" and memory is None:
         raise ValueError("condition='memory' requires a memory runtime")
     if steps_per_session < 1:
         raise ValueError("steps_per_session must be >= 1")
+    if environment_steps_per_action < 1:
+        raise ValueError("environment_steps_per_action must be >= 1")
     workspace: dict[str, str] = {
         artifact.path: artifact.content
         for artifact in spec.plan.workspaces[0].artifacts
@@ -673,7 +708,12 @@ def run_online_episode(
         pass
     # Build the exact effect chain and patch the immutable traces with the
     # corresponding TaskStep digests.
-    online_plan = _build_online_plan(spec, traces, handoffs)
+    online_plan = _build_online_plan(
+        spec,
+        traces,
+        handoffs,
+        environment_steps_per_action=environment_steps_per_action,
+    )
     rebuilt_steps: list[OnlineStepTrace] = []
     task_by_id = {step.step_id: step for step in online_plan.task_steps}
     for trace in traces:

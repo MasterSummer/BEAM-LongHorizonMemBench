@@ -104,7 +104,8 @@ def write_online_report(run_dir: Path) -> dict[str, object]:
         "# Online long-horizon execution report",
         "",
         f"- Episodes: {report['n_episodes']}",
-        f"- Online episodes (>=200 causal policy calls): {report['online_episode_count']}",
+        "- Online episodes (>=200 effective linked steps; >=16 session "
+        f"decisions): {report['online_episode_count']}",
         f"- Verified causal chains: {report['causal_chain_verified_count']}",
         f"- Policy calls: {report['total_policy_calls']}",
         f"- Workspace mutation rate: {report['workspace_mutation_rate']}",

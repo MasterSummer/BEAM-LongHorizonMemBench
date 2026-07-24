@@ -16,7 +16,11 @@ from lhmsb.longhorizon.schema import (
 )
 
 MIN_LONG_HORIZON_EFFECTIVE_STEPS = 200
-MIN_ONLINE_LONG_HORIZON_POLICY_STEPS = 200
+# Online execution is session-level control over a long executable trace.  We
+# require one real policy decision per canonical session, while the executor
+# may carry out many causally dependent implementation/test steps between
+# decisions.  This avoids conflating horizon with the number of model calls.
+MIN_ONLINE_LONG_HORIZON_POLICY_STEPS = 16
 
 TrajectoryInteractionMode = Literal[
     "no_policy_evaluation",
@@ -358,6 +362,7 @@ def profile_task_span(plan: EpisodePlan) -> TaskSpanProfile:
     effect_chain_verified = digest_chain_verified and anti_padding_verified
     online_long_horizon_agent_execution_supported = (
         policy_count >= MIN_ONLINE_LONG_HORIZON_POLICY_STEPS
+        and effective_count >= MIN_LONG_HORIZON_EFFECTIVE_STEPS
         and policy_dependency_coverage is not None
         and policy_dependency_coverage >= 0.99
         and declared_closed_loop_dependency

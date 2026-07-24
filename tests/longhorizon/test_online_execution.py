@@ -104,3 +104,15 @@ def test_short_online_fixture_is_not_labelled_long_horizon() -> None:
     assert result.causal_chain_verified
     assert not result.online_long_horizon
     assert result.task_span.interaction_mode == "sparse_closed_loop"
+
+
+def test_session_level_policy_controls_long_executor_trace() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(301, n_sessions=16)
+    result = run_online_episode(spec, RecordingPolicy(), steps_per_session=1)
+
+    assert result.policy_calls == 16
+    assert result.task_span.total_step_count >= 200
+    assert result.online_long_horizon
+    assert result.downstream_decision_influence_count == 15
+    assert result.downstream_decision_influence_rate == 1.0
+    assert result.task_span.environment_generated_step_count >= 240

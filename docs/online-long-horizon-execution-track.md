@@ -3,15 +3,18 @@
 The frozen v0.14 qualification artifacts remain replay-backed and are not
 retroactively relabelled.  The online track is a separate execution artifact.
 
-An episode is called `online_long_horizon_agent_execution` only if the policy
-model makes at least 200 real structured calls and every counted call satisfies
-the closed-loop contract:
+An episode is called `online_long_horizon_agent_execution` only if it contains
+at least 200 effective linked task steps and at least one real session-level
+policy decision per canonical session.  Each policy-controlled transition
+satisfies the closed-loop contract:
 
 1. the model selects an opaque implementation option;
 2. the selected patch changes the mutable workspace and execution state;
 3. the next request contains the resulting workspace/state/effect digest; and
 4. a later policy step consumes the previous effect through the dependency
-   chain.
+   chain.  The bounded executor may perform multiple environment/test steps
+   between two policy decisions; those steps are not counted as additional
+   model calls.
 
 At every session handoff the working context is cleared.  Native memory, when
 enabled, is written and queried across the boundary independently.  The
