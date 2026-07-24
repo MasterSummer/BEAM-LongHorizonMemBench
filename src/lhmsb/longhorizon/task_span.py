@@ -16,11 +16,12 @@ from lhmsb.longhorizon.schema import (
 )
 
 MIN_LONG_HORIZON_EFFECTIVE_STEPS = 200
-# Online execution is session-level control over a long executable trace.  We
-# require one real policy decision per canonical session, while the executor
-# may carry out many causally dependent implementation/test steps between
-# decisions.  This avoids conflating horizon with the number of model calls.
-MIN_ONLINE_LONG_HORIZON_POLICY_STEPS = 16
+# The strong online claim is reserved for trajectories in which the evaluated
+# policy itself makes hundreds of causally linked decisions. Environment
+# executor transitions remain part of the task trace, but they cannot be used
+# to inflate a short policy rollout into "the model executed hundreds of
+# steps."
+MIN_ONLINE_LONG_HORIZON_POLICY_STEPS = 200
 
 TrajectoryInteractionMode = Literal[
     "no_policy_evaluation",

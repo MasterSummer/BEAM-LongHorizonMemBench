@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import cast
@@ -31,6 +32,20 @@ def _canonical_hash(value: object) -> str:
         default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def online_result_id(
+    *,
+    episode_id: str,
+    condition: OnlineCondition,
+    backend: SystemBackend | None,
+    policy_profile: str,
+) -> str:
+    """Return a stable, collision-free identity for one online trajectory."""
+    backend_label = backend if condition == "memory" else "control"
+    raw = f"{episode_id}__{condition}__{backend_label}__{policy_profile}"
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-")
+    return safe or _canonical_hash(raw)[:24]
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
@@ -96,8 +111,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend", choices=("flat_retrieval", "mem0", "amem", "memos"))
     parser.add_argument("--env-file", type=Path, default=None)
     parser.add_argument("--data-root", type=Path, default=None)
-    parser.add_argument("--steps-per-session", type=int, default=1)
-    parser.add_argument("--environment-steps-per-action", type=int, default=15)
+    parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help="attempt-local backend state root; defaults to data-root",
+    )
+    parser.add_argument("--steps-per-session", type=int, default=16)
+    parser.add_argument("--environment-steps-per-action", type=int, default=1)
     parser.add_argument("--out", type=Path, required=True)
     return parser
 
@@ -152,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"unknown policy profile: {profile_id}") from exc
     policy = build_policy_client(policy_profile, environment=environment)
     runtime = None
+    reranker = None
     try:
         condition = cast(OnlineCondition, args.condition)
         if condition == "memory":
@@ -161,18 +183,23 @@ def main(argv: list[str] | None = None) -> int:
             data_root = args.data_root or Path(
                 environment.get(config.data_root_env, str(args.dataset.parent))
             )
-            runtime = build_preparation_components(
+            runtime_root = args.runtime_root or data_root
+            components = build_preparation_components(
                 _preparation_task(config, spec.plan.episode_id, backend),
                 spec,
                 config,
-                data_root=data_root,
+                data_root=runtime_root,
                 environment=environment,
-            ).runtime
+            )
+            runtime = components.runtime
+            reranker = components.reranker
         result = run_online_episode(
             spec,
             policy,  # type: ignore[arg-type]
             condition=condition,
             memory=runtime,
+            reranker=reranker,
+            visible_k=config.retrieval.visible_k,
             steps_per_session=args.steps_per_session,
             environment_steps_per_action=args.environment_steps_per_action,
             max_output_tokens=config.sampling.max_output_tokens,
@@ -181,20 +208,37 @@ def main(argv: list[str] | None = None) -> int:
         close = getattr(runtime, "close", None)
         if callable(close):
             close()
+        close_reranker = getattr(reranker, "close", None)
+        if callable(close_reranker):
+            close_reranker()
         close_policy = getattr(policy, "close", None)
         if callable(close_policy):
             close_policy()
     args.out.mkdir(parents=True, exist_ok=True)
     repository = _repository_snapshot()
+    backend_identity = (
+        cast(SystemBackend, args.backend)
+        if condition == "memory" and args.backend is not None
+        else None
+    )
+    result_id = online_result_id(
+        episode_id=spec.plan.episode_id,
+        condition=condition,
+        backend=backend_identity,
+        policy_profile=profile_id,
+    )
     payload = {
+        "result_id": result_id,
         "track": "online_long_horizon_agent_execution",
         "config_hash": config.config_hash,
         "dataset_release": config.dataset_release,
         "policy_profile": profile_id,
+        "condition": condition,
+        "backend": backend_identity,
         "repository": repository,
         "result": result.to_dict(),
     }
-    (args.out / f"{spec.plan.episode_id}.json").write_text(
+    (args.out / f"{result_id}.json").write_text(
         json.dumps(payload, sort_keys=True, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
@@ -207,9 +251,31 @@ def main(argv: list[str] | None = None) -> int:
                 "policy_profile": profile_id,
                 "repository": repository,
                 "episode_id": spec.plan.episode_id,
+                "result_id": result_id,
+                "condition": condition,
+                "backend": backend_identity,
                 "policy_calls": result.policy_calls,
                 "online_long_horizon": result.online_long_horizon,
                 "causal_chain_verified": result.causal_chain_verified,
+                "workflow_complete": result.workflow_complete,
+                "project_chain_verified": result.project_chain_verified,
+                "substantive_work_verified": result.substantive_work_verified,
+                "memory_selection_verified": result.memory_selection_verified,
+                "memory_count_verified": result.memory_count_verified,
+                "work_unit_completion_rate": result.work_unit_completion_rate,
+                "artifact_validation_rate": (
+                    None
+                    if not result.steps
+                    else sum(step.artifact_valid for step in result.steps)
+                    / len(result.steps)
+                ),
+                "mean_checked_score": result.mean_checked_score,
+                "terminal_action_correct": result.terminal_action_correct,
+                "terminal_checker_score": result.terminal_checker_score,
+                "terminal_checker_passed": result.terminal_checker_passed,
+                "live_memory_count_sum": result.live_memory_count_sum,
+                "mean_live_memory_count": result.mean_live_memory_count,
+                "score_per_live_memory_object": result.score_per_live_memory_object,
             },
             sort_keys=True,
             ensure_ascii=False,
@@ -219,7 +285,15 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     write_online_report(args.out)
-    print(json.dumps({"episode_id": spec.plan.episode_id, "online": result.online_long_horizon}))
+    print(
+        json.dumps(
+            {
+                "episode_id": spec.plan.episode_id,
+                "result_id": result_id,
+                "online": result.online_long_horizon,
+            }
+        )
+    )
     return 0
 
 

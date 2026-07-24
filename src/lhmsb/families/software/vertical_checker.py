@@ -113,6 +113,17 @@ def assess_software_action(
             drift.add("local_over_global")
     if "P2" in current_ids and action.action_id == "stale_v1":
         drift.add("current-plan-overwritten-by-local-branch")
+    if action.action_id == "pause_for_repair":
+        repair_pending = "U1" in current_ids and "P2" not in current_ids
+        if not repair_pending:
+            # Pausing is only a valid continuation in the genuine transition
+            # window after the old branch has failed and before its replacement
+            # has become authoritative.  Outside that window it abandons the
+            # current plan instead of continuing it.
+            active_plan = "P2" if "P2" in current_ids else "P1"
+            violated.add(active_plan if active_plan in current_ids else "G0")
+            drift.add("plan-deviation")
+            drift.add("plan_deviation")
     return SoftwareActionAssessment(
         expected_version=expected_version,
         continuation_scope=continuation_scope,

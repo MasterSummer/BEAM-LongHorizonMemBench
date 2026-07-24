@@ -12,6 +12,12 @@ memory systems may use DeepSeek for the fixed writer. Provider keys
 are read only by the policy process and never enter service environments,
 manifests, or result hashes.
 
+The separate multi-hundred-decision online matrix is specified in
+[`online-long-horizon-execution-track.md`](online-long-horizon-execution-track.md).
+It uses the same native services and venvs but a dedicated 20-episode ×
+5-condition Slurm array. Do not use the replay-backed qualification commands
+below as evidence that the policy executed hundreds of online decisions.
+
 The tracked policy profile pins `https://router.shengsuanyun.com/api/v1` and
 model ID `openai/gpt-5.6-sol`; the operator file supplies only
 `SHENGSUANYUN_API_KEY`. Before a new run, the live preflight must confirm that
@@ -82,6 +88,9 @@ scripts/bootstrap_systems_server.sh --dry-run --data-root /tmp/lhmsb
 scripts/preflight_systems.sh --dry-run --data-root /tmp/lhmsb
 scripts/run_systems_smoke.sh --dry-run --data-root /tmp/lhmsb
 scripts/run_systems_qualification.sh --dry-run --data-root /tmp/lhmsb
+scripts/run_online_longhorizon.sh plan --dry-run --data-root /tmp/lhmsb
+scripts/run_online_longhorizon.sh task --dry-run --data-root /tmp/lhmsb --task-index 0
+scripts/run_online_longhorizon.sh aggregate --dry-run --data-root /tmp/lhmsb
 ```
 
 Run the five-scenario calibration before the confirmatory matrix:
