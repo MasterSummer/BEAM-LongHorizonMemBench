@@ -1,0 +1,11 @@
+profile_id: deepseek_v4_pro_shengsuanyun
+provider: deepseek
+model_id: deepseek/deepseek-v4-pro
+route_id: shengsuanyun_deepseek_v4_pro
+api_key_env: SHENGSUANYUN_API_KEY
+endpoint: https://router.shengsuanyun.com/api/v1
+endpoint_override_env: null
+request_api: chat_completions
+timeout_seconds: 180
+max_retries: 2
+format_repair_attempts: 1

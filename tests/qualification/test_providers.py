@@ -154,6 +154,47 @@ def test_shengsuanyun_versioned_route_uses_exact_responses_path_and_model() -> N
     assert response.endpoint_identity == "https://router.shengsuanyun.com/api/v1"
 
 
+def test_shengsuanyun_opus_catalog_alias_is_accepted() -> None:
+    profile = replace(
+        _profile("anthropic"),
+        profile_id="opus_4_8_shengsuanyun",
+        model_id="anthropic/claude-opus-4.8",
+        route_id="shengsuanyun",
+        api_key_env="SHENGSUANYUN_API_KEY",
+        endpoint="https://router.shengsuanyun.com/api/v1",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/messages"
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_shengsuanyun",
+                "model": "claude-opus-4-8",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "submit_action",
+                        "input": {
+                            "action_id": "option-01",
+                            "optional_patch": None,
+                            "concise_rationale": "Selected.",
+                        },
+                    }
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 4},
+            },
+        )
+
+    response = HttpPolicyClient(
+        profile,
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    ).submit_action(_request())
+    assert response.selected_option_id == "option-01"
+    assert response.model_id == "anthropic/claude-opus-4.8"
+
+
 def test_anthropic_messages_tool_call_is_normalized() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/messages"

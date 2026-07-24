@@ -362,7 +362,13 @@ class HttpPolicyClient:
         if self.profile.route_id == "shengsuanyun" and "/" in self.profile.model_id:
             # The gateway accepts provider-qualified catalog IDs but reports
             # the same model without the provider namespace in responses.
-            accepted = accepted or returned == self.profile.model_id.split("/", 1)[1]
+            unqualified = self.profile.model_id.split("/", 1)[1]
+            accepted = accepted or returned == unqualified
+            # ShengSuanYun's Anthropic adapter reports the catalog model
+            # ``claude-opus-4.8`` as ``claude-opus-4-8``. Keep this explicit
+            # alias narrow so a provider/model mismatch cannot be hidden.
+            if unqualified == "claude-opus-4.8":
+                accepted = accepted or returned == "claude-opus-4-8"
         if not accepted:
             raise PolicyCallError(
                 "provider_model_unavailable",

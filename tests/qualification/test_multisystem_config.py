@@ -51,6 +51,12 @@ LONGITUDINAL_SHENGSUANYUN_WRITER_CONFIG_PATH = (
     / "experiments"
     / "systems_controlled_gpt_only_longitudinal_v013_shengsuanyun_writer.yaml"
 )
+THREE_POLICY_SHENGSUANYUN_CONFIG_PATH = (
+    ROOT
+    / "configs"
+    / "experiments"
+    / "systems_controlled_three_policy_longitudinal_v013_shengsuanyun.yaml"
+)
 RUN_ID = "1" * 64
 OTHER_RUN_ID = "2" * 64
 
@@ -294,6 +300,46 @@ def test_longitudinal_config_accepts_pinned_shengsuanyun_deepseek_writer() -> No
     assert config.writer_profile.route_id == "shengsuanyun_deepseek_v4_pro"
     assert config.writer_profile.api_key_env == "SHENGSUANYUN_API_KEY"
     assert config.writer_profile.endpoint == "https://router.shengsuanyun.com/api/v1"
+    assert config.required_secret_env == ("SHENGSUANYUN_API_KEY",)
+
+
+def test_three_policy_longitudinal_config_pins_all_models_to_shengsuanyun() -> None:
+    config = load_qualification_config(THREE_POLICY_SHENGSUANYUN_CONFIG_PATH)
+
+    assert isinstance(config, SystemsQualificationConfig)
+    assert [
+        (
+            profile.profile_id,
+            profile.model_id,
+            profile.route_id,
+            profile.api_key_env,
+            profile.request_api,
+        )
+        for profile in config.policy_profiles
+    ] == [
+        (
+            "opus_4_8_shengsuanyun",
+            "anthropic/claude-opus-4.8",
+            "shengsuanyun",
+            "SHENGSUANYUN_API_KEY",
+            "messages",
+        ),
+        (
+            "deepseek_v4_pro_shengsuanyun",
+            "deepseek/deepseek-v4-pro",
+            "shengsuanyun_deepseek_v4_pro",
+            "SHENGSUANYUN_API_KEY",
+            "chat_completions",
+        ),
+        (
+            "gpt_5_6_sol_shengsuanyun",
+            "openai/gpt-5.6-sol",
+            "shengsuanyun",
+            "SHENGSUANYUN_API_KEY",
+            "responses",
+        ),
+    ]
+    assert config.writer_profile.model_id == "deepseek/deepseek-v4-pro"
     assert config.required_secret_env == ("SHENGSUANYUN_API_KEY",)
 
 

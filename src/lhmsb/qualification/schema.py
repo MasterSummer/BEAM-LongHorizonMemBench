@@ -1003,15 +1003,45 @@ class SystemsQualificationConfig:
             2,
             1,
         )
+        shengsuanyun_three_policy = (
+            (
+                "opus_4_8_shengsuanyun",
+                "anthropic",
+                "anthropic/claude-opus-4.8",
+                "shengsuanyun",
+                "SHENGSUANYUN_API_KEY",
+                "https://router.shengsuanyun.com/api/v1",
+                None,
+                "messages",
+                180.0,
+                2,
+                1,
+            ),
+            (
+                "deepseek_v4_pro_shengsuanyun",
+                "deepseek",
+                "deepseek/deepseek-v4-pro",
+                "shengsuanyun_deepseek_v4_pro",
+                "SHENGSUANYUN_API_KEY",
+                "https://router.shengsuanyun.com/api/v1",
+                None,
+                "chat_completions",
+                180.0,
+                2,
+                1,
+            ),
+            shengsuanyun_gpt_policy,
+        )
         actual_policies = tuple(_policy_identity(item) for item in self.policy_profiles)
         # Historical Zen runs retain their original identities.  The current
-        # controlled pilot pins the ShengSuanYun route and exact routed model
-        # name as a separate singleton identity, so a provider/model change
-        # necessarily changes the config and run hashes.
+        # Historical Zen/direct runs retain their original identities. Current
+        # ShengSuanYun pilots pin the exact routed model names; a provider or
+        # route change therefore changes the config and run hashes.
         if actual_policies not in {
             expected_policies,
             (expected_policies[2],),
             (shengsuanyun_gpt_policy,),
+            shengsuanyun_three_policy,
         }:
             raise ValueError("schema-v2 continuation policy identities are not canonical")
         expected_writer = (
