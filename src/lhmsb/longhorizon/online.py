@@ -372,19 +372,20 @@ def run_online_episode(
     }
     working_context: list[str] = []
     full_context_history: list[str] = []
+    session_messages: list[dict[str, str]] = []
     stored_memory_ids: tuple[str, ...] = ()
     transcript: list[dict[str, object]] = []
     for session in range(spec.plan.n_sessions):
         context_reset = session > 0
         if context_reset:
-            summary = "\n".join(working_context[-8:])
-            summary_hash = _sha(summary)
+            if not session_messages:
+                session_messages = [
+                    {"role": "assistant", "content": "No model-visible session transcript."}
+                ]
+            summary_hash = _sha(session_messages)
             if memory is not None:
                 write_result = memory.write_session(
-                    [
-                        {"role": "user", "content": summary},
-                        {"role": "assistant", "content": "Session handoff recorded."},
-                    ],
+                    list(session_messages),
                     session_index=session - 1,
                     metadata={"episode_id": spec.plan.episode_id, "online": "true"},
                 )
@@ -404,6 +405,7 @@ def run_online_episode(
                 )
             )
             working_context = []
+            session_messages = []
         if condition == "full_context":
             session_surface = spec.plan.sessions[session]
             full_context_history.extend(session_surface.observations)
@@ -432,6 +434,20 @@ def run_online_episode(
             surface = spec.plan.sessions[session]
             public_observations = "\n".join(surface.observations)
             public_tool_results = "\n".join(surface.tool_results)
+            if local_step == 0:
+                session_messages.extend(
+                    [
+                        {
+                            "role": "user",
+                            "content": "Session observations:\n" + public_observations,
+                        },
+                        {
+                            "role": "user",
+                            "content": "Session tool results:\n"
+                            + (public_tool_results or "(none)"),
+                        },
+                    ]
+                )
             visible_files = "\n".join(
                 f"{path}: {content[:600]}"
                 for path, content in sorted(workspace.items())
@@ -561,6 +577,15 @@ def run_online_episode(
                 violated_state_ids=assessment.violated_state_ids,
             )
             traces.append(trace)
+            session_messages.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"Selected implementation option {selected.option_id}; "
+                        f"workspace transitioned to {next_workspace_hash}."
+                    ),
+                }
+            )
             prior_state_digest = state_digest
             prior_effect_digest = _sha(
                 {
