@@ -23,6 +23,7 @@ def _read_results(run_dir: Path) -> list[dict[str, Any]]:
 def build_online_report(run_dir: Path) -> dict[str, object]:
     records = _read_results(run_dir)
     results = [record["result"] for record in records]
+    repositories = [record.get("repository", {}) for record in records]
     total_steps = sum(int(result.get("policy_calls", 0)) for result in results)
     online_count = sum(bool(result.get("online_long_horizon", False)) for result in results)
     causal_count = sum(bool(result.get("causal_chain_verified", False)) for result in results)
@@ -49,6 +50,7 @@ def build_online_report(run_dir: Path) -> dict[str, object]:
     return {
         "track": "online_long_horizon_agent_execution",
         "run_dir": str(run_dir),
+        "repositories": repositories,
         "n_episodes": len(results),
         "online_episode_count": online_count,
         "causal_chain_verified_count": causal_count,

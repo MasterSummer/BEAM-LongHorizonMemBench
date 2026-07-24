@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import cast
 
@@ -100,6 +101,30 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _repository_snapshot() -> dict[str, object]:
+    root = Path(__file__).resolve().parents[3]
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return {"code_commit": "unknown", "code_dirty": None}
+    return {"code_commit": commit, "code_dirty": dirty}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     environment = dict(os.environ)
@@ -158,11 +183,13 @@ def main(argv: list[str] | None = None) -> int:
         if callable(close_policy):
             close_policy()
     args.out.mkdir(parents=True, exist_ok=True)
+    repository = _repository_snapshot()
     payload = {
         "track": "online_long_horizon_agent_execution",
         "config_hash": config.config_hash,
         "dataset_release": config.dataset_release,
         "policy_profile": profile_id,
+        "repository": repository,
         "result": result.to_dict(),
     }
     (args.out / f"{spec.plan.episode_id}.json").write_text(
@@ -176,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
                 "config_hash": config.config_hash,
                 "dataset_release": config.dataset_release,
                 "policy_profile": profile_id,
+                "repository": repository,
                 "episode_id": spec.plan.episode_id,
                 "policy_calls": result.policy_calls,
                 "online_long_horizon": result.online_long_horizon,
