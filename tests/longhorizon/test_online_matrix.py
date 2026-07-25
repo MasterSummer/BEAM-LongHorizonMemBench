@@ -141,6 +141,7 @@ def test_matrix_aggregation_requires_all_cells_but_not_positive_outcomes(
                 "substantive_work_verified": True,
                 "memory_selection_verified": True,
                 "memory_count_verified": True,
+                "efficiency_measurement_verified": True,
                 # These are deliberately negative scientific outcomes.
                 "mean_checked_score": 0.0,
                 "terminal_checker_passed": False,

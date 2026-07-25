@@ -17,7 +17,7 @@ from lhmsb.longhorizon.online import (
     run_online_episode,
 )
 from lhmsb.longhorizon.online_cli import online_result_id
-from lhmsb.longhorizon.online_report import build_online_report
+from lhmsb.longhorizon.online_report import build_online_report, write_online_report
 from lhmsb.qualification.context import build_public_history_units
 from lhmsb.qualification.memory_runtime import CandidateSearch, RetrievalCandidate
 from lhmsb.qualification.providers import (
@@ -72,6 +72,7 @@ class RecordingMemory:
     def __init__(self) -> None:
         self.queries: list[str] = []
         self.write_metadata: list[dict[str, object]] = []
+        self.inventory_checkpoints: list[int] = []
 
     def write_session(
         self,
@@ -113,7 +114,7 @@ class RecordingMemory:
         )
 
     def snapshot_inventory(self, *, checkpoint_session: int) -> object:
-        del checkpoint_session
+        self.inventory_checkpoints.append(checkpoint_session)
         return SimpleNamespace(n_live=2)
 
 
@@ -139,6 +140,12 @@ class ReverseReranker:
         )
 
 
+class ZeroInventoryMemory(RecordingMemory):
+    def snapshot_inventory(self, *, checkpoint_session: int) -> object:
+        self.inventory_checkpoints.append(checkpoint_session)
+        return SimpleNamespace(n_live=0)
+
+
 def test_online_execution_requires_and_records_closed_loop_effects() -> None:
     spec = SoftwareMem0VerticalFamily.generate(301, n_sessions=16)
     policy = RecordingPolicy()
@@ -154,6 +161,7 @@ def test_online_execution_requires_and_records_closed_loop_effects() -> None:
     assert result.substantive_work_verified
     assert result.memory_selection_verified
     assert result.memory_count_verified
+    assert result.efficiency_measurement_verified
     assert result.completed_work_unit_count == 256
     assert result.work_unit_completion_rate == 1.0
     assert result.task_span.interaction_mode == "online_long_horizon_agent_execution"
@@ -365,6 +373,61 @@ def test_online_report_exposes_workflow_and_artifact_integrity(tmp_path: Path) -
         build_online_report(tmp_path)
 
 
+def test_online_report_aggregates_episode_level_count_efficiency(
+    tmp_path: Path,
+) -> None:
+    for index, seed in enumerate((301, 302)):
+        spec = SoftwareMem0VerticalFamily.generate(seed, n_sessions=4)
+        result = run_online_episode(
+            spec,
+            RecordingPolicy(),
+            condition="memory",
+            memory=RecordingMemory(),
+            reranker=ReverseReranker(),
+            visible_k=1,
+            steps_per_session=2,
+        )
+        result_id = online_result_id(
+            episode_id=result.episode_id,
+            condition="memory",
+            backend="mem0",
+            policy_profile="policy/test",
+        )
+        task_dir = tmp_path / "tasks" / f"{index:04d}"
+        task_dir.mkdir(parents=True)
+        (task_dir / "episode.json").write_text(
+            json.dumps(
+                {
+                    "result_id": result_id,
+                    "backend": "mem0",
+                    "repository": {"code_commit": "test", "code_dirty": False},
+                    "result": result.to_dict(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    report = write_online_report(tmp_path)
+    efficiency = report["by_system"]["mem0"]
+
+    assert efficiency["efficiency_episode_count"] == 2
+    assert efficiency["live_memory_object_exposure_sum"] == 32
+    assert efficiency["memory_counted_decision_count"] == 16
+    assert (
+        efficiency["mean_episode_score_per_live_memory_object_exposure"]
+        is not None
+    )
+    assert len(
+        efficiency["episode_score_per_live_memory_object_exposure_ci95"]
+    ) == 2
+    assert efficiency["score_count_pareto_frontier"]
+    assert report["score_count_pareto_frontier"] == ["mem0"]
+    assert (tmp_path / "efficiency.csv").is_file()
+    assert (tmp_path / "score_count_pareto.svg").is_file()
+    markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "score/live-object-exposure=" in markdown
+
+
 def test_online_result_identity_separates_conditions_and_backends() -> None:
     common = {
         "episode_id": "episode/42",
@@ -421,17 +484,25 @@ def test_memory_track_separates_native_candidates_from_common_reranked_visibilit
         memory=memory,
         reranker=ReverseReranker(),
         visible_k=1,
-        steps_per_session=1,
+        steps_per_session=2,
     )
 
-    assert len(set(memory.queries)) == 4
+    assert len(memory.queries) == 8
+    assert memory.inventory_checkpoints == [0, 0, 1, 1, 2, 2, 3, 3]
     assert all(step.retrieved_memory_ids == ("mem-1", "mem-2") for step in result.steps)
     assert all(step.visible_memory_ids == ("mem-2",) for step in result.steps)
     assert all(step.retrieval_selection_mode == "common_rerank" for step in result.steps)
     assert result.memory_selection_verified
-    assert result.live_memory_count_sum == 8
+    assert result.memory_count_verified
+    assert result.efficiency_measurement_verified
+    assert result.live_memory_count_sum == 16
+    assert result.live_memory_object_exposure_sum == 16
     assert result.mean_live_memory_count == 2.0
     assert result.score_per_live_memory_object is not None
+    assert (
+        result.score_per_live_memory_object_exposure
+        == result.score_per_live_memory_object
+    )
     assert len(memory.write_metadata) == 3
     written_units = [
         unit
@@ -442,6 +513,25 @@ def test_memory_track_separates_native_candidates_from_common_reranked_visibilit
         "Installed implementation:" in str(unit["content"])
         for unit in written_units
     )
+
+
+def test_zero_live_object_denominator_fails_efficiency_integrity_gate() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(301, n_sessions=4)
+    result = run_online_episode(
+        spec,
+        RecordingPolicy(),
+        condition="memory",
+        memory=ZeroInventoryMemory(),
+        reranker=ReverseReranker(),
+        visible_k=1,
+        steps_per_session=1,
+    )
+
+    assert result.memory_count_verified
+    assert result.live_memory_object_exposure_sum == 0
+    assert result.score_per_live_memory_object_exposure is None
+    assert not result.efficiency_measurement_verified
+    assert not result.online_long_horizon
 
 
 def test_flat_online_baseline_writes_the_same_action_outcomes() -> None:

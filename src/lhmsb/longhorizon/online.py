@@ -269,6 +269,7 @@ class OnlineExecutionResult:
             and self.substantive_work_verified
             and self.memory_selection_verified
             and self.memory_count_verified
+            and self.efficiency_measurement_verified
         )
 
     @property
@@ -346,6 +347,16 @@ class OnlineExecutionResult:
         )
 
     @property
+    def efficiency_measurement_verified(self) -> bool:
+        """Memory runs must yield a finite, positive count denominator."""
+        return self.condition != "memory" or (
+            self.memory_count_verified
+            and self.live_memory_object_exposure_sum is not None
+            and self.live_memory_object_exposure_sum > 0
+            and self.score_per_live_memory_object_exposure is not None
+        )
+
+    @property
     def correct_step_count(self) -> int:
         return sum(step.action_correct for step in self.steps)
 
@@ -363,12 +374,25 @@ class OnlineExecutionResult:
 
     @property
     def live_memory_count_sum(self) -> int | None:
+        """Cumulative live-object exposure across scored decisions.
+
+        A memory object that remains live for ten decisions contributes ten
+        object-exposures.  This is the denominator used by the online
+        efficiency metric because it represents the persistent inventory that
+        the system carries at every decision, rather than only the final
+        inventory size.
+        """
         counts = [
             step.live_memory_count
             for step in self.steps
             if step.live_memory_count is not None
         ]
         return None if not counts else sum(counts)
+
+    @property
+    def live_memory_object_exposure_sum(self) -> int | None:
+        """Explicitly named alias for :attr:`live_memory_count_sum`."""
+        return self.live_memory_count_sum
 
     @property
     def mean_live_memory_count(self) -> float | None:
@@ -381,10 +405,16 @@ class OnlineExecutionResult:
 
     @property
     def score_per_live_memory_object(self) -> float | None:
+        """Checked decision score per cumulative live-object exposure."""
         denominator = self.live_memory_count_sum
         if denominator is None or denominator == 0:
             return None
         return self.correct_step_count / denominator
+
+    @property
+    def score_per_live_memory_object_exposure(self) -> float | None:
+        """Unambiguous name for the primary count-based efficiency ratio."""
+        return self.score_per_live_memory_object
 
     @property
     def downstream_decision_influence_count(self) -> int:
@@ -420,14 +450,19 @@ class OnlineExecutionResult:
             "substantive_work_verified": self.substantive_work_verified,
             "memory_selection_verified": self.memory_selection_verified,
             "memory_count_verified": self.memory_count_verified,
+            "efficiency_measurement_verified": self.efficiency_measurement_verified,
             "completed_work_unit_count": self.completed_work_unit_count,
             "work_unit_completion_rate": self.work_unit_completion_rate,
             "correct_step_count": self.correct_step_count,
             "mean_checked_score": self.mean_checked_score,
             "terminal_action_correct": self.terminal_action_correct,
             "live_memory_count_sum": self.live_memory_count_sum,
+            "live_memory_object_exposure_sum": self.live_memory_object_exposure_sum,
             "mean_live_memory_count": self.mean_live_memory_count,
             "score_per_live_memory_object": self.score_per_live_memory_object,
+            "score_per_live_memory_object_exposure": (
+                self.score_per_live_memory_object_exposure
+            ),
             "downstream_decision_influence_count": self.downstream_decision_influence_count,
             "downstream_decision_influence_rate": self.downstream_decision_influence_rate,
         }
@@ -1033,7 +1068,6 @@ def run_online_episode(
     session_messages: list[dict[str, str]] = []
     stored_memory_ids: tuple[str, ...] = ()
     storage_provenance_mode = "none"
-    session_live_memory_count: int | None = None
     transcript: list[dict[str, object]] = []
     completed_work_units: set[str] = set()
     previous_work_unit: OnlineWorkUnit | None = None
@@ -1112,7 +1146,6 @@ def run_online_episode(
             )
             working_context = []
             session_messages = []
-            session_live_memory_count = None
         if condition == "full_context":
             session_surface = spec.plan.sessions[session]
             full_context_history.extend(session_surface.observations)
@@ -1248,21 +1281,26 @@ def run_online_episode(
             visible_memory_ids: tuple[str, ...] = ()
             retrieved_memory_ids: tuple[str, ...] = ()
             retrieval_selection_mode = "none"
+            decision_live_memory_count: int | None = None
             if condition == "memory":
                 assert memory is not None
                 assert reranker is not None
-                if session_live_memory_count is None:
-                    snapshot = memory.snapshot_inventory(checkpoint_session=session)
-                    raw_live = getattr(snapshot, "n_live", None)
-                    if (
-                        isinstance(raw_live, bool)
-                        or not isinstance(raw_live, int)
-                        or raw_live < 0
-                    ):
-                        raise OnlineExecutionError(
-                            "memory inventory did not provide a non-negative live count"
-                        )
-                    session_live_memory_count = raw_live
+                # Sample immediately before *every* retrieval.  Memory writes
+                # currently occur at handoffs, so counts are often constant
+                # within a session, but re-sampling enforces the metric
+                # contract and catches backends that mutate inventory during
+                # search or maintenance.
+                snapshot = memory.snapshot_inventory(checkpoint_session=session)
+                raw_live = getattr(snapshot, "n_live", None)
+                if (
+                    isinstance(raw_live, bool)
+                    or not isinstance(raw_live, int)
+                    or raw_live < 0
+                ):
+                    raise OnlineExecutionError(
+                        "memory inventory did not provide a non-negative live count"
+                    )
+                decision_live_memory_count = raw_live
                 query = (
                     f"{work_unit.objective} Session {session}, component "
                     f"{work_unit.component_index}: recover current project progress, "
@@ -1402,7 +1440,7 @@ def run_online_episode(
                 retrieved_memory_ids=retrieved_memory_ids,
                 memory_provenance_mode=storage_provenance_mode,
                 retrieval_selection_mode=retrieval_selection_mode,
-                live_memory_count=session_live_memory_count,
+                live_memory_count=decision_live_memory_count,
                 consumes_previous_effect=consumes_previous_effect,
                 evaluator_action_id=action.action_id,
                 evaluator_opportunity_id=assessment.opportunity_id,

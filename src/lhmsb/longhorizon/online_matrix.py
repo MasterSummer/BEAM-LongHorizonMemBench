@@ -390,6 +390,7 @@ def aggregate_online_matrix(run_dir: Path) -> dict[str, object]:
         "substantive_work_verified",
         "memory_selection_verified",
         "memory_count_verified",
+        "efficiency_measurement_verified",
     )
     failed_integrity = [
         {

@@ -262,6 +262,9 @@ def main(argv: list[str] | None = None) -> int:
                 "substantive_work_verified": result.substantive_work_verified,
                 "memory_selection_verified": result.memory_selection_verified,
                 "memory_count_verified": result.memory_count_verified,
+                "efficiency_measurement_verified": (
+                    result.efficiency_measurement_verified
+                ),
                 "work_unit_completion_rate": result.work_unit_completion_rate,
                 "artifact_validation_rate": (
                     None
@@ -274,8 +277,14 @@ def main(argv: list[str] | None = None) -> int:
                 "terminal_checker_score": result.terminal_checker_score,
                 "terminal_checker_passed": result.terminal_checker_passed,
                 "live_memory_count_sum": result.live_memory_count_sum,
+                "live_memory_object_exposure_sum": (
+                    result.live_memory_object_exposure_sum
+                ),
                 "mean_live_memory_count": result.mean_live_memory_count,
                 "score_per_live_memory_object": result.score_per_live_memory_object,
+                "score_per_live_memory_object_exposure": (
+                    result.score_per_live_memory_object_exposure
+                ),
             },
             sort_keys=True,
             ensure_ascii=False,
