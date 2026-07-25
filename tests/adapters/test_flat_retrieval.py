@@ -149,6 +149,37 @@ def test_embedding_dimension_is_strict() -> None:
     assert caught.value.error_class == "vector_dimension_mismatch"
 
 
+def test_embedding_requests_are_split_at_tei_batch_limit() -> None:
+    class LimitedEmbedding(FakeEmbedding):
+        def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+            if len(texts) > 32:
+                raise RuntimeError("TEI batch limit exceeded")
+            return super().embed(texts)
+
+    units = tuple(
+        PublicHistoryUnit.create(
+            episode_id="episode-batched",
+            source_session=0,
+            source_kind="observation",
+            source_ordinal=index,
+            content=f"history unit {index:02d}",
+        )
+        for index in range(34)
+    )
+    embedding = LimitedEmbedding()
+    adapter = FlatRetrievalAdapter(
+        units,
+        namespace="batched",
+        embedding_runtime=embedding,
+        qdrant=InMemoryQdrantTransport(),
+    )
+
+    result = adapter.write_session([], session_index=0)
+
+    assert result.n_write == 34
+    assert [len(call) for call in embedding.calls] == [32, 2]
+
+
 def test_flat_mutations_are_explicitly_unsupported() -> None:
     adapter, _, _ = _adapter()
     with pytest.raises(FlatRetrievalError) as caught:

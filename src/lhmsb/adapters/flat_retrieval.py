@@ -47,6 +47,8 @@ from lhmsb.qualification.qdrant import (
     validate_vector,
 )
 
+_EMBEDDING_BATCH_SIZE = 32
+
 
 class FlatRetrievalError(RuntimeError):
     """Typed terminal failure in the deterministic flat baseline."""
@@ -603,17 +605,29 @@ class FlatRetrievalAdapter:
                     "embedding_contract",
                     "embedding runtime must expose embed or embed_batch",
                 )
-            raw = method(texts)
+            raw_vectors: list[object] = []
+            for start in range(0, len(texts), _EMBEDDING_BATCH_SIZE):
+                batch = texts[start : start + _EMBEDDING_BATCH_SIZE]
+                raw = method(batch)
+                batch_vectors = getattr(raw, "vectors", raw)
+                if not isinstance(batch_vectors, Sequence) or isinstance(
+                    batch_vectors, (str, bytes)
+                ):
+                    raise FlatRetrievalError(
+                        "embedding_contract",
+                        "embedding result vectors must be an array",
+                    )
+                if len(batch_vectors) != len(batch):
+                    raise FlatRetrievalError(
+                        "embedding_contract",
+                        "embedding result count "
+                        f"{len(batch_vectors)} != input count {len(batch)}",
+                    )
+                raw_vectors.extend(batch_vectors)
         except FlatRetrievalError:
             raise
         except Exception as exc:
             raise FlatRetrievalError("embedding_failure", str(exc)) from exc
-        raw_vectors = getattr(raw, "vectors", raw)
-        if not isinstance(raw_vectors, Sequence) or isinstance(raw_vectors, (str, bytes)):
-            raise FlatRetrievalError(
-                "embedding_contract",
-                "embedding result vectors must be an array",
-            )
         if len(raw_vectors) != len(texts):
             raise FlatRetrievalError(
                 "embedding_contract",
