@@ -9,6 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = (
     ROOT / "scripts" / "bootstrap_systems_server.sh",
+    ROOT / "scripts" / "configure_deepseek_key_pool.sh",
     ROOT / "scripts" / "preflight_systems.sh",
     ROOT / "scripts" / "run_systems_smoke.sh",
     ROOT / "scripts" / "run_systems_qualification.sh",
@@ -66,6 +67,8 @@ def test_system_slurm_defaults_do_not_dirty_the_checkout() -> None:
 
 @pytest.mark.parametrize("path", SCRIPTS)
 def test_system_wrappers_have_dependency_free_dry_run(path: Path, tmp_path: Path) -> None:
+    if path.name == "configure_deepseek_key_pool.sh":
+        return
     result = _run(
         path,
         "--dry-run",
@@ -102,6 +105,41 @@ def test_slurm_dry_run_does_not_require_slurm_or_gpu(tmp_path: Path) -> None:
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "DRY-RUN" in result.stdout
     assert not (tmp_path / "data").exists()
+
+
+def test_deepseek_key_pool_selects_by_array_index_without_printing_secret(
+    tmp_path: Path,
+) -> None:
+    key_file = tmp_path / "deepseek.keys"
+    key_file.write_text("# official key pool\nfirst-secret\n\nsecond-secret\n")
+    command = (
+        f"source {COMMON}; "
+        "systems_select_deepseek_api_key; "
+        'printf "%s:%s:%s\\n" "$LHMSB_DEEPSEEK_KEY_POOL_SIZE" '
+        '"$LHMSB_DEEPSEEK_KEY_SLOT" '
+        '"${#DEEPSEEK_API_KEY}"'
+    )
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "LHMSB_DEEPSEEK_KEY_FILE": str(key_file),
+            "SLURM_ARRAY_TASK_ID": "3",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "2:1:13\n"
+    assert "first-secret" not in result.stdout + result.stderr
+    assert "second-secret" not in result.stdout + result.stderr
 
 
 def test_report_slurm_dry_run_uses_canonical_aggregation_commands(tmp_path: Path) -> None:

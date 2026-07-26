@@ -72,6 +72,41 @@ systems_load_env() {
   fi
 }
 
+systems_select_deepseek_api_key() {
+  local key_file="${LHMSB_DEEPSEEK_KEY_FILE:-}"
+  local selector="${LHMSB_API_KEY_SLOT:-${SLURM_ARRAY_TASK_ID:-0}}"
+  local selected_index
+  local key
+  local -a keys=()
+
+  # With no pool configured, preserve the ordinary single-key environment.
+  [[ -n "${key_file}" ]] || return 0
+  [[ -r "${key_file}" ]] || {
+    printf 'DeepSeek key pool is not readable: %s\n' "${key_file}" >&2
+    return 1
+  }
+  [[ "${selector}" =~ ^[0-9]+$ ]] || {
+    printf 'DeepSeek key selector must be a non-negative integer\n' >&2
+    return 1
+  }
+
+  while IFS= read -r key || [[ -n "${key}" ]]; do
+    key="${key%$'\r'}"
+    [[ -n "${key}" ]] || continue
+    [[ "${key}" == \#* ]] && continue
+    keys+=("${key}")
+  done <"${key_file}"
+  ((${#keys[@]} > 0)) || {
+    printf 'DeepSeek key pool contains no credentials\n' >&2
+    return 1
+  }
+
+  selected_index=$((selector % ${#keys[@]}))
+  export DEEPSEEK_API_KEY="${keys[${selected_index}]}"
+  export LHMSB_DEEPSEEK_KEY_POOL_SIZE="${#keys[@]}"
+  export LHMSB_DEEPSEEK_KEY_SLOT="${selected_index}"
+}
+
 systems_prepare_dirs() {
   local data_root="$1"
   mkdir -p \

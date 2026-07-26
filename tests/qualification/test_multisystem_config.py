@@ -51,6 +51,12 @@ LONGITUDINAL_SHENGSUANYUN_WRITER_CONFIG_PATH = (
     / "experiments"
     / "systems_controlled_gpt_only_longitudinal_v013_shengsuanyun_writer.yaml"
 )
+DEEPSEEK_ONLY_LONGITUDINAL_CONFIG_PATH = (
+    ROOT
+    / "configs"
+    / "experiments"
+    / "systems_controlled_deepseek_only_longitudinal_v015.yaml"
+)
 THREE_POLICY_SHENGSUANYUN_CONFIG_PATH = (
     ROOT
     / "configs"
@@ -307,6 +313,22 @@ def test_longitudinal_config_accepts_pinned_shengsuanyun_deepseek_writer() -> No
     assert config.writer_profile.api_key_env == "SHENGSUANYUN_API_KEY"
     assert config.writer_profile.endpoint == "https://router.shengsuanyun.com/api/v1"
     assert config.required_secret_env == ("SHENGSUANYUN_API_KEY",)
+
+
+def test_deepseek_only_longitudinal_config_uses_official_route() -> None:
+    config = load_qualification_config(DEEPSEEK_ONLY_LONGITUDINAL_CONFIG_PATH)
+
+    assert isinstance(config, SystemsQualificationConfig)
+    assert config.dataset_release == "software-longitudinal-trajectories-v0.14.0"
+    assert len(config.policy_profiles) == 1
+    policy = config.policy_profiles[0]
+    assert policy.profile_id == "deepseek_v4_pro"
+    assert policy.model_id == "deepseek-v4-pro"
+    assert policy.route_id == "deepseek_direct"
+    assert policy.endpoint == "https://api.deepseek.com"
+    assert config.writer_profile.profile_id == "deepseek_v4_pro_writer"
+    assert config.writer_profile.route_id == "deepseek_direct"
+    assert config.required_secret_env == ("DEEPSEEK_API_KEY",)
 
 
 def test_three_policy_longitudinal_config_pins_all_models_to_shengsuanyun() -> None:

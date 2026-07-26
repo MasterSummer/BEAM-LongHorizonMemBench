@@ -1039,6 +1039,7 @@ class SystemsQualificationConfig:
         # route change therefore changes the config and run hashes.
         if actual_policies not in {
             expected_policies,
+            (expected_policies[1],),
             (expected_policies[2],),
             (shengsuanyun_gpt_policy,),
             shengsuanyun_three_policy,

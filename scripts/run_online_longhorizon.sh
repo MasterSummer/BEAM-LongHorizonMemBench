@@ -155,6 +155,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
 fi
 
 systems_load_env "${ENV_FILE}"
+systems_select_deepseek_api_key
 systems_configure_gpus
 export LHMSB_DATA_ROOT="${DATA_ROOT}" LHMSB_REPO_ROOT="${REPO_ROOT}"
 export LHMSB_SERVICE_INSTANCE="${RUN_NAME}-${SLURM_ARRAY_JOB_ID:-manual}-${TASK_INDEX}"
