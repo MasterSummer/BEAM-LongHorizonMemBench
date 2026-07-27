@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from types import MappingProxyType
 from typing import Literal, cast
 
-PolicyProvider = Literal["anthropic", "deepseek", "openai"]
+PolicyProvider = Literal["anthropic", "deepseek", "openai", "qwen"]
 PolicyRequestAPI = Literal["messages", "responses", "chat_completions"]
 Mem0Track = Literal["controlled", "native"]
 QualificationCondition = Literal[
@@ -85,6 +85,7 @@ class PolicyProfile:
             "anthropic": "messages",
             "deepseek": "chat_completions",
             "openai": "responses",
+            "qwen": "chat_completions",
         }.get(self.provider)
         if expected is None:
             raise ValueError(f"unsupported policy provider: {self.provider!r}")
@@ -1032,8 +1033,20 @@ class SystemsQualificationConfig:
             ),
             shengsuanyun_gpt_policy,
         )
+        shengsuanyun_qwen_policy = (
+            "qwen3_7_max_shengsuanyun",
+            "qwen",
+            "ali/qwen3.7-max",
+            "shengsuanyun_qwen3_7_max",
+            "SHENGSUANYUN_API_KEY",
+            "https://router.shengsuanyun.com/api/v1",
+            None,
+            "chat_completions",
+            180.0,
+            2,
+            1,
+        )
         actual_policies = tuple(_policy_identity(item) for item in self.policy_profiles)
-        # Historical Zen runs retain their original identities.  The current
         # Historical Zen/direct runs retain their original identities. Current
         # ShengSuanYun pilots pin the exact routed model names; a provider or
         # route change therefore changes the config and run hashes.
@@ -1042,6 +1055,9 @@ class SystemsQualificationConfig:
             (expected_policies[1],),
             (expected_policies[2],),
             (shengsuanyun_gpt_policy,),
+            (shengsuanyun_three_policy[0],),
+            (shengsuanyun_three_policy[1],),
+            (shengsuanyun_qwen_policy,),
             shengsuanyun_three_policy,
         }:
             raise ValueError("schema-v2 continuation policy identities are not canonical")

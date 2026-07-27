@@ -9,10 +9,12 @@ from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
 from lhmsb.longhorizon.online import run_online_episode
 from lhmsb.longhorizon.online_cli import online_result_id
 from lhmsb.longhorizon.online_matrix import (
+    ONLINE_COMMON_MODEL_CONDITIONS,
     ONLINE_SYSTEM_CONDITIONS,
     aggregate_online_matrix,
     audit_online_decision_design,
     load_online_task,
+    normalize_online_conditions,
     select_balanced_episode_ids,
 )
 from lhmsb.qualification.providers import (
@@ -111,6 +113,29 @@ def test_online_task_loader_requires_contiguous_identity(tmp_path: Path) -> None
     )
 
     assert load_online_task(tmp_path, 0)["episode_id"] == "episode-0"
+
+
+def test_common_model_condition_subset_is_valid_and_frozen() -> None:
+    assert normalize_online_conditions(list(ONLINE_COMMON_MODEL_CONDITIONS)) == (
+        "workspace_only",
+        "flat_retrieval",
+        "mem0",
+        "memos",
+    )
+
+
+def test_online_condition_subset_rejects_missing_control_duplicates_and_unknown() -> None:
+    for invalid in (
+        ("flat_retrieval", "mem0"),
+        ("workspace_only", "mem0", "mem0"),
+        ("workspace_only", "unknown"),
+    ):
+        try:
+            normalize_online_conditions(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid condition subset: {invalid}")
 
 
 def test_matrix_aggregation_requires_all_cells_but_not_positive_outcomes(

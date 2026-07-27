@@ -1047,7 +1047,7 @@ def canonical_hash(value: object) -> str:
 def _load_policy(path: Path) -> PolicyProfile:
     data = _load_yaml(path)
     provider = _string(data.get("provider"), "provider")
-    if provider not in {"anthropic", "deepseek", "openai"}:
+    if provider not in {"anthropic", "deepseek", "openai", "qwen"}:
         raise QualificationConfigError(f"unsupported policy provider: {provider}")
     endpoint_override = data.get("endpoint_override_env")
     if endpoint_override is not None and not isinstance(endpoint_override, str):

@@ -103,7 +103,7 @@ _ACTION_SCHEMA: dict[str, object] = {
 
 
 class HttpPolicyClient:
-    """HTTP implementation for Anthropic, OpenAI Responses, and DeepSeek chat."""
+    """HTTP implementation for Anthropic, Responses, and compatible chat APIs."""
 
     def __init__(
         self,
@@ -235,15 +235,11 @@ class HttpPolicyClient:
                 ],
                 "tool_choice": {"type": "tool", "name": "submit_action"},
             }
-        if self.profile.provider == "deepseek":
-            return {
+        if self.profile.provider in {"deepseek", "qwen"}:
+            body: dict[str, object] = {
                 "model": self.profile.model_id,
                 "messages": [{"role": "system", "content": system}, *messages],
                 "max_tokens": request.max_output_tokens,
-                # DeepSeek's reasoning mode rejects forced tool calls.  The
-                # qualification policy needs a deterministic structured call,
-                # so explicitly disable thinking for this request.
-                "thinking": {"type": "disabled"},
                 "tools": [
                     {
                         "type": "function",
@@ -259,6 +255,11 @@ class HttpPolicyClient:
                     "function": {"name": "submit_action"},
                 },
             }
+            if self.profile.provider == "deepseek":
+                # DeepSeek's reasoning mode rejects forced tool calls. The
+                # benchmark requires a structured action, so disable thinking.
+                body["thinking"] = {"type": "disabled"}
+            return body
         # ShengSuanYun exposes the Responses route but currently models
         # ``tool_choice`` as a string in its gateway schema.  With exactly one
         # tool, ``required`` preserves the same forced-tool semantics as the
@@ -359,7 +360,7 @@ class HttpPolicyClient:
                 f"provider omitted model identity for requested {self.profile.model_id!r}",
             )
         accepted = returned == self.profile.model_id
-        if self.profile.route_id == "shengsuanyun" and "/" in self.profile.model_id:
+        if self.profile.route_id.startswith("shengsuanyun") and "/" in self.profile.model_id:
             # The gateway accepts provider-qualified catalog IDs but reports
             # the same model without the provider namespace in responses.
             unqualified = self.profile.model_id.split("/", 1)[1]
@@ -388,7 +389,7 @@ class HttpPolicyClient:
                     ):
                         arguments = item.get("input")
                         break
-        elif self.profile.provider == "deepseek":
+        elif self.profile.provider in {"deepseek", "qwen"}:
             choices = raw.get("choices")
             if isinstance(choices, list) and choices and isinstance(choices[0], dict):
                 message = choices[0].get("message")
@@ -462,7 +463,7 @@ class HttpPolicyClient:
                     usage.get("cache_creation_input_tokens"),
                 ),
             )
-        if self.profile.provider == "deepseek":
+        if self.profile.provider in {"deepseek", "qwen"}:
             completion_details = usage.get("completion_tokens_details")
             return PolicyUsage(
                 input_tokens=_optional_int(usage.get("prompt_tokens")),
@@ -508,7 +509,7 @@ def _provider_request_path(profile: PolicyProfile) -> str:
     endpoint_has_version = endpoint_path.endswith("/v1")
     if profile.provider == "anthropic":
         return "messages" if endpoint_has_version else "v1/messages"
-    if profile.provider == "deepseek":
+    if profile.provider in {"deepseek", "qwen"}:
         return "chat/completions"
     return "responses" if endpoint_has_version else "v1/responses"
 

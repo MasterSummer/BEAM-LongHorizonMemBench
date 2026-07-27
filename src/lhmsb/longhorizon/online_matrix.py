@@ -30,6 +30,12 @@ ONLINE_SYSTEM_CONDITIONS = (
     "amem",
     "memos",
 )
+ONLINE_COMMON_MODEL_CONDITIONS = (
+    "workspace_only",
+    "flat_retrieval",
+    "mem0",
+    "memos",
+)
 MAX_ONLINE_GOLD_ACTION_SHARE = 0.60
 MAX_ONLINE_GOLD_OPTION_SHARE = 0.40
 CANONICAL_STEPS_PER_SESSION = 16
@@ -37,7 +43,7 @@ CANONICAL_STEPS_PER_SESSION = 16
 
 @dataclass(frozen=True)
 class OnlineEpisodeTask:
-    """One Slurm task that runs all five conditions for one frozen episode."""
+    """One Slurm task that runs the frozen condition subset for one episode."""
 
     task_index: int
     episode_id: str
@@ -135,6 +141,23 @@ def select_balanced_episode_ids(specs: tuple[Any, ...], n_episodes: int) -> tupl
             f"balanced selector produced {len(selected)} of {n_episodes} requested episodes"
         )
     return tuple(selected)
+
+
+def normalize_online_conditions(
+    conditions: tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
+    """Validate a frozen subset of the canonical online conditions."""
+    normalized = tuple(str(item).strip() for item in conditions if str(item).strip())
+    if not normalized:
+        raise ValueError("online condition subset must be non-empty")
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("online condition subset must not contain duplicates")
+    unknown = sorted(set(normalized) - set(ONLINE_SYSTEM_CONDITIONS))
+    if unknown:
+        raise ValueError(f"unknown online conditions: {unknown}")
+    if "workspace_only" not in normalized:
+        raise ValueError("online condition subset must include workspace_only")
+    return normalized
 
 
 def audit_online_decision_design(
@@ -236,18 +259,18 @@ def plan_online_matrix(
     out: Path,
     n_episodes: int = 20,
     policy_profile: str | None = None,
+    system_conditions: tuple[str, ...] = ONLINE_SYSTEM_CONDITIONS,
     allow_dirty: bool = False,
 ) -> dict[str, object]:
-    """Freeze the episode selection and expected five-condition result identities."""
+    """Freeze the episode selection and expected condition result identities."""
     config = load_qualification_config(config_path)
     if not isinstance(config, SystemsQualificationConfig):
         raise ValueError("online matrix requires a schema-v2 systems config")
     profile_id = policy_profile or config.policy_profiles[0].profile_id
     if profile_id not in {profile.profile_id for profile in config.policy_profiles}:
         raise ValueError(f"unknown policy profile: {profile_id}")
-    missing_backends = sorted(
-        set(ONLINE_SYSTEM_CONDITIONS[1:]) - set(config.system_profiles)
-    )
+    frozen_conditions = normalize_online_conditions(system_conditions)
+    missing_backends = sorted(set(frozen_conditions[1:]) - set(config.system_profiles))
     if missing_backends:
         raise ValueError(f"online config is missing backends: {missing_backends}")
     dataset_manifest = json.loads(
@@ -285,7 +308,7 @@ def plan_online_matrix(
                 semantic_scenario=metadata.get("semantic_scenario", "unknown"),
             )
         )
-        for system_condition in ONLINE_SYSTEM_CONDITIONS:
+        for system_condition in frozen_conditions:
             condition = "workspace_only" if system_condition == "workspace_only" else "memory"
             backend = None if system_condition == "workspace_only" else system_condition
             expected_result_ids.append(
@@ -326,7 +349,7 @@ def plan_online_matrix(
                 ).items()
             )
         ),
-        "conditions": list(ONLINE_SYSTEM_CONDITIONS),
+        "conditions": list(frozen_conditions),
         "expected_result_count": len(expected_result_ids),
         "expected_policy_calls": len(expected_result_ids) * 16 * 16,
         "decision_design_audit": design_audit,
@@ -446,6 +469,12 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--out", type=Path, required=True)
     plan.add_argument("--n-episodes", type=int, default=20)
     plan.add_argument("--policy-profile", default=None)
+    plan.add_argument(
+        "--system-condition",
+        action="append",
+        dest="system_conditions",
+        choices=ONLINE_SYSTEM_CONDITIONS,
+    )
     plan.add_argument("--allow-dirty", action="store_true")
     task = subparsers.add_parser("task")
     task.add_argument("--run-dir", type=Path, required=True)
@@ -464,6 +493,11 @@ def main(argv: list[str] | None = None) -> int:
             out=args.out,
             n_episodes=args.n_episodes,
             policy_profile=args.policy_profile,
+            system_conditions=(
+                tuple(args.system_conditions)
+                if args.system_conditions
+                else ONLINE_SYSTEM_CONDITIONS
+            ),
             allow_dirty=args.allow_dirty,
         )
     elif args.command == "task":
@@ -483,11 +517,13 @@ __all__ = [
     "MAX_ONLINE_GOLD_ACTION_SHARE",
     "MAX_ONLINE_GOLD_OPTION_SHARE",
     "ONLINE_MATRIX_SCHEMA_VERSION",
+    "ONLINE_COMMON_MODEL_CONDITIONS",
     "ONLINE_SYSTEM_CONDITIONS",
     "OnlineEpisodeTask",
     "aggregate_online_matrix",
     "audit_online_decision_design",
     "load_online_task",
+    "normalize_online_conditions",
     "plan_online_matrix",
     "select_balanced_episode_ids",
 ]

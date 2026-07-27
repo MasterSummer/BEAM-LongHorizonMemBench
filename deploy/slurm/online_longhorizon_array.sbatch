@@ -19,5 +19,8 @@ if [[ ! -x "${REPO_ROOT}/scripts/run_online_longhorizon.sh" ]]; then
   printf 'submit from a prepared MemHorizon repository checkout\n' >&2
   exit 2
 fi
-exec "${REPO_ROOT}/scripts/run_online_longhorizon.sh" task \
+# Slurm may expose physical GPU IDs in SLURM_JOB_GPUS while the device cgroup
+# remaps the allocation to logical CUDA indices 0,1.  Prefer the cgroup-safe
+# CUDA_VISIBLE_DEVICES mapping inside the task.
+exec env -u SLURM_JOB_GPUS "${REPO_ROOT}/scripts/run_online_longhorizon.sh" task \
   --task-index "${SLURM_ARRAY_TASK_ID}"

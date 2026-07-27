@@ -57,6 +57,24 @@ DEEPSEEK_ONLY_LONGITUDINAL_CONFIG_PATH = (
     / "experiments"
     / "systems_controlled_deepseek_only_longitudinal_v015.yaml"
 )
+OPUS_ONLY_ONLINE_CONFIG_PATH = (
+    ROOT
+    / "configs"
+    / "experiments"
+    / "systems_controlled_opus_only_online_v016_shengsuanyun.yaml"
+)
+DEEPSEEK_ONLY_ONLINE_CONFIG_PATH = (
+    ROOT
+    / "configs"
+    / "experiments"
+    / "systems_controlled_deepseek_only_online_v016_shengsuanyun.yaml"
+)
+QWEN_ONLY_ONLINE_CONFIG_PATH = (
+    ROOT
+    / "configs"
+    / "experiments"
+    / "systems_controlled_qwen_only_online_v016_shengsuanyun.yaml"
+)
 THREE_POLICY_SHENGSUANYUN_CONFIG_PATH = (
     ROOT
     / "configs"
@@ -329,6 +347,50 @@ def test_deepseek_only_longitudinal_config_uses_official_route() -> None:
     assert config.writer_profile.profile_id == "deepseek_v4_pro_writer"
     assert config.writer_profile.route_id == "deepseek_direct"
     assert config.required_secret_env == ("DEEPSEEK_API_KEY",)
+
+
+@pytest.mark.parametrize(
+    ("path", "profile_id", "provider", "model_id"),
+    (
+        (
+            OPUS_ONLY_ONLINE_CONFIG_PATH,
+            "opus_4_8_shengsuanyun",
+            "anthropic",
+            "anthropic/claude-opus-4.8",
+        ),
+        (
+            DEEPSEEK_ONLY_ONLINE_CONFIG_PATH,
+            "deepseek_v4_pro_shengsuanyun",
+            "deepseek",
+            "deepseek/deepseek-v4-pro",
+        ),
+        (
+            QWEN_ONLY_ONLINE_CONFIG_PATH,
+            "qwen3_7_max_shengsuanyun",
+            "qwen",
+            "ali/qwen3.7-max",
+        ),
+    ),
+)
+def test_common_model_online_configs_pin_shengsuanyun_route(
+    path: Path,
+    profile_id: str,
+    provider: str,
+    model_id: str,
+) -> None:
+    config = load_qualification_config(path)
+
+    assert isinstance(config, SystemsQualificationConfig)
+    assert config.dataset_release == "software-longitudinal-trajectories-v0.14.0"
+    assert len(config.policy_profiles) == 1
+    policy = config.policy_profiles[0]
+    assert policy.profile_id == profile_id
+    assert policy.provider == provider
+    assert policy.model_id == model_id
+    assert policy.endpoint == "https://router.shengsuanyun.com/api/v1"
+    assert policy.api_key_env == "SHENGSUANYUN_API_KEY"
+    assert config.writer_profile.model_id == "deepseek/deepseek-v4-pro"
+    assert config.required_secret_env == ("SHENGSUANYUN_API_KEY",)
 
 
 def test_three_policy_longitudinal_config_pins_all_models_to_shengsuanyun() -> None:

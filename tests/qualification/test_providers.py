@@ -21,6 +21,7 @@ def _profile(provider: PolicyProvider) -> PolicyProfile:
         "anthropic": ("opus", "claude-opus-4-8", "messages"),
         "deepseek": ("deepseek", "deepseek-v4-pro", "chat_completions"),
         "openai": ("gpt", "gpt-5.6-sol", "responses"),
+        "qwen": ("qwen", "qwen3.7-max", "chat_completions"),
     }
     profile_id, model_id, request_api = values[provider]
     return PolicyProfile(
@@ -310,12 +311,67 @@ def test_deepseek_missing_rationale_keeps_selected_action() -> None:
     assert response.concise_rationale == ""
 
 
+def test_qwen_uses_openai_compatible_chat_tools_without_deepseek_thinking() -> None:
+    profile = replace(
+        _profile("qwen"),
+        profile_id="qwen3_7_max_shengsuanyun",
+        model_id="ali/qwen3.7-max",
+        route_id="shengsuanyun_qwen3_7_max",
+        api_key_env="SHENGSUANYUN_API_KEY",
+        endpoint="https://router.shengsuanyun.com/api/v1",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/chat/completions"
+        body = json.loads(request.content)
+        assert body["model"] == "ali/qwen3.7-max"
+        assert "thinking" not in body
+        return httpx.Response(
+            200,
+            json={
+                "id": "qwen_chat_1",
+                "model": "qwen3.7-max",
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "submit_action",
+                                        "arguments": (
+                                            '{"action_id":"option-02",'
+                                            '"optional_patch":null,'
+                                            '"concise_rationale":"Selected."}'
+                                        ),
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 44, "completion_tokens": 7},
+            },
+        )
+
+    response = HttpPolicyClient(
+        profile,
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    ).submit_action(_request())
+
+    assert response.selected_option_id == "option-02"
+    assert response.model_id == "ali/qwen3.7-max"
+    assert response.usage.input_tokens == 44
+    assert response.usage.output_tokens == 7
+
+
 @pytest.mark.parametrize(
     ("provider", "endpoint", "expected_path"),
     (
         ("anthropic", "https://gateway.example/anthropic/v1", "/anthropic/v1/messages"),
         ("deepseek", "https://gateway.example/deepseek/v1", "/deepseek/v1/chat/completions"),
         ("openai", "https://gateway.example/openai/v1", "/openai/v1/responses"),
+        ("qwen", "https://gateway.example/qwen/v1", "/qwen/v1/chat/completions"),
     ),
 )
 def test_versioned_provider_base_urls_do_not_duplicate_api_prefix(
@@ -346,7 +402,7 @@ def test_versioned_provider_base_urls_do_not_duplicate_api_prefix(
                     ],
                 },
             )
-        if provider == "deepseek":
+        if provider in {"deepseek", "qwen"}:
             return httpx.Response(
                 200,
                 json={

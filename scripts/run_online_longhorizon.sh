@@ -17,6 +17,7 @@ CONFIG="${LHMSB_SYSTEM_CONFIG:-${REPO_ROOT}/configs/experiments/systems_controll
 MODE=""
 TASK_INDEX="${SLURM_ARRAY_TASK_ID:-}"
 N_EPISODES=20
+SYSTEM_CONDITIONS="${LHMSB_ONLINE_SYSTEM_CONDITIONS:-}"
 DRY_RUN=0
 ALLOW_DIRTY=0
 
@@ -38,6 +39,7 @@ Options:
   --run-name NAME
   --task-index N
   --n-episodes N
+  --system-conditions CSV
   --allow-dirty   development planning only; never use for final results
   --dry-run
 EOF
@@ -56,6 +58,7 @@ while (($#)); do
     --run-name) systems_require_value "$1" "${2:-}" || exit 2; RUN_NAME="$2"; shift 2 ;;
     --task-index) systems_require_value "$1" "${2:-}" || exit 2; TASK_INDEX="$2"; shift 2 ;;
     --n-episodes) systems_require_value "$1" "${2:-}" || exit 2; N_EPISODES="$2"; shift 2 ;;
+    --system-conditions) systems_require_value "$1" "${2:-}" || exit 2; SYSTEM_CONDITIONS="$2"; shift 2 ;;
     --allow-dirty) ALLOW_DIRTY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -120,6 +123,12 @@ if [[ "${MODE}" == "plan" ]]; then
     --dataset "${DATASET}" --config "${CONFIG}" --out "${RUN_DIR}"
     --n-episodes "${N_EPISODES}"
   )
+  if [[ -n "${SYSTEM_CONDITIONS}" ]]; then
+    IFS=',' read -r -a online_conditions <<<"${SYSTEM_CONDITIONS}"
+    for online_condition in "${online_conditions[@]}"; do
+      command+=(--system-condition "${online_condition}")
+    done
+  fi
   [[ "${ALLOW_DIRTY}" == "1" ]] && command+=(--allow-dirty)
   if [[ "${DRY_RUN}" == "1" ]]; then
     systems_print_command env PYTHONPATH="${PYTHONPATH_VALUE}" "${command[@]}"
@@ -209,12 +218,26 @@ CODE_COMMIT="${matrix_fields[3]}"
 TASK_OUT="${RUN_DIR}/results/task-$(printf '%04d' "${TASK_INDEX}")"
 mkdir -p "${TASK_OUT}"
 
-for cell in \
-  "core workspace_only none" \
-  "core memory flat_retrieval" \
-  "mem0 memory mem0" \
-  "amem memory amem" \
-  "memos memory memos"; do
+mapfile -t online_cells < <(
+  python3 - "${RUN_DIR}/MATRIX.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+environments = {
+    "workspace_only": "core",
+    "flat_retrieval": "core",
+    "mem0": "mem0",
+    "amem": "amem",
+    "memos": "memos",
+}
+for name in data["conditions"]:
+    condition = "workspace_only" if name == "workspace_only" else "memory"
+    backend = "none" if name == "workspace_only" else name
+    print(environments[name], condition, backend)
+PY
+)
+for cell in "${online_cells[@]}"; do
   read -r environment condition backend <<<"${cell}"
   result_id="$(run_python core -c \
     'from lhmsb.longhorizon.online_cli import online_result_id; import sys; print(online_result_id(episode_id=sys.argv[1], condition=sys.argv[2], backend=None if sys.argv[3] == "none" else sys.argv[3], policy_profile=sys.argv[4]))' \
