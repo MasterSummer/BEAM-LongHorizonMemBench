@@ -35,6 +35,19 @@ def test_generated_episode_reconstructs_all_components() -> None:
     assert all(item["match"] for item in records[0]["components"].values())  # type: ignore[union-attr]
 
 
+def test_reconstruction_ignores_public_continuation_load_order() -> None:
+    spec = _spec()
+    reordered = replace(
+        spec,
+        public_continuations=tuple(reversed(spec.public_continuations)),
+    )
+
+    records = validate_reconstruction((reordered,), (spec.plan.episode_id,))
+
+    assert records[0]["all_components_match"]
+    assert records[0]["components"]["public_continuations"]["match"]  # type: ignore[index]
+
+
 def test_reconstruction_detects_frozen_component_tampering() -> None:
     spec = _spec()
     tampered = replace(spec, surface_hash="wrong-surface-hash")

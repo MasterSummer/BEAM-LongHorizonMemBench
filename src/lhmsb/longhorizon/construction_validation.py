@@ -51,7 +51,13 @@ def _component_hashes(spec: SoftwareMem0VerticalSpec) -> dict[str, str]:
         "task_steps": _canonical_hash([asdict(item) for item in spec.plan.task_steps]),
         "actions": _canonical_hash([asdict(item) for item in spec.actions]),
         "public_continuations": _canonical_hash(
-            [asdict(item) for item in spec.public_continuations]
+            [
+                asdict(item)
+                for item in sorted(
+                    spec.public_continuations,
+                    key=lambda continuation: continuation.opportunity_id,
+                )
+            ]
         ),
         "evaluator_continuations": _canonical_hash(
             [asdict(item) for item in spec.evaluator_continuations]
