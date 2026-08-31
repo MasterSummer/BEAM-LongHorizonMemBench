@@ -1070,9 +1070,23 @@ class SystemsQualificationConfig:
             2,
             1,
         )
+        boyuerich_writer = (
+            "deepseek_v4_pro_writer",
+            "deepseek",
+            "deepseek-v4-pro",
+            "boyuerich_deepseek_v4_pro",
+            "BOYUERICH_API_KEY",
+            "https://apicz.boyuerichdata.com/v1",
+            "BOYUERICH_BASE_URL",
+            "chat_completions",
+            180.0,
+            2,
+            1,
+        )
         if _policy_identity(self.writer_profile) not in {
             expected_writer,
             shengsuanyun_writer,
+            boyuerich_writer,
         }:
             raise ValueError(
                 "schema-v2 requires a pinned DeepSeek V4 Pro writer route"

@@ -51,6 +51,12 @@ LONGITUDINAL_SHENGSUANYUN_WRITER_CONFIG_PATH = (
     / "experiments"
     / "systems_controlled_gpt_only_longitudinal_v013_shengsuanyun_writer.yaml"
 )
+LONGITUDINAL_BOYUERICH_WRITER_CONFIG_PATH = (
+    ROOT
+    / "configs"
+    / "experiments"
+    / "systems_controlled_gpt_only_longitudinal_v014_boyuerich_writer.yaml"
+)
 THREE_POLICY_SHENGSUANYUN_CONFIG_PATH = (
     ROOT
     / "configs"
@@ -71,6 +77,17 @@ def _config() -> SystemsQualificationConfig:
     config = load_qualification_config(CONFIG_PATH)
     assert isinstance(config, SystemsQualificationConfig)
     return config
+
+
+def test_schema_v2_accepts_pinned_boyuerich_deepseek_v4_pro_writer() -> None:
+    config = load_qualification_config(LONGITUDINAL_BOYUERICH_WRITER_CONFIG_PATH)
+
+    assert isinstance(config, SystemsQualificationConfig)
+    assert config.writer_profile.profile_id == "deepseek_v4_pro_writer"
+    assert config.writer_profile.model_id == "deepseek-v4-pro"
+    assert config.writer_profile.route_id == "boyuerich_deepseek_v4_pro"
+    assert config.writer_profile.api_key_env == "BOYUERICH_API_KEY"
+    assert config.writer_profile.endpoint == "https://apicz.boyuerichdata.com/v1"
 
 
 def _artifact(

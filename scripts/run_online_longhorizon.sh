@@ -219,7 +219,17 @@ for cell in \
     'from lhmsb.longhorizon.online_cli import online_result_id; import sys; print(online_result_id(episode_id=sys.argv[1], condition=sys.argv[2], backend=None if sys.argv[3] == "none" else sys.argv[3], policy_profile=sys.argv[4]))' \
     "${episode_id}" "${condition}" "${backend}" "${POLICY_PROFILE}")"
   result_path="${TASK_OUT}/${result_id}.json"
-  if [[ -s "${result_path}" ]] && python3 - "${result_path}" "${CODE_COMMIT}" <<'PY'
+  expected_result_commit="$(python3 - "${RUN_DIR}/MATRIX.json" "${result_id}" "${CODE_COMMIT}" <<'PY'
+import json
+import sys
+from pathlib import Path
+matrix = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+overrides = matrix.get("execution_overrides", {})
+commits = overrides.get("result_repository_commits", {}) if isinstance(overrides, dict) else {}
+print(commits.get(sys.argv[2], sys.argv[3]))
+PY
+)"
+  if [[ -s "${result_path}" ]] && python3 - "${result_path}" "${expected_result_commit}" <<'PY'
 import json
 import sys
 from pathlib import Path
