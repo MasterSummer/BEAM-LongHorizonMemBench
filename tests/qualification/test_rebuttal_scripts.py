@@ -56,6 +56,8 @@ def test_rebuttal_entrypoint_contains_resume_and_finalize_gates() -> None:
         "lhmsb.longhorizon.known_fault_validation",
         "lhmsb.longhorizon.online_audit",
         "missing_task_indices",
+        "execution_overrides",
+        "replacement_config",
         "-o addopts=",
         '--dependency="afterok:',
     ):

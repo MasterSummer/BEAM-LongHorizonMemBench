@@ -121,12 +121,17 @@ PY
 }
 
 ensure_policy_repo() {
-  local expected_commit
-  expected_commit="$(control_python - "${SOURCE_PLAN}/MATRIX.json" <<'PY'
+  local expected_commit identity_matrix
+  identity_matrix="${SOURCE_PLAN}/MATRIX.json"
+  [[ -f "${RUN_DIR}/MATRIX.json" ]] && identity_matrix="${RUN_DIR}/MATRIX.json"
+  expected_commit="$(control_python - "${identity_matrix}" <<'PY'
 import json
 import sys
 from pathlib import Path
-print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["repository"]["code_commit"])
+matrix = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+overrides = matrix.get("execution_overrides", {})
+replacement = overrides.get("replacement_config", {}) if isinstance(overrides, dict) else {}
+print(replacement.get("repository_commit", matrix["repository"]["code_commit"]))
 PY
 )"
   if [[ -z "${POLICY_REPO}" ]]; then
@@ -158,6 +163,9 @@ PY
     exit 1
   fi
   DATASET="${DATASET:-${DATA_ROOT}/datasets/software_longitudinal_v014}"
+  if [[ -z "${CONFIG}" && -f "${RUN_DIR}/MATRIX.json" ]]; then
+    CONFIG="$(matrix_value config)"
+  fi
   CONFIG="${CONFIG:-${POLICY_REPO}/configs/experiments/systems_controlled_gpt_only_longitudinal_v014_shengsuanyun_writer.yaml}"
 }
 
