@@ -181,7 +181,7 @@ run_zero_api_validation() {
   fi
   if [[ "${SKIP_TESTS}" != "1" ]]; then
     PYTHONPATH="${CONTROL_REPO}/src${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${CONTROL_PYTHON}" -m pytest -q \
+      "${CONTROL_PYTHON}" -m pytest -q -o addopts= \
       "${CONTROL_REPO}/tests/longhorizon/test_known_fault_validation.py" \
       "${CONTROL_REPO}/tests/longhorizon/test_construction_validation.py" \
       "${CONTROL_REPO}/tests/longhorizon/test_rebuttal_manifest.py" \

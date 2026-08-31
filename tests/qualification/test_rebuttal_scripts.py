@@ -56,6 +56,7 @@ def test_rebuttal_entrypoint_contains_resume_and_finalize_gates() -> None:
         "lhmsb.longhorizon.known_fault_validation",
         "lhmsb.longhorizon.online_audit",
         "missing_task_indices",
+        "-o addopts=",
         '--dependency="afterok:',
     ):
         assert marker in text
