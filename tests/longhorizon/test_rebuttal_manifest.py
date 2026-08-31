@@ -53,7 +53,13 @@ def _frozen_run(tmp_path: Path) -> tuple[Path, list[str]]:
     return run_dir, expected
 
 
-def _result(episode: str, condition: str, *, commit: str = "commit-a") -> dict[str, object]:
+def _result(
+    episode: str,
+    condition: str,
+    *,
+    commit: str = "commit-a",
+    config_hash: str = "config-a",
+) -> dict[str, object]:
     backend = None if condition == "workspace_only" else "mem0"
     result_id = online_result_id(
         episode_id=episode,
@@ -70,7 +76,7 @@ def _result(episode: str, condition: str, *, commit: str = "commit-a") -> dict[s
     return {
         "result_id": result_id,
         "track": "online_long_horizon_agent_execution",
-        "config_hash": "config-a",
+        "config_hash": config_hash,
         "dataset_release": "dataset-a",
         "policy_profile": "policy-a",
         "condition": condition,
@@ -129,7 +135,10 @@ def test_audit_rejects_wrong_commit(tmp_path: Path) -> None:
 
     assert not report["ok"]
     assert report["valid_result_count"] == 0
-    assert "repository commit mismatch" in report["rejected"][0]["errors"]  # type: ignore[index]
+    assert any(
+        "repository commit mismatch" in error
+        for error in report["rejected"][0]["errors"]  # type: ignore[index]
+    )
     with pytest.raises(ValueError, match="candidate result audit failed"):
         prepare_rebuttal_run(run_dir, [legacy])
 
@@ -163,3 +172,59 @@ def test_audit_accepts_identical_duplicate_identity(tmp_path: Path) -> None:
     assert report["ok"]
     assert report["valid_result_count"] == 1
     assert len(report["identical_duplicates"]) == 1
+
+
+def test_audit_accepts_config_hash_override_only_for_named_result(tmp_path: Path) -> None:
+    run_dir, expected = _frozen_run(tmp_path)
+    matrix_path = run_dir / "MATRIX.json"
+    matrix = json.loads(matrix_path.read_text())
+    overridden_id = expected[-1]
+    matrix["execution_overrides"] = {
+        "schema_version": "memhorizon-writer-route-override-v1",
+        "result_config_hashes": {overridden_id: "config-b"},
+        "result_repository_commits": {overridden_id: "commit-b"},
+    }
+    _write_json(matrix_path, matrix)
+    result = _result(
+        "episode-2", "memory", config_hash="config-b", commit="commit-b"
+    )
+    _write_json(run_dir / "results" / "overridden.json", result)
+
+    report = audit_result_roots(run_dir)
+
+    assert report["ok"]
+    assert report["valid_result_count"] == 1
+
+
+def test_audit_rejects_wrong_hash_for_overridden_result(tmp_path: Path) -> None:
+    run_dir, expected = _frozen_run(tmp_path)
+    matrix_path = run_dir / "MATRIX.json"
+    matrix = json.loads(matrix_path.read_text())
+    matrix["execution_overrides"] = {
+        "schema_version": "memhorizon-writer-route-override-v1",
+        "result_config_hashes": {expected[-1]: "config-b"},
+        "result_repository_commits": {expected[-1]: "commit-b"},
+    }
+    _write_json(matrix_path, matrix)
+    result = _result("episode-2", "memory", config_hash="config-c")
+    _write_json(run_dir / "results" / "wrong.json", result)
+
+    report = audit_result_roots(run_dir)
+
+    assert not report["ok"]
+    assert "config_hash mismatch" in report["rejected"][0]["errors"][0]  # type: ignore[index]
+
+
+def test_audit_rejects_override_for_unknown_result_id(tmp_path: Path) -> None:
+    run_dir, _ = _frozen_run(tmp_path)
+    matrix_path = run_dir / "MATRIX.json"
+    matrix = json.loads(matrix_path.read_text())
+    matrix["execution_overrides"] = {
+        "schema_version": "memhorizon-writer-route-override-v1",
+        "result_config_hashes": {"not-in-the-matrix": "config-b"},
+        "result_repository_commits": {"not-in-the-matrix": "commit-b"},
+    }
+    _write_json(matrix_path, matrix)
+
+    with pytest.raises(ValueError, match="unknown result IDs"):
+        audit_result_roots(run_dir)

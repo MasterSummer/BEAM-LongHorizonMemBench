@@ -230,8 +230,18 @@ def _candidate_errors(
         errors.append(f"stored result_id does not match computed identity: {stored_id!r}")
     if computed_id not in expected_ids:
         errors.append("result identity is not present in frozen matrix")
-    if payload.get("config_hash") != matrix.get("config_hash"):
-        errors.append("config_hash mismatch")
+    execution_overrides = matrix.get("execution_overrides")
+    result_config_hashes: Mapping[str, object] = {}
+    if isinstance(execution_overrides, Mapping):
+        raw_hashes = execution_overrides.get("result_config_hashes", {})
+        if isinstance(raw_hashes, Mapping):
+            result_config_hashes = cast(Mapping[str, object], raw_hashes)
+    expected_config_hash = result_config_hashes.get(computed_id, matrix.get("config_hash"))
+    if payload.get("config_hash") != expected_config_hash:
+        errors.append(
+            "config_hash mismatch: "
+            f"{payload.get('config_hash')!r} != {expected_config_hash!r}"
+        )
     if payload.get("dataset_release") != matrix.get("dataset_release"):
         errors.append("dataset_release mismatch")
     if payload.get("policy_profile") != matrix.get("policy_profile"):
@@ -241,8 +251,19 @@ def _candidate_errors(
     if not isinstance(repository, Mapping) or not isinstance(expected_repository, Mapping):
         errors.append("missing repository provenance")
     else:
-        if repository.get("code_commit") != expected_repository.get("code_commit"):
-            errors.append("repository commit mismatch")
+        result_repository_commits: Mapping[str, object] = {}
+        if isinstance(execution_overrides, Mapping):
+            raw_commits = execution_overrides.get("result_repository_commits", {})
+            if isinstance(raw_commits, Mapping):
+                result_repository_commits = cast(Mapping[str, object], raw_commits)
+        expected_commit = result_repository_commits.get(
+            computed_id, expected_repository.get("code_commit")
+        )
+        if repository.get("code_commit") != expected_commit:
+            errors.append(
+                "repository commit mismatch: "
+                f"{repository.get('code_commit')!r} != {expected_commit!r}"
+            )
         if repository.get("code_dirty") is not False:
             errors.append("result was produced from a dirty or unknown checkout")
     result = payload.get("result")
@@ -294,6 +315,31 @@ def audit_result_roots(
     expected_ids = {str(item) for item in matrix.get("expected_result_ids", [])}
     if len(expected_ids) != matrix.get("expected_result_count"):
         raise ValueError("matrix expected-result count is inconsistent")
+    execution_overrides = matrix.get("execution_overrides")
+    if execution_overrides is not None:
+        if not isinstance(execution_overrides, Mapping):
+            raise ValueError("matrix execution_overrides must be an object")
+        raw_hashes = execution_overrides.get("result_config_hashes")
+        if not isinstance(raw_hashes, Mapping) or not raw_hashes:
+            raise ValueError(
+                "matrix execution_overrides requires non-empty result_config_hashes"
+            )
+        invalid_ids = sorted(str(key) for key in raw_hashes if str(key) not in expected_ids)
+        if invalid_ids:
+            raise ValueError(
+                "matrix execution_overrides contains unknown result IDs: "
+                + ",".join(invalid_ids)
+            )
+        if any(not isinstance(value, str) or not value for value in raw_hashes.values()):
+            raise ValueError("matrix execution override config hashes must be strings")
+        raw_commits = execution_overrides.get("result_repository_commits")
+        if not isinstance(raw_commits, Mapping) or set(raw_commits) != set(raw_hashes):
+            raise ValueError(
+                "matrix execution_overrides requires repository commits for exactly "
+                "the overridden result IDs"
+            )
+        if any(not isinstance(value, str) or not value for value in raw_commits.values()):
+            raise ValueError("matrix execution override repository commits must be strings")
     episode_to_task = {
         cast(str, task["episode_id"]): cast(int, task["task_index"]) for task in tasks
     }
