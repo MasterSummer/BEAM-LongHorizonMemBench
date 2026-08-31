@@ -1,0 +1,11 @@
+profile_id: deepseek_v4_pro_writer
+provider: deepseek
+model_id: deepseek-v4-pro
+route_id: boyuerich_deepseek_v4_pro
+api_key_env: BOYUERICH_API_KEY
+endpoint: https://apicz.boyuerichdata.com/v1
+endpoint_override_env: BOYUERICH_BASE_URL
+request_api: chat_completions
+timeout_seconds: 180
+max_retries: 2
+format_repair_attempts: 1
