@@ -277,6 +277,9 @@ systems_start_tei() {
   mkdir -p "${root}/logs"
   env -i HOME="${HOME}" PATH="/usr/bin:/bin" LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     CUDA_VISIBLE_DEVICES="${gpu}" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+    RAYON_NUM_THREADS="${LHMSB_TEI_RAYON_THREADS:-8}" \
+    OMP_NUM_THREADS="${LHMSB_TEI_OMP_THREADS:-8}" \
+    TOKENIZERS_PARALLELISM=false \
     "${LHMSB_TEI_BIN}" \
     --model-id "${model_dir}" --hostname 127.0.0.1 --port "${port}" \
     --dtype float16 >"${root}/logs/${name}.log" 2>&1 &
@@ -294,11 +297,20 @@ systems_start_all_services() {
   systems_allocate_ports "${data_root}"
   systems_start_qdrant "${data_root}"
   systems_start_neo4j "${data_root}"
+  if ! systems_wait_http qdrant "${LHMSB_QDRANT_URL}/healthz" \
+    || ! systems_wait_neo4j; then
+    systems_stop_all_services "${data_root}"
+    return 1
+  fi
   systems_start_tei "${data_root}" embedding "${LHMSB_EMBEDDING_GPU_ID}" \
     "${LHMSB_EMBEDDING_MODEL_DIR}" "${LHMSB_EMBEDDING_PORT}"
+  if ! systems_wait_http embedding "${LHMSB_EMBEDDING_URL}/health"; then
+    systems_stop_all_services "${data_root}"
+    return 1
+  fi
   systems_start_tei "${data_root}" reranker "${LHMSB_RERANKER_GPU_ID}" \
     "${LHMSB_RERANKER_MODEL_DIR}" "${LHMSB_RERANKER_PORT}"
-  if ! systems_health_services; then
+  if ! systems_wait_http reranker "${LHMSB_RERANKER_URL}/health"; then
     systems_stop_all_services "${data_root}"
     return 1
   fi
