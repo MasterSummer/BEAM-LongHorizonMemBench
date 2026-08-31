@@ -30,6 +30,7 @@ from typing import Literal, Protocol, cast
 from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalSpec
 from lhmsb.families.software.vertical import SoftwareVerticalSpec
 from lhmsb.families.software.vertical_checker import (
+    BehaviorResult,
     SoftwareVerticalChecker,
     assess_software_action,
 )
@@ -242,6 +243,81 @@ class OnlineDecisionAssessment:
 
 
 @dataclass(frozen=True)
+class OnlineWorkspaceCheckResult:
+    """Final-state verdict over the complete materialized workspace."""
+
+    score: float
+    is_correct: bool
+    infrastructure_valid: bool
+    outcome_class: str
+    workspace_contract_valid: bool
+    decision_count: int
+    correct_decision_count: int
+    wrong_effects: tuple[str, ...] = ()
+    missing_effects: tuple[str, ...] = ()
+    extra_effects: tuple[str, ...] = ()
+    artifact_errors: tuple[str, ...] = ()
+    failed_tests: tuple[str, ...] = ()
+    behavior: BehaviorResult | None = None
+
+    @property
+    def decision_accuracy(self) -> float | None:
+        if self.decision_count == 0:
+            return None
+        return self.correct_decision_count / self.decision_count
+
+    @property
+    def terminal_behavior_score(self) -> float | None:
+        return None if self.behavior is None else self.behavior.score
+
+    @property
+    def terminal_behavior_passed(self) -> bool:
+        return self.behavior is not None and self.behavior.is_correct
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "score": self.score,
+            "is_correct": self.is_correct,
+            "infrastructure_valid": self.infrastructure_valid,
+            "outcome_class": self.outcome_class,
+            "workspace_contract_valid": self.workspace_contract_valid,
+            "decision_count": self.decision_count,
+            "correct_decision_count": self.correct_decision_count,
+            "decision_accuracy": self.decision_accuracy,
+            "terminal_behavior_score": self.terminal_behavior_score,
+            "terminal_behavior_passed": self.terminal_behavior_passed,
+            "wrong_effects": list(self.wrong_effects),
+            "missing_effects": list(self.missing_effects),
+            "extra_effects": list(self.extra_effects),
+            "artifact_errors": list(self.artifact_errors),
+            "failed_tests": list(self.failed_tests),
+        }
+
+
+@dataclass(frozen=True)
+class OnlineWorkspaceReconstruction:
+    """A final workspace deterministically reconstructed from saved step traces."""
+
+    workspace_files: tuple[tuple[str, str], ...]
+    serialization_mode: Literal["current", "legacy_adjacent_json"] | None
+    trace_integrity_valid: bool
+    errors: tuple[str, ...] = ()
+
+    @property
+    def workspace(self) -> dict[str, str]:
+        return dict(self.workspace_files)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "serialization_mode": self.serialization_mode,
+            "trace_integrity_valid": self.trace_integrity_valid,
+            "errors": list(self.errors),
+            "workspace_file_count": len(self.workspace_files),
+            "workspace_hash": _workspace_hash(self.workspace),
+        }
+
+
+@dataclass(frozen=True)
 class OnlineExecutionResult:
     """Result of a closed-loop online episode."""
 
@@ -257,7 +333,18 @@ class OnlineExecutionResult:
     policy_calls: int
     terminal_checker_score: float
     terminal_checker_passed: bool
+    terminal_decision_accuracy: float | None = None
+    terminal_behavior_score: float | None = None
+    terminal_behavior_passed: bool = False
     terminal_failed_tests: tuple[str, ...] = ()
+    terminal_infrastructure_valid: bool = False
+    terminal_outcome_class: str = "missing_report"
+    terminal_workspace_contract_valid: bool = False
+    terminal_wrong_effects: tuple[str, ...] = ()
+    terminal_missing_effects: tuple[str, ...] = ()
+    terminal_extra_effects: tuple[str, ...] = ()
+    terminal_artifact_errors: tuple[str, ...] = ()
+    final_workspace_files: tuple[tuple[str, str], ...] = ()
 
     @property
     def online_long_horizon(self) -> bool:
@@ -270,6 +357,7 @@ class OnlineExecutionResult:
             and self.memory_selection_verified
             and self.memory_count_verified
             and self.efficiency_measurement_verified
+            and self.terminal_infrastructure_valid
         )
 
     @property
@@ -443,7 +531,21 @@ class OnlineExecutionResult:
             "policy_calls": self.policy_calls,
             "terminal_checker_score": self.terminal_checker_score,
             "terminal_checker_passed": self.terminal_checker_passed,
+            "terminal_decision_accuracy": self.terminal_decision_accuracy,
+            "terminal_behavior_score": self.terminal_behavior_score,
+            "terminal_behavior_passed": self.terminal_behavior_passed,
             "terminal_failed_tests": list(self.terminal_failed_tests),
+            "terminal_infrastructure_valid": self.terminal_infrastructure_valid,
+            "terminal_outcome_class": self.terminal_outcome_class,
+            "terminal_workspace_contract_valid": self.terminal_workspace_contract_valid,
+            "terminal_wrong_effects": list(self.terminal_wrong_effects),
+            "terminal_missing_effects": list(self.terminal_missing_effects),
+            "terminal_extra_effects": list(self.terminal_extra_effects),
+            "terminal_artifact_errors": list(self.terminal_artifact_errors),
+            "final_workspace_files": [
+                {"path": path, "content": content}
+                for path, content in self.final_workspace_files
+            ],
             "online_long_horizon": self.online_long_horizon,
             "workflow_complete": self.workflow_complete,
             "project_chain_verified": self.project_chain_verified,
@@ -872,8 +974,538 @@ def _apply_option(
         sort_keys=True,
         separators=(",", ":"),
     )
-    updated[progress_path] = f"{updated.get(progress_path, '')}{progress_entry}\n"
+    progress_prefix = updated.get(progress_path, "")
+    if progress_prefix and not progress_prefix.endswith("\n"):
+        progress_prefix += "\n"
+    updated[progress_path] = f"{progress_prefix}{progress_entry}\n"
     return updated, _workspace_hash(updated)
+
+
+def _apply_option_legacy(
+    workspace: dict[str, str],
+    option: PublicActionOption,
+    *,
+    ordinal: int,
+    session_index: int,
+    work_unit: OnlineWorkUnit,
+) -> tuple[dict[str, str], str]:
+    """Reproduce the pre-terminal-audit adjacent-JSON workspace format."""
+    updated = dict(workspace)
+    for path, content in option.files:
+        previous = updated.get(path, "")
+        if path == "solution.py":
+            updated[path] = f"{content}\n"
+        else:
+            updated[path] = f"{previous}{content}\n"
+    state_payload = {
+        "implementation_revision": ordinal + 1,
+        "last_selected_option": option.option_id,
+        "session": session_index,
+        "work_unit": work_unit.work_unit_id,
+        "work_kind": work_unit.kind,
+        "target_path": work_unit.output_path,
+        "workspace_effect": "candidate implementation installed",
+    }
+    updated["state/online_project.json"] = json.dumps(
+        state_payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) + "\n"
+    progress_path = f"results/session_{session_index}.json"
+    progress_entry = json.dumps(
+        {
+            "ordinal": ordinal,
+            "selected_option": option.option_id,
+            "workspace_mutated": True,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    updated[progress_path] = (
+        f"{updated.get(progress_path, '')}{progress_entry}\n"
+    )
+    return updated, _workspace_hash(updated)
+
+
+def reconstruct_online_workspace(
+    spec: SoftwareMem0VerticalSpec,
+    saved_steps: Sequence[Mapping[str, object]],
+    *,
+    steps_per_session: int = 16,
+) -> OnlineWorkspaceReconstruction:
+    """Rebuild a final workspace from a saved online trace without API calls.
+
+    The reconstruction accepts both the current newline-delimited progress
+    format and the legacy adjacent-JSON format.  It verifies every persisted
+    workspace hash, dependency digest, work-unit identity, and artifact digest;
+    a trace is replayable only when the complete chain agrees byte-for-byte.
+    """
+    if steps_per_session < 1:
+        raise ValueError("steps_per_session must be >= 1")
+    expected_count = spec.plan.n_sessions * steps_per_session
+    errors: list[str] = []
+    if len(saved_steps) != expected_count:
+        errors.append(f"step-count:{len(saved_steps)}!={expected_count}")
+    workspace = {
+        artifact.path: artifact.content
+        for artifact in spec.plan.workspaces[0].artifacts
+    }
+    previous_work_unit: OnlineWorkUnit | None = None
+    serialization_mode: Literal["current", "legacy_adjacent_json"] | None = None
+
+    for ordinal, trace in enumerate(saved_steps):
+        session_index, local_step = divmod(ordinal, steps_per_session)
+        if session_index >= spec.plan.n_sessions:
+            errors.append(f"step-{ordinal}:outside-session-range")
+            break
+        work_unit = _build_work_unit(
+            session_index=session_index,
+            local_step=local_step,
+            ordinal=ordinal,
+            previous=previous_work_unit,
+        )
+        current_workspace_hash = _workspace_hash(workspace)
+        required_input_digest = (
+            current_workspace_hash
+            if previous_work_unit is None
+            else str(saved_steps[ordinal - 1].get("artifact_output_digest", ""))
+        )
+        expected_fields = {
+            "ordinal": ordinal,
+            "session_index": session_index,
+            "local_step": local_step,
+            "work_unit_id": work_unit.work_unit_id,
+            "work_kind": work_unit.kind,
+            "target_path": work_unit.output_path,
+            "required_input_digest": required_input_digest,
+            "previous_workspace_hash": current_workspace_hash,
+        }
+        for field_name, expected in expected_fields.items():
+            if trace.get(field_name) != expected:
+                errors.append(f"step-{ordinal}:{field_name}")
+
+        selected_option_id = trace.get("selected_option_id")
+        options = _build_options(
+            spec,
+            session_index=session_index,
+            ordinal=ordinal,
+            work_unit=work_unit,
+            required_input_digest=required_input_digest,
+        )
+        selected = next(
+            (
+                option
+                for option in options
+                if option.option_id == selected_option_id
+            ),
+            None,
+        )
+        if selected is None:
+            errors.append(f"step-{ordinal}:selected-option")
+            break
+        action = _action_for_option(
+            spec,
+            session_index=session_index,
+            ordinal=ordinal,
+            option_id=selected_option_id,
+        )
+        if action is None:
+            errors.append(f"step-{ordinal}:semantic-action")
+            break
+        assessment = assess_online_decision(
+            spec,
+            action,
+            session_index=session_index,
+            work_kind=work_unit.kind,
+        )
+        semantic_fields: dict[str, object] = {
+            "evaluator_action_id": action.action_id,
+            "evaluator_opportunity_id": assessment.opportunity_id,
+            "continuation_scope": assessment.continuation_scope,
+            "action_correct": assessment.action_correct,
+        }
+        for field_name, expected in semantic_fields.items():
+            if trace.get(field_name) != expected:
+                errors.append(f"step-{ordinal}:{field_name}")
+        for field_name, expected in {
+            "drift_flags": assessment.drift_flags,
+            "violated_state_ids": assessment.violated_state_ids,
+        }.items():
+            saved = trace.get(field_name)
+            if not isinstance(saved, list | tuple) or tuple(saved) != expected:
+                errors.append(f"step-{ordinal}:{field_name}")
+
+        candidates: dict[
+            Literal["current", "legacy_adjacent_json"],
+            tuple[dict[str, str], str],
+        ] = {}
+        if serialization_mode in {None, "current"}:
+            candidates["current"] = _apply_option(
+                workspace,
+                selected,
+                ordinal=ordinal,
+                session_index=session_index,
+                work_unit=work_unit,
+            )
+        if serialization_mode in {None, "legacy_adjacent_json"}:
+            candidates["legacy_adjacent_json"] = _apply_option_legacy(
+                workspace,
+                selected,
+                ordinal=ordinal,
+                session_index=session_index,
+                work_unit=work_unit,
+            )
+        saved_workspace_hash = trace.get("workspace_hash")
+        matches = [
+            (mode, candidate)
+            for mode, candidate in candidates.items()
+            if candidate[1] == saved_workspace_hash
+        ]
+        if not matches:
+            errors.append(f"step-{ordinal}:workspace-hash")
+            break
+        serialization_mode, (workspace, _) = matches[0]
+
+        artifact_content = workspace.get(work_unit.output_path, "").rstrip("\n")
+        artifact_valid, artifact_output_digest = _validate_work_unit_artifact(
+            work_unit,
+            artifact_content,
+            required_input_digest=required_input_digest,
+        )
+        if not artifact_valid:
+            errors.append(f"step-{ordinal}:artifact-invalid")
+        if trace.get("artifact_digest") != _sha(artifact_content):
+            errors.append(f"step-{ordinal}:artifact-digest")
+        if trace.get("artifact_output_digest") != artifact_output_digest:
+            errors.append(f"step-{ordinal}:artifact-output-digest")
+        previous_work_unit = work_unit
+
+    return OnlineWorkspaceReconstruction(
+        workspace_files=tuple(sorted(workspace.items())),
+        serialization_mode=serialization_mode,
+        trace_integrity_valid=not errors,
+        errors=tuple(errors),
+    )
+
+
+def _parse_json_stream(content: str) -> tuple[dict[str, object], ...] | None:
+    """Parse whitespace-separated or legacy-adjacent JSON objects."""
+    decoder = json.JSONDecoder()
+    cursor = 0
+    objects: list[dict[str, object]] = []
+    try:
+        while cursor < len(content):
+            while cursor < len(content) and content[cursor].isspace():
+                cursor += 1
+            if cursor >= len(content):
+                break
+            item, cursor = decoder.raw_decode(content, cursor)
+            if not isinstance(item, dict):
+                return None
+            objects.append(item)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return tuple(objects)
+
+
+def _action_for_option(
+    spec: SoftwareMem0VerticalSpec,
+    *,
+    session_index: int,
+    ordinal: int,
+    option_id: object,
+) -> ActionSpec | None:
+    if not isinstance(option_id, str) or not option_id.startswith("op-"):
+        return None
+    try:
+        option_index = int(option_id.removeprefix("op-"))
+        action_index = _action_order(
+            spec,
+            session_index=session_index,
+            ordinal=ordinal,
+        )[option_index]
+        return online_action_catalog(spec)[action_index]
+    except (ValueError, IndexError):
+        return None
+
+
+def _installed_workspace_action(
+    spec: SoftwareMem0VerticalSpec,
+    workspace: Mapping[str, str],
+) -> ActionSpec | None:
+    matches = [
+        action
+        for action in online_action_catalog(spec)
+        if action.files
+        and all(
+            workspace.get(path, "").rstrip("\n") == content.rstrip("\n")
+            for path, content in action.files
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def check_online_workspace(
+    spec: SoftwareMem0VerticalSpec,
+    workspace: Mapping[str, str],
+    *,
+    steps_per_session: int = 16,
+) -> OnlineWorkspaceCheckResult:
+    """Validate terminal behavior and every persistent online workspace effect.
+
+    The final installed implementation is reconstructed from workspace bytes.
+    Every work-unit artifact is then replayed against its expected predecessor,
+    option permutation, semantic action, progress record, and final state
+    record.  No policy trace or ``last_action`` object is accepted as a proxy.
+    """
+    if steps_per_session < 1:
+        raise ValueError("steps_per_session must be >= 1")
+
+    initial_workspace = {
+        artifact.path: artifact.content
+        for artifact in spec.plan.workspaces[0].artifacts
+    }
+    expected_paths = set(initial_workspace)
+    expected_paths.update({"solution.py", "state/online_project.json"})
+    wrong_effects: list[str] = []
+    missing_effects: list[str] = []
+    artifact_errors: list[str] = []
+    selected_by_ordinal: dict[int, str] = {}
+    previous_work_unit: OnlineWorkUnit | None = None
+    required_input_digest = _workspace_hash(initial_workspace)
+    correct_decision_count = 0
+    decision_count = spec.plan.n_sessions * steps_per_session
+    last_work_unit: OnlineWorkUnit | None = None
+
+    for session in range(spec.plan.n_sessions):
+        expected_paths.add(f"results/session_{session}.json")
+        for local_step in range(steps_per_session):
+            ordinal = session * steps_per_session + local_step
+            work_unit = _build_work_unit(
+                session_index=session,
+                local_step=local_step,
+                ordinal=ordinal,
+                previous=previous_work_unit,
+            )
+            previous_work_unit = work_unit
+            last_work_unit = work_unit
+            expected_paths.add(work_unit.output_path)
+            raw_content = workspace.get(work_unit.output_path)
+            if raw_content is None:
+                missing_effects.append(work_unit.work_unit_id)
+                required_input_digest = f"<missing:{work_unit.work_unit_id}>"
+                continue
+            payload = _parse_work_unit_artifact(
+                work_unit,
+                raw_content.rstrip("\n"),
+            )
+            if payload is None:
+                artifact_errors.append(f"{work_unit.work_unit_id}:unparseable")
+                required_input_digest = f"<invalid:{work_unit.work_unit_id}>"
+                continue
+            if payload.get("required_input_digest") != required_input_digest:
+                artifact_errors.append(f"{work_unit.work_unit_id}:dependency-mismatch")
+
+            option_id = payload.get("selected_option")
+            action = _action_for_option(
+                spec,
+                session_index=session,
+                ordinal=ordinal,
+                option_id=option_id,
+            )
+            if action is None:
+                artifact_errors.append(f"{work_unit.work_unit_id}:invalid-option")
+            else:
+                selected_by_ordinal[ordinal] = str(option_id)
+                expected_fingerprint = _sha(tuple(action.files))[:16]
+                if payload.get("implementation_fingerprint") != expected_fingerprint:
+                    artifact_errors.append(
+                        f"{work_unit.work_unit_id}:implementation-fingerprint"
+                    )
+                assessment = assess_online_decision(
+                    spec,
+                    action,
+                    session_index=session,
+                    work_kind=work_unit.kind,
+                )
+                if assessment.action_correct:
+                    correct_decision_count += 1
+                else:
+                    wrong_effects.append(
+                        f"{work_unit.work_unit_id}:{action.action_id}"
+                    )
+
+            output_digest = payload.get("output_digest")
+            expected_output = _sha(
+                {
+                    "work_unit": work_unit.work_unit_id,
+                    "kind": work_unit.kind,
+                    "component": work_unit.component_index,
+                    "required_input_digest": payload.get("required_input_digest"),
+                    "implementation_fingerprint": payload.get(
+                        "implementation_fingerprint"
+                    ),
+                }
+            )
+            if output_digest != expected_output:
+                artifact_errors.append(f"{work_unit.work_unit_id}:output-digest")
+                required_input_digest = f"<invalid-output:{work_unit.work_unit_id}>"
+            else:
+                required_input_digest = str(output_digest)
+
+    for session in range(spec.plan.n_sessions):
+        progress_path = f"results/session_{session}.json"
+        progress_content = workspace.get(progress_path)
+        if progress_content is None:
+            missing_effects.append(progress_path)
+            continue
+        progress_objects = _parse_json_stream(progress_content)
+        if progress_objects is None:
+            artifact_errors.append(f"{progress_path}:unparseable")
+            continue
+        progress_records = [
+            item for item in progress_objects if isinstance(item.get("ordinal"), int)
+        ]
+        expected_ordinals = range(
+            session * steps_per_session,
+            (session + 1) * steps_per_session,
+        )
+        if len(progress_records) != steps_per_session:
+            artifact_errors.append(f"{progress_path}:record-count")
+        record_by_ordinal: dict[int, dict[str, object]] = {}
+        for item in progress_records:
+            item_ordinal = item.get("ordinal")
+            if isinstance(item_ordinal, int):
+                record_by_ordinal[item_ordinal] = item
+        for ordinal in expected_ordinals:
+            record = record_by_ordinal.get(ordinal)
+            if record is None:
+                artifact_errors.append(f"{progress_path}:missing-{ordinal}")
+                continue
+            if record.get("workspace_mutated") is not True:
+                artifact_errors.append(f"{progress_path}:mutation-{ordinal}")
+            selected_option = selected_by_ordinal.get(ordinal)
+            if (
+                selected_option is not None
+                and record.get("selected_option") != selected_option
+            ):
+                artifact_errors.append(f"{progress_path}:option-{ordinal}")
+
+    state_path = "state/online_project.json"
+    state_content = workspace.get(state_path)
+    if state_content is None:
+        missing_effects.append(state_path)
+    else:
+        state_objects = _parse_json_stream(state_content)
+        state_payload = (
+            state_objects[0]
+            if state_objects is not None and len(state_objects) == 1
+            else None
+        )
+        final_ordinal = decision_count - 1
+        if state_payload is None or last_work_unit is None:
+            artifact_errors.append(f"{state_path}:unparseable")
+        else:
+            expected_state = {
+                "implementation_revision": decision_count,
+                "last_selected_option": selected_by_ordinal.get(final_ordinal),
+                "session": spec.plan.n_sessions - 1,
+                "work_unit": last_work_unit.work_unit_id,
+                "work_kind": last_work_unit.kind,
+                "target_path": last_work_unit.output_path,
+                "workspace_effect": "candidate implementation installed",
+            }
+            if any(state_payload.get(key) != value for key, value in expected_state.items()):
+                artifact_errors.append(f"{state_path}:terminal-state-mismatch")
+
+    actual_paths = set(workspace)
+    missing_paths = sorted(expected_paths - actual_paths)
+    for path in missing_paths:
+        if path not in missing_effects:
+            missing_effects.append(path)
+    extra_effects = sorted(actual_paths - expected_paths)
+
+    installed_action = _installed_workspace_action(spec, workspace)
+    behavior: BehaviorResult | None = None
+    if installed_action is None:
+        artifact_errors.append("solution.py:unknown-installed-action")
+    else:
+        terminal_opportunity = (
+            None
+            if last_work_unit is None
+            else _online_opportunity(
+                spec.plan,
+                session_index=spec.plan.n_sessions - 1,
+                work_kind=last_work_unit.kind,
+            )
+        )
+        try:
+            behavior = SoftwareVerticalChecker(
+                cast(SoftwareVerticalSpec, spec)
+            ).check_workspace(
+                workspace,
+                action=installed_action,
+                checkpoint_session=spec.plan.n_sessions - 1,
+                opportunity_id=(
+                    None
+                    if terminal_opportunity is None
+                    else terminal_opportunity.opportunity_id
+                ),
+            )
+        except ValueError as exc:
+            artifact_errors.append(f"workspace-materialization:{exc}")
+
+    workspace_contract_valid = not (
+        missing_effects or extra_effects or artifact_errors
+    )
+    infrastructure_valid = (
+        True if behavior is None else behavior.infrastructure_valid
+    )
+    semantic_score = (
+        0.0
+        if decision_count == 0
+        else correct_decision_count / decision_count
+    )
+    if behavior is None or not infrastructure_valid or not workspace_contract_valid:
+        score = 0.0
+    else:
+        score = round(min(behavior.score, semantic_score), 4)
+    is_correct = (
+        workspace_contract_valid
+        and not wrong_effects
+        and behavior is not None
+        and behavior.is_correct
+        and infrastructure_valid
+    )
+    if not infrastructure_valid and behavior is not None:
+        outcome_class = behavior.outcome_class
+    else:
+        outcome_class = "passed" if is_correct else "task_failure"
+
+    failed_tests: list[str] = []
+    if behavior is not None:
+        failed_tests.extend(behavior.failed_tests)
+    failed_tests.extend(f"<wrong-effect:{item}>" for item in wrong_effects)
+    failed_tests.extend(f"<missing-effect:{item}>" for item in missing_effects)
+    failed_tests.extend(f"<extra-effect:{item}>" for item in extra_effects)
+    failed_tests.extend(f"<artifact-error:{item}>" for item in artifact_errors)
+
+    return OnlineWorkspaceCheckResult(
+        score=score,
+        is_correct=is_correct,
+        infrastructure_valid=infrastructure_valid,
+        outcome_class=outcome_class,
+        workspace_contract_valid=workspace_contract_valid,
+        decision_count=decision_count,
+        correct_decision_count=correct_decision_count,
+        wrong_effects=tuple(sorted(set(wrong_effects))),
+        missing_effects=tuple(sorted(set(missing_effects))),
+        extra_effects=tuple(extra_effects),
+        artifact_errors=tuple(sorted(set(artifact_errors))),
+        failed_tests=tuple(failed_tests),
+        behavior=behavior,
+    )
 
 
 def _build_online_plan(
@@ -1071,7 +1703,6 @@ def run_online_episode(
     transcript: list[dict[str, object]] = []
     completed_work_units: set[str] = set()
     previous_work_unit: OnlineWorkUnit | None = None
-    last_action: ActionSpec | None = None
     public_history_by_session: dict[int, tuple[PublicHistoryUnit, ...]] = {}
     for unit in build_public_history_units(spec):
         public_history_by_session.setdefault(unit.source_session, ())
@@ -1365,7 +1996,6 @@ def run_online_episode(
                 session_index=session,
                 work_kind=work_unit.kind,
             )
-            last_action = action
             previous_workspace_hash = current_workspace_hash
             workspace, next_workspace_hash = _apply_option(
                 workspace,
@@ -1512,13 +2142,10 @@ def run_online_episode(
     causal_chain_verified = _verify_causal_chain(rebuilt_steps)
     if not causal_chain_verified:
         raise OnlineExecutionError("online trace failed causal workspace/state verification")
-    if last_action is None:
-        raise OnlineExecutionError("online episode produced no terminal action")
-    terminal_result = SoftwareVerticalChecker(
-        cast(SoftwareVerticalSpec, spec)
-    ).check_action(
-        last_action,
-        checkpoint_session=spec.plan.n_sessions - 1,
+    terminal_result = check_online_workspace(
+        spec,
+        workspace,
+        steps_per_session=steps_per_session,
     )
     return OnlineExecutionResult(
         episode_id=spec.plan.episode_id,
@@ -1533,7 +2160,20 @@ def run_online_episode(
         policy_calls=len(rebuilt_steps),
         terminal_checker_score=terminal_result.score,
         terminal_checker_passed=terminal_result.is_correct,
+        terminal_decision_accuracy=terminal_result.decision_accuracy,
+        terminal_behavior_score=terminal_result.terminal_behavior_score,
+        terminal_behavior_passed=terminal_result.terminal_behavior_passed,
         terminal_failed_tests=terminal_result.failed_tests,
+        terminal_infrastructure_valid=terminal_result.infrastructure_valid,
+        terminal_outcome_class=terminal_result.outcome_class,
+        terminal_workspace_contract_valid=(
+            terminal_result.workspace_contract_valid
+        ),
+        terminal_wrong_effects=terminal_result.wrong_effects,
+        terminal_missing_effects=terminal_result.missing_effects,
+        terminal_extra_effects=terminal_result.extra_effects,
+        terminal_artifact_errors=terminal_result.artifact_errors,
+        final_workspace_files=tuple(sorted(workspace.items())),
     )
 
 
@@ -1595,9 +2235,13 @@ __all__ = [
     "OnlineMemory",
     "OnlineReranker",
     "OnlineStepTrace",
+    "OnlineWorkspaceCheckResult",
+    "OnlineWorkspaceReconstruction",
     "assess_online_decision",
+    "check_online_workspace",
     "online_action_catalog",
     "online_gold_action_ids",
     "online_gold_option_ids",
+    "reconstruct_online_workspace",
     "run_online_episode",
 ]

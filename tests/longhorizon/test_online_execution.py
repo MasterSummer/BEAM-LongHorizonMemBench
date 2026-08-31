@@ -9,13 +9,20 @@ from types import SimpleNamespace
 import pytest
 
 from lhmsb.adapters.flat_retrieval import FlatRetrievalAdapter
-from lhmsb.families.software.mem0_vertical import SoftwareMem0VerticalFamily
+from lhmsb.families.software.mem0_vertical import (
+    SoftwareMem0VerticalFamily,
+    SoftwareMem0VerticalSpec,
+)
 from lhmsb.families.software.vertical_checker import assess_software_action
 from lhmsb.longhorizon.online import (
+    check_online_workspace,
     online_action_catalog,
     online_gold_action_ids,
+    online_gold_option_ids,
+    reconstruct_online_workspace,
     run_online_episode,
 )
+from lhmsb.longhorizon.online_audit import audit_online_artifacts
 from lhmsb.longhorizon.online_cli import online_result_id
 from lhmsb.longhorizon.online_report import build_online_report, write_online_report
 from lhmsb.qualification.context import build_public_history_units
@@ -56,6 +63,59 @@ class RecordingPolicy:
             selected_option_id=selected,
             optional_patch=None,
             concise_rationale="continue",
+            provider_request_id=None,
+            usage=PolicyUsage(input_tokens=1, output_tokens=1),
+            request_hash=_digest(request.request_id),
+            response_hash=_digest((request.request_id, selected)),
+            started_at_utc="",
+            ended_at_utc="",
+            latency_seconds=0.0,
+            retry_count=0,
+            format_repair_used=False,
+        )
+
+
+class GoldPolicy:
+    def __init__(
+        self,
+        spec: SoftwareMem0VerticalSpec,
+        *,
+        steps_per_session: int,
+        wrong_ordinals: frozenset[int] = frozenset(),
+    ) -> None:
+        self.spec = spec
+        self.steps_per_session = steps_per_session
+        self.wrong_ordinals = wrong_ordinals
+        self.ordinal = 0
+
+    def submit_action(self, request: PolicyRequest) -> PolicyResponse:
+        session_index, local_step = divmod(
+            self.ordinal,
+            self.steps_per_session,
+        )
+        gold_options = online_gold_option_ids(
+            self.spec,
+            session_index=session_index,
+            local_step=local_step,
+            ordinal=self.ordinal,
+        )
+        if self.ordinal in self.wrong_ordinals:
+            selected = next(
+                option.option_id
+                for option in request.options
+                if option.option_id not in gold_options
+            )
+        else:
+            selected = gold_options[0]
+        self.ordinal += 1
+        return PolicyResponse(
+            request_id=request.request_id,
+            provider="test",
+            model_id="gold",
+            endpoint_identity="local",
+            selected_option_id=selected,
+            optional_patch=None,
+            concise_rationale="controlled fixture",
             provider_request_id=None,
             usage=PolicyUsage(input_tokens=1, output_tokens=1),
             request_hash=_digest(request.request_id),
@@ -240,6 +300,134 @@ def test_short_online_fixture_is_not_labelled_long_horizon() -> None:
     assert result.workflow_complete
     assert not result.online_long_horizon
     assert result.task_span.interaction_mode == "sparse_closed_loop"
+
+
+def test_terminal_checker_accepts_complete_gold_workspace_and_replays_without_api() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(301, n_sessions=4)
+    result = run_online_episode(
+        spec,
+        GoldPolicy(spec, steps_per_session=2),
+        steps_per_session=2,
+    )
+
+    assert result.terminal_checker_passed
+    assert result.terminal_checker_score == 1.0
+    assert result.terminal_decision_accuracy == 1.0
+    assert result.terminal_behavior_score == 1.0
+    assert result.terminal_behavior_passed
+    assert result.terminal_infrastructure_valid
+    assert result.terminal_outcome_class == "passed"
+    assert result.terminal_workspace_contract_valid
+    assert not result.terminal_wrong_effects
+    assert not result.terminal_missing_effects
+    assert not result.terminal_extra_effects
+    assert not result.terminal_artifact_errors
+
+    replayed = check_online_workspace(
+        spec,
+        dict(result.final_workspace_files),
+        steps_per_session=2,
+    )
+    assert replayed.is_correct
+    assert replayed.score == result.terminal_checker_score
+    assert replayed.to_dict()["outcome_class"] == "passed"
+
+    reconstructed = reconstruct_online_workspace(
+        spec,
+        tuple(step.to_dict() for step in result.steps),
+        steps_per_session=2,
+    )
+    assert reconstructed.trace_integrity_valid
+    assert reconstructed.serialization_mode == "current"
+    assert reconstructed.workspace == dict(result.final_workspace_files)
+
+
+def test_terminal_checker_finds_early_wrong_effect_when_last_action_is_correct() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(301, n_sessions=4)
+    result = run_online_episode(
+        spec,
+        GoldPolicy(
+            spec,
+            steps_per_session=2,
+            wrong_ordinals=frozenset({0}),
+        ),
+        steps_per_session=2,
+    )
+
+    assert result.steps[-1].action_correct
+    assert not result.steps[0].action_correct
+    assert not result.terminal_checker_passed
+    assert result.terminal_outcome_class == "task_failure"
+    assert result.terminal_workspace_contract_valid
+    assert result.terminal_infrastructure_valid
+    assert result.terminal_wrong_effects
+    assert result.terminal_wrong_effects[0].startswith(
+        f"{result.steps[0].work_unit_id}:"
+    )
+    assert result.terminal_checker_score == 0.875
+    assert result.terminal_decision_accuracy == 0.875
+    assert result.terminal_behavior_score == 1.0
+    assert result.terminal_behavior_passed
+
+
+def test_terminal_checker_distinguishes_missing_and_extra_workspace_effects() -> None:
+    spec = SoftwareMem0VerticalFamily.generate(301, n_sessions=4)
+    result = run_online_episode(
+        spec,
+        GoldPolicy(spec, steps_per_session=2),
+        steps_per_session=2,
+    )
+    workspace = dict(result.final_workspace_files)
+    first_output_path = result.steps[0].target_path
+    workspace.pop(first_output_path)
+    workspace["scratch/stale_side_effect.txt"] = "obsolete copy\n"
+
+    checked = check_online_workspace(
+        spec,
+        workspace,
+        steps_per_session=2,
+    )
+
+    assert not checked.is_correct
+    assert checked.outcome_class == "task_failure"
+    assert checked.infrastructure_valid
+    assert not checked.workspace_contract_valid
+    assert result.steps[0].work_unit_id in checked.missing_effects
+    assert "scratch/stale_side_effect.txt" in checked.extra_effects
+    assert checked.score == 0.0
+
+
+def test_saved_online_artifacts_support_zero_api_terminal_audit(tmp_path: Path) -> None:
+    spec = SoftwareMem0VerticalFamily.generate(301, n_sessions=4)
+    result = run_online_episode(
+        spec,
+        GoldPolicy(spec, steps_per_session=2),
+        steps_per_session=2,
+    )
+    replayable = tmp_path / "replayable.json"
+    replayable.write_text(
+        json.dumps({"result_id": "new", "result": result.to_dict()}),
+        encoding="utf-8",
+    )
+    legacy_result = result.to_dict()
+    legacy_result.pop("final_workspace_files")
+    (tmp_path / "legacy.json").write_text(
+        json.dumps({"result_id": "old", "result": legacy_result}),
+        encoding="utf-8",
+    )
+
+    report = audit_online_artifacts(tmp_path, (spec,))
+
+    assert report["artifact_count"] == 2
+    assert report["replayed_count"] == 2
+    assert report["replayed_pass_count"] == 2
+    assert report["verdict_changed_count"] == 0
+    assert report["status_counts"] == {"replayed": 2}
+    legacy_record = next(
+        record for record in report["records"] if record["result_id"] == "old"
+    )
+    assert legacy_record["workspace_source"] == "reconstructed_trace"
+    assert legacy_record["trace_reconstruction"]["trace_integrity_valid"]
 
 
 def test_session_level_policy_control_is_sparse_not_hundreds_of_model_steps() -> None:

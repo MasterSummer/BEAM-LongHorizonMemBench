@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +33,9 @@ class BehaviorResult:
     failed_tests: tuple[str, ...] = ()
     drift_flags: tuple[str, ...] = ()
     metadata: tuple[tuple[str, str], ...] = ()
+    infrastructure_valid: bool = True
+    outcome_class: str = "passed"
+    junit_report_present: bool = True
 
     @property
     def metadata_dict(self) -> dict[str, str]:
@@ -208,6 +211,9 @@ class SoftwareVerticalChecker:
             ("visible_state_count", str(len(visible))),
             ("sandbox_total", str(result.total)),
             ("sandbox_returncode", str(result.returncode)),
+            ("sandbox_outcome_class", result.outcome_class),
+            ("sandbox_infrastructure_valid", str(result.infrastructure_valid)),
+            ("junit_report_present", str(result.junit_report_present)),
         )
         return BehaviorResult(
             score=score,
@@ -217,6 +223,102 @@ class SoftwareVerticalChecker:
             failed_tests=failed_tests,
             drift_flags=assessment.drift_flags,
             metadata=metadata,
+            infrastructure_valid=result.infrastructure_valid,
+            outcome_class=result.outcome_class,
+            junit_report_present=result.junit_report_present,
+        )
+
+    def check_workspace(
+        self,
+        workspace: Mapping[str, str],
+        *,
+        action: str | ActionSpec,
+        checkpoint_session: int,
+        visible_state_ids: Iterable[str] | None = None,
+        opportunity_id: str | None = None,
+    ) -> BehaviorResult:
+        """Check the cumulative workspace, not a synthetic terminal action.
+
+        ``action`` identifies the semantic implementation expected to be
+        installed.  Its files must match the bytes in ``workspace``; hidden
+        tests then run against the complete materialized workspace.  This
+        prevents a final action object from silently standing in for earlier
+        persistent side effects.
+        """
+        action_spec = self._resolve_action(action)
+        replay = replay_plan(self._spec.plan, checkpoint_session)
+        current_ids = set(replay.current)
+        visible = set(visible_state_ids) if visible_state_ids is not None else set(current_ids)
+        assessment = assess_software_action(
+            self._spec.plan,
+            action_spec,
+            checkpoint_session=checkpoint_session,
+            opportunity_id=opportunity_id,
+        )
+        action_matches_workspace = all(
+            workspace.get(relative, "").rstrip("\n") == content.rstrip("\n")
+            for relative, content in action_spec.files
+        )
+
+        with tempfile.TemporaryDirectory(prefix="lhmsb-workspace-") as temp_dir:
+            package_dir = Path(temp_dir)
+            self._write_workspace_package(
+                package_dir,
+                workspace,
+                assessment.expected_version,
+                expected_profiler_backend=("hosted" if assessment.local_exception else "local"),
+            )
+            result = self._sandbox_runner(
+                str(package_dir),
+                list(self._spec.hidden_test_map),
+                time_limit_s=self._time_limit_s,
+                mem_limit_mb=self._mem_limit_mb,
+                output_limit_bytes=self._output_limit_bytes,
+            )
+
+        failed_tests = tuple(result.failed_tests)
+        if not action_matches_workspace:
+            failed_tests = (*failed_tests, "<workspace-action-mismatch>")
+        passed_tests = tuple(
+            name for name in _TEST_NAMES if name not in set(failed_tests) and result.passed > 0
+        )
+        score = 0.0 if result.total == 0 else round(result.passed / result.total, 4)
+        if assessment.drift_flags:
+            score = min(score, 0.25)
+        if not action_matches_workspace:
+            score = 0.0
+        is_correct = (
+            result.all_passed
+            and result.infrastructure_valid
+            and action_matches_workspace
+            and not assessment.violated_state_ids
+            and not assessment.drift_flags
+        )
+        metadata = (
+            ("action_id", action_spec.action_id),
+            ("checkpoint_session", str(checkpoint_session)),
+            ("expected_version", assessment.expected_version),
+            ("continuation_scope", assessment.continuation_scope),
+            ("visible_state_count", str(len(visible))),
+            ("workspace_action_match", str(action_matches_workspace)),
+            ("workspace_file_count", str(len(workspace))),
+            ("sandbox_total", str(result.total)),
+            ("sandbox_returncode", str(result.returncode)),
+            ("sandbox_outcome_class", result.outcome_class),
+            ("sandbox_infrastructure_valid", str(result.infrastructure_valid)),
+            ("junit_report_present", str(result.junit_report_present)),
+        )
+        return BehaviorResult(
+            score=score,
+            is_correct=is_correct,
+            violated_state_ids=assessment.violated_state_ids,
+            passed_tests=passed_tests,
+            failed_tests=failed_tests,
+            drift_flags=assessment.drift_flags,
+            metadata=metadata,
+            infrastructure_valid=result.infrastructure_valid,
+            outcome_class=result.outcome_class,
+            junit_report_present=result.junit_report_present,
         )
 
     def _resolve_action(self, action: str | ActionSpec) -> ActionSpec:
@@ -243,6 +345,51 @@ class SoftwareVerticalChecker:
             path = package_dir / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
+        self._write_hidden_tests(
+            package_dir,
+            expected_version,
+            expected_profiler_backend=expected_profiler_backend,
+        )
+
+    def _write_workspace_package(
+        self,
+        package_dir: Path,
+        workspace: Mapping[str, str],
+        expected_version: str,
+        *,
+        expected_profiler_backend: str,
+    ) -> None:
+        """Materialize trusted base files plus the complete candidate workspace."""
+        for relative, content in self._spec.package_file_map.items():
+            path = package_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        reserved = {"conftest.py", *self._spec.hidden_test_map}
+        for relative, content in workspace.items():
+            candidate = Path(relative)
+            if (
+                not relative
+                or candidate.is_absolute()
+                or ".." in candidate.parts
+                or relative in reserved
+            ):
+                raise ValueError(f"unsafe or reserved workspace path: {relative!r}")
+            path = package_dir / candidate
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        self._write_hidden_tests(
+            package_dir,
+            expected_version,
+            expected_profiler_backend=expected_profiler_backend,
+        )
+
+    def _write_hidden_tests(
+        self,
+        package_dir: Path,
+        expected_version: str,
+        *,
+        expected_profiler_backend: str,
+    ) -> None:
         for relative, content in self._spec.hidden_test_map.items():
             path = package_dir / relative
             path.parent.mkdir(parents=True, exist_ok=True)

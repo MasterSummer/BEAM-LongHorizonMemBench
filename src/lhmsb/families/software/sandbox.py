@@ -33,6 +33,18 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
+
+SandboxOutcome = Literal[
+    "passed",
+    "test_failure",
+    "test_error",
+    "empty_suite",
+    "timeout",
+    "signal_kill",
+    "process_crash",
+    "missing_report",
+]
 
 # Default caps (spec/04-datasets.md §2.1).
 DEFAULT_TIME_LIMIT_S = 30
@@ -87,6 +99,8 @@ class TestResult:
     stdout: str = ""
     stderr: str = ""
     duration_s: float = 0.0
+    outcome_class: SandboxOutcome = "missing_report"
+    junit_report_present: bool = False
 
     @property
     def all_passed(self) -> bool:
@@ -98,6 +112,47 @@ class TestResult:
             and not self.timed_out
             and self.total > 0
         )
+
+    @property
+    def infrastructure_valid(self) -> bool:
+        """Whether the sandbox produced a scoreable test report.
+
+        Candidate-code failures and test errors are task outcomes.  Timeouts,
+        hard kills, process crashes, and missing reports are infrastructure
+        outcomes and must not be encoded as ordinary task failures.
+        """
+        return self.junit_report_present and self.outcome_class in {
+            "passed",
+            "test_failure",
+            "test_error",
+        }
+
+
+def _classify_outcome(
+    *,
+    timed_out: bool,
+    junit_report_present: bool,
+    returncode: int,
+    failed: int,
+    errors: int,
+    total: int,
+) -> SandboxOutcome:
+    """Classify task and infrastructure outcomes without using score values."""
+    if timed_out:
+        return "timeout"
+    if not junit_report_present:
+        if returncode < 0:
+            return "signal_kill"
+        if returncode > 0:
+            return "process_crash"
+        return "missing_report"
+    if errors > 0:
+        return "test_error"
+    if failed > 0:
+        return "test_failure"
+    if total == 0:
+        return "empty_suite"
+    return "passed"
 
 
 def _coerce_text(value: object) -> str:
@@ -254,7 +309,8 @@ def run_tests_sandboxed(
         stderr = _coerce_text(exc.stderr)
     duration = time.monotonic() - start
 
-    if junit.exists():
+    junit_report_present = junit.exists()
+    if junit_report_present:
         passed, failed, errors, skipped, total, failed_names = _parse_junit(junit)
         junit.unlink(missing_ok=True)
     else:
@@ -263,6 +319,15 @@ def run_tests_sandboxed(
         failed = 0
         errors = 1
         failed_names = ["<no-junit-report>"]
+
+    outcome_class = _classify_outcome(
+        timed_out=timed_out,
+        junit_report_present=junit_report_present,
+        returncode=returncode,
+        failed=failed,
+        errors=errors,
+        total=total,
+    )
 
     return TestResult(
         returncode=returncode,
@@ -276,4 +341,6 @@ def run_tests_sandboxed(
         stdout=_truncate(stdout, output_limit_bytes),
         stderr=_truncate(stderr, output_limit_bytes),
         duration_s=duration,
+        outcome_class=outcome_class,
+        junit_report_present=junit_report_present,
     )

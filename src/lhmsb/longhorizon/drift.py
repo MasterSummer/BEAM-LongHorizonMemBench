@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Literal
 
 from lhmsb.longhorizon.interventions import (
@@ -15,6 +15,12 @@ MatchedDecayLabel = Literal[
     "behavioral_improvement",
     "behavior_changed",
     "no_decay",
+]
+DriftMode = Literal[
+    "constraint_loss",
+    "plan_deviation",
+    "stale_state",
+    "local_over_global",
 ]
 
 
@@ -67,6 +73,47 @@ class LongHorizonDriftResult:
 
 
 @dataclass(frozen=True)
+class DriftModeEvidence:
+    """Auditable predicate and checker evidence for one drift phenotype."""
+
+    mode: DriftMode
+    predicate_state_ids: tuple[str, ...]
+    checker_flags: tuple[str, ...]
+
+    @property
+    def evidence_sources(self) -> tuple[str, ...]:
+        sources: list[str] = []
+        if self.predicate_state_ids:
+            sources.append("direct_state_predicate")
+        if self.checker_flags:
+            sources.append("checker_flag")
+        return tuple(sources)
+
+    def to_dict(self) -> dict[str, object]:
+        return {**asdict(self), "evidence_sources": self.evidence_sources}
+
+
+@dataclass(frozen=True)
+class TraceableDriftDiagnosis:
+    """Drift result with a machine-checkable explanation for every flag."""
+
+    result: LongHorizonDriftResult
+    mode_evidence: tuple[DriftModeEvidence, ...]
+
+    @property
+    def traceable(self) -> bool:
+        return all(item.evidence_sources for item in self.mode_evidence)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "flags": list(self.result.flags),
+            "has_drift": self.result.has_drift,
+            "traceable": self.traceable,
+            "mode_evidence": [item.to_dict() for item in self.mode_evidence],
+        }
+
+
+@dataclass(frozen=True)
 class MatchedOutcome:
     """One early or late outcome belonging to a matched opportunity group."""
 
@@ -98,14 +145,20 @@ def classify_long_horizon_drift(
     evidence: DriftEvidence,
 ) -> LongHorizonDriftResult:
     """Resolve drift from state predicates plus checker-emitted evidence."""
+    return diagnose_long_horizon_drift(evidence).result
+
+
+def diagnose_long_horizon_drift(
+    evidence: DriftEvidence,
+) -> TraceableDriftDiagnosis:
+    """Resolve drift and retain the exact predicate/flag evidence behind it."""
     violated = set(evidence.outcome.violated_state_ids)
     action_expressed = set(evidence.action_expressed_state_ids).union(
         evidence.used_state_ids
     )
     flags = set(evidence.outcome.drift_flags)
-    constraint_loss = bool(
-        violated.intersection(evidence.active_constraint_ids)
-    ) or _has_flag(
+    constraint_states = violated.intersection(evidence.active_constraint_ids)
+    constraint_flags = _matching_flags(
         flags,
         (
             "constraint-influence-lost",
@@ -115,16 +168,15 @@ def classify_long_horizon_drift(
             "constraint_violation",
         ),
     )
-    stale_state = bool(
-        action_expressed.intersection(evidence.stale_state_ids)
-    ) or _has_flag(
+    stale_states = action_expressed.intersection(evidence.stale_state_ids)
+    stale_flags = _matching_flags(
         flags,
         ("stale-state", "stale_state", "stale-fact", "stale_fact"),
     )
-    plan_deviation = bool(
-        violated.intersection(evidence.current_plan_state_ids)
-        or action_expressed.intersection(evidence.future_state_ids)
-    ) or _has_flag(
+    plan_states = violated.intersection(evidence.current_plan_state_ids).union(
+        action_expressed.intersection(evidence.future_state_ids)
+    )
+    plan_flags = _matching_flags(
         flags,
         (
             "goal-drift",
@@ -135,10 +187,12 @@ def classify_long_horizon_drift(
             "future_state_adoption",
         ),
     )
-    local_over_global = bool(
-        evidence.selected_local_state_ids
-        and violated.intersection(evidence.global_state_ids)
-    ) or _has_flag(
+    authority_states = (
+        violated.intersection(evidence.global_state_ids)
+        if evidence.selected_local_state_ids
+        else set()
+    )
+    authority_flags = _matching_flags(
         flags,
         (
             "local-subgoal-overwrites-global-goal",
@@ -148,11 +202,29 @@ def classify_long_horizon_drift(
             "scope-overreach",
         ),
     )
-    return LongHorizonDriftResult(
-        constraint_loss=constraint_loss,
-        plan_deviation=plan_deviation,
-        stale_state=stale_state,
-        local_over_global=local_over_global,
+    result = LongHorizonDriftResult(
+        constraint_loss=bool(constraint_states or constraint_flags),
+        plan_deviation=bool(plan_states or plan_flags),
+        stale_state=bool(stale_states or stale_flags),
+        local_over_global=bool(authority_states or authority_flags),
+    )
+    evidence_by_mode: dict[DriftMode, tuple[set[str], tuple[str, ...]]] = {
+        "constraint_loss": (constraint_states, constraint_flags),
+        "plan_deviation": (plan_states, plan_flags),
+        "stale_state": (stale_states, stale_flags),
+        "local_over_global": (authority_states, authority_flags),
+    }
+    return TraceableDriftDiagnosis(
+        result=result,
+        mode_evidence=tuple(
+            DriftModeEvidence(
+                mode=mode,
+                predicate_state_ids=tuple(sorted(state_ids)),
+                checker_flags=checker_flags,
+            )
+            for mode, (state_ids, checker_flags) in evidence_by_mode.items()
+            if getattr(result, mode)
+        ),
     )
 
 
@@ -194,20 +266,32 @@ def classify_matched_decay(
     )
 
 
-def _has_flag(flags: set[str], prefixes: tuple[str, ...]) -> bool:
-    return any(
-        flag == prefix or flag.startswith(f"{prefix}:")
-        for flag in flags
-        for prefix in prefixes
+def _matching_flags(
+    flags: set[str],
+    prefixes: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            flag
+            for flag in flags
+            if any(
+                flag == prefix or flag.startswith(f"{prefix}:")
+                for prefix in prefixes
+            )
+        )
     )
 
 
 __all__ = [
     "DriftEvidence",
+    "DriftMode",
+    "DriftModeEvidence",
     "LongHorizonDriftResult",
     "MatchedDecayLabel",
     "MatchedDecayResult",
     "MatchedOutcome",
+    "TraceableDriftDiagnosis",
     "classify_long_horizon_drift",
     "classify_matched_decay",
+    "diagnose_long_horizon_drift",
 ]

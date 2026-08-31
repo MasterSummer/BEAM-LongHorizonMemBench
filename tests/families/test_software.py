@@ -212,6 +212,9 @@ def test_sandbox_runs_passing_suite() -> None:
         assert isinstance(result, TestResult)
         assert result.all_passed
         assert result.passed == 1 and result.failed == 0 and result.total == 1
+        assert result.outcome_class == "passed"
+        assert result.infrastructure_valid
+        assert result.junit_report_present
 
 
 def test_sandbox_reports_failures() -> None:
@@ -227,6 +230,61 @@ def test_sandbox_reports_failures() -> None:
         assert not result.all_passed
         assert result.failed == 1
         assert "test_status" in result.failed_tests
+        assert result.outcome_class == "test_failure"
+        assert result.infrastructure_valid
+        assert result.junit_report_present
+
+
+def test_sandbox_classifies_timeout_as_infrastructure_failure() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        (work / "test_timeout.py").write_text(
+            "import time\n\ntime.sleep(10)\n\ndef test_unreachable():\n    assert True\n",
+            encoding="utf-8",
+        )
+
+        result = run_tests_sandboxed(
+            str(work),
+            ["test_timeout.py"],
+            time_limit_s=1,
+        )
+
+        assert result.timed_out
+        assert result.outcome_class == "timeout"
+        assert not result.infrastructure_valid
+        assert not result.junit_report_present
+
+
+def test_sandbox_classifies_hard_signal_kill_as_infrastructure_failure() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        (work / "test_signal.py").write_text(
+            "import os\nimport signal\n\nos.kill(os.getpid(), signal.SIGKILL)\n",
+            encoding="utf-8",
+        )
+
+        result = run_tests_sandboxed(str(work), ["test_signal.py"])
+
+        assert result.returncode < 0
+        assert result.outcome_class == "signal_kill"
+        assert not result.infrastructure_valid
+        assert not result.junit_report_present
+
+
+def test_sandbox_classifies_process_crash_as_infrastructure_failure() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        (work / "test_crash.py").write_text(
+            "import os\n\nos._exit(3)\n",
+            encoding="utf-8",
+        )
+
+        result = run_tests_sandboxed(str(work), ["test_crash.py"])
+
+        assert result.returncode == 3
+        assert result.outcome_class == "process_crash"
+        assert not result.infrastructure_valid
+        assert not result.junit_report_present
 
 
 def test_sandbox_is_deterministic() -> None:
