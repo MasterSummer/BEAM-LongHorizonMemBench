@@ -1032,6 +1032,19 @@ class SystemsQualificationConfig:
             ),
             shengsuanyun_gpt_policy,
         )
+        boyuerich_deepseek_policy = (
+            "deepseek_v4_pro_boyuerich",
+            "deepseek",
+            "deepseek-v4-pro",
+            "boyuerich_deepseek_v4_pro",
+            "BOYUERICH_API_KEY",
+            "https://apicz.boyuerichdata.com/v1",
+            "BOYUERICH_BASE_URL",
+            "chat_completions",
+            180.0,
+            2,
+            1,
+        )
         actual_policies = tuple(_policy_identity(item) for item in self.policy_profiles)
         # Historical Zen runs retain their original identities.  The current
         # Historical Zen/direct runs retain their original identities. Current
@@ -1042,6 +1055,7 @@ class SystemsQualificationConfig:
             (expected_policies[2],),
             (shengsuanyun_gpt_policy,),
             shengsuanyun_three_policy,
+            (boyuerich_deepseek_policy,),
         }:
             raise ValueError("schema-v2 continuation policy identities are not canonical")
         expected_writer = (
