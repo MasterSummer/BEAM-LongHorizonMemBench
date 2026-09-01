@@ -2,10 +2,10 @@
 # Submit after the matrix plan has been frozen:
 #   sbatch --array=0-19%1 --export=ALL,LHMSB_ONLINE_RUN_NAME=<name> \
 #     deploy/slurm/online_longhorizon_array.sbatch
-# `%1` matches a host dedicated to two 4090s; increase only when independent
-# two-GPU allocations are genuinely available.
+# `%1` keeps service state isolated. One 24-GiB 4090 hosts both small TEI
+# models; two-GPU allocations still retain split placement.
 #SBATCH --job-name=memhorizon-online
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --time=3-00:00:00

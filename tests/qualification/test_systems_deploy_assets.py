@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -101,3 +102,33 @@ def test_native_services_are_loopback_only() -> None:
 def test_historical_container_assets_are_not_current_entrypoints() -> None:
     assert not (ROOT / "deploy" / "compose.systems.yaml").exists()
     assert not (ROOT / "scripts" / "verify_system_images.sh").exists()
+
+
+def test_single_allocated_gpu_is_shared_by_embedding_and_reranker() -> None:
+    common = ROOT / "scripts" / "lib" / "systems_common.sh"
+    command = (
+        f'source "{common}"; '
+        "unset SLURM_JOB_GPUS LHMSB_EMBEDDING_GPU_ID LHMSB_RERANKER_GPU_ID; "
+        "export CUDA_VISIBLE_DEVICES=7; systems_select_devices; "
+        'printf "%s|%s|%s\\n" "$LHMSB_EMBEDDING_GPU_ID" '
+        '"$LHMSB_RERANKER_GPU_ID" "$LHMSB_SHARED_GPU"'
+    )
+    completed = subprocess.run(
+        ["bash", "-c", command], check=True, capture_output=True, text=True
+    )
+    assert completed.stdout.strip() == "7|7|1"
+
+
+def test_two_allocated_gpus_retain_split_service_placement() -> None:
+    common = ROOT / "scripts" / "lib" / "systems_common.sh"
+    command = (
+        f'source "{common}"; '
+        "unset SLURM_JOB_GPUS LHMSB_EMBEDDING_GPU_ID LHMSB_RERANKER_GPU_ID; "
+        "export CUDA_VISIBLE_DEVICES=3,5; systems_select_devices; "
+        'printf "%s|%s|%s\\n" "$LHMSB_EMBEDDING_GPU_ID" '
+        '"$LHMSB_RERANKER_GPU_ID" "$LHMSB_SHARED_GPU"'
+    )
+    completed = subprocess.run(
+        ["bash", "-c", command], check=True, capture_output=True, text=True
+    )
+    assert completed.stdout.strip() == "3|5|0"

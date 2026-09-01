@@ -406,11 +406,25 @@ def aggregate_online_matrix(run_dir: Path) -> dict[str, object]:
         if isinstance(record, dict) and record.get("code_dirty") is not False
     ]
     expected_commit = str(manifest.get("repository", {}).get("code_commit", ""))
-    wrong_commit_results = [
-        record
-        for record in repository_records
-        if isinstance(record, dict) and str(record.get("code_commit", "")) != expected_commit
-    ]
+    raw_overrides = manifest.get("execution_overrides", {})
+    execution_overrides = raw_overrides if isinstance(raw_overrides, dict) else {}
+    raw_commit_overrides = execution_overrides.get("result_repository_commits", {})
+    commit_overrides = (
+        raw_commit_overrides if isinstance(raw_commit_overrides, dict) else {}
+    )
+    wrong_commit_results = []
+    for index, record in enumerate(repository_records):
+        if not isinstance(record, dict):
+            continue
+        result_record = result_records[index] if index < len(result_records) else {}
+        result_id = (
+            str(result_record.get("result_id", ""))
+            if isinstance(result_record, dict)
+            else ""
+        )
+        required_commit = str(commit_overrides.get(result_id, expected_commit))
+        if str(record.get("code_commit", "")) != required_commit:
+            wrong_commit_results.append(record)
     validation = {
         "ok": (
             not missing

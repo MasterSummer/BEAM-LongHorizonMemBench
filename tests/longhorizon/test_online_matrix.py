@@ -171,6 +171,20 @@ def test_matrix_aggregation_requires_all_cells_but_not_positive_outcomes(
         encoding="utf-8",
     )
 
+    # Explicit per-result provenance allows clean results from an earlier
+    # frozen execution commit to remain reusable.
+    legacy_result_id = expected_ids[0]
+    legacy_path = results_root / "task-0000" / f"{legacy_result_id}.json"
+    legacy_payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+    legacy_payload["repository"]["code_commit"] = "legacy-fixed"
+    legacy_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    matrix_path = tmp_path / "MATRIX.json"
+    matrix_payload = json.loads(matrix_path.read_text(encoding="utf-8"))
+    matrix_payload["execution_overrides"] = {
+        "result_repository_commits": {legacy_result_id: "legacy-fixed"}
+    }
+    matrix_path.write_text(json.dumps(matrix_payload), encoding="utf-8")
+
     validation = aggregate_online_matrix(tmp_path)
 
     assert validation["ok"]

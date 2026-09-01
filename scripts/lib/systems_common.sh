@@ -158,23 +158,30 @@ systems_select_devices() {
   if [[ -n "${allocated}" ]]; then
     allocated="${allocated//gpu:/}"
     IFS=',' read -r -a devices <<<"${allocated}"
-    if ((${#devices[@]} < 2)); then
-      printf 'at least two allocated GPU devices are required\n' >&2
+    if ((${#devices[@]} < 1)); then
+      printf 'at least one allocated GPU device is required\n' >&2
       return 1
     fi
     embedding="${devices[0]//[[:space:]]/}"
-    reranker="${devices[1]//[[:space:]]/}"
+    # One allocated GPU safely hosts both small TEI models. With two or more
+    # devices, retain the historical split placement.
+    if ((${#devices[@]} == 1)); then
+      reranker="${embedding}"
+    else
+      reranker="${devices[1]//[[:space:]]/}"
+    fi
   fi
   if [[ -z "${embedding}" || -z "${reranker}" ]]; then
     printf 'set allocated GPUs or both native service GPU IDs\n' >&2
     return 1
   fi
-  [[ "${embedding}" != "${reranker}" ]] || {
-    printf 'embedding and reranker devices must be distinct\n' >&2
-    return 1
-  }
   export LHMSB_EMBEDDING_GPU_ID="${embedding}"
   export LHMSB_RERANKER_GPU_ID="${reranker}"
+  if [[ "${embedding}" == "${reranker}" ]]; then
+    export LHMSB_SHARED_GPU=1
+  else
+    export LHMSB_SHARED_GPU=0
+  fi
 }
 
 # Keep the historical name as a compatibility entry point for older Slurm
@@ -278,6 +285,7 @@ for device in selected:
 payload = {
     "schema_version": 1,
     "selected_devices": {"embedding": selected[0], "reranker": selected[1]},
+    "shared_device": selected[0] == selected[1],
     "gpu_policy": "a100" if require_a100 else "any",
     "require_a100": require_a100,
     "gpus": rows,
